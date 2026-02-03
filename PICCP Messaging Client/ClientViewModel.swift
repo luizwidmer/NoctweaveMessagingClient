@@ -1452,7 +1452,7 @@ final class ClientViewModel: ObservableObject {
             return false
         }
         return await withCheckedContinuation { continuation in
-            context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Unlock Lattice") { success, _ in
+            context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Unlock Noctyra") { success, _ in
                 continuation.resume(returning: success)
             }
         }

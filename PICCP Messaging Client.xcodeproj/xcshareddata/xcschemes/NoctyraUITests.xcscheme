@@ -15,7 +15,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "2566835C2F00A4F0006D96F3"
-               BuildableName = "Lattice.app"
+               BuildableName = "Noctyra.app"
                BlueprintName = "PICCP Messaging Client"
                ReferencedContainer = "container:PICCP Messaging Client.xcodeproj">
             </BuildableReference>
@@ -29,8 +29,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "9E5F1C5B2C0A4C009A000003"
-               BuildableName = "LatticeUITests.xctest"
-               BlueprintName = "LatticeUITests"
+               BuildableName = "NoctyraUITests.xctest"
+               BlueprintName = "NoctyraUITests"
                ReferencedContainer = "container:PICCP Messaging Client.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -47,8 +47,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "9E5F1C5B2C0A4C009A000003"
-               BuildableName = "LatticeUITests.xctest"
-               BlueprintName = "LatticeUITests"
+               BuildableName = "NoctyraUITests.xctest"
+               BlueprintName = "NoctyraUITests"
                ReferencedContainer = "container:PICCP Messaging Client.xcodeproj">
             </BuildableReference>
          </TestableReference>
@@ -57,7 +57,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "2566835C2F00A4F0006D96F3"
-            BuildableName = "Lattice.app"
+            BuildableName = "Noctyra.app"
             BlueprintName = "PICCP Messaging Client"
             ReferencedContainer = "container:PICCP Messaging Client.xcodeproj">
          </BuildableReference>
@@ -78,7 +78,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "2566835C2F00A4F0006D96F3"
-            BuildableName = "Lattice.app"
+            BuildableName = "Noctyra.app"
             BlueprintName = "PICCP Messaging Client"
             ReferencedContainer = "container:PICCP Messaging Client.xcodeproj">
          </BuildableReference>
@@ -95,7 +95,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "2566835C2F00A4F0006D96F3"
-            BuildableName = "Lattice.app"
+            BuildableName = "Noctyra.app"
             BlueprintName = "PICCP Messaging Client"
             ReferencedContainer = "container:PICCP Messaging Client.xcodeproj">
          </BuildableReference>

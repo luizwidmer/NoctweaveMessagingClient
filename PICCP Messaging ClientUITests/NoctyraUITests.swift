@@ -1,21 +1,32 @@
 import XCTest
 
-final class LatticeUITests_iOS: XCTestCase {
+final class NoctyraUITests: XCTestCase {
     private var app: XCUIApplication!
 
     override func setUp() {
         super.setUp()
         continueAfterFailure = false
         app = XCUIApplication()
+        app.terminate()
         app.launchArguments.append("UI_TESTING")
         app.launch()
     }
 
+    override func tearDown() {
+        app.terminate()
+        super.tearDown()
+    }
+
     func testSecureTypingEnabledByDefault() {
         openSettings()
-        let element = findSecureTypingElement()
-        XCTAssertTrue(element.waitForExistence(timeout: 2))
-        assertToggleOn(element)
+        let toggle = app.switches["secure-typing-toggle"]
+        if toggle.waitForExistence(timeout: 2) {
+            assertToggleOn(toggle)
+            return
+        }
+        let checkbox = app.checkBoxes["secure-typing-toggle"]
+        XCTAssertTrue(checkbox.waitForExistence(timeout: 2))
+        assertToggleOn(checkbox)
     }
 
     func testRevealToggleShowsMessage() {
@@ -44,14 +55,6 @@ final class LatticeUITests_iOS: XCTestCase {
             settingsButton.tap()
             return
         }
-        let back = app.navigationBars.buttons.firstMatch
-        if back.exists {
-            back.tap()
-        }
-        if settingsButton.waitForExistence(timeout: 1) {
-            settingsButton.tap()
-            return
-        }
         let fallback = app.staticTexts["Settings"]
         XCTAssertTrue(fallback.waitForExistence(timeout: 1))
         fallback.tap()
@@ -63,14 +66,6 @@ final class LatticeUITests_iOS: XCTestCase {
             contactButton.tap()
             return
         }
-        let back = app.navigationBars.buttons.firstMatch
-        if back.exists {
-            back.tap()
-        }
-        if contactButton.waitForExistence(timeout: 1) {
-            contactButton.tap()
-            return
-        }
         let fallback = app.staticTexts["UITest Contact"]
         XCTAssertTrue(fallback.waitForExistence(timeout: 1))
         fallback.tap()
@@ -78,38 +73,12 @@ final class LatticeUITests_iOS: XCTestCase {
 
     private func assertToggleOn(_ element: XCUIElement) {
         let value = element.value as? String
-        if value == "1" || value == "true" || value == "On" {
+        if value == "1" || value == "true" {
             return
         }
         if let numeric = element.value as? Int, numeric == 1 {
             return
         }
         XCTAssertTrue(element.isSelected)
-    }
-
-    private func findSecureTypingElement() -> XCUIElement {
-        for _ in 0..<3 {
-            let candidates = [
-                app.switches["secure-typing-toggle"],
-                app.checkBoxes["secure-typing-toggle"],
-                app.cells["secure-typing-toggle"],
-                app.otherElements["secure-typing-toggle"]
-            ]
-            for element in candidates where element.exists {
-                return element
-            }
-            scrollSettings()
-        }
-        return app.otherElements["secure-typing-toggle"]
-    }
-
-    private func scrollSettings() {
-        if app.tables.firstMatch.exists {
-            app.tables.firstMatch.swipeUp()
-        } else if app.scrollViews.firstMatch.exists {
-            app.scrollViews.firstMatch.swipeUp()
-        } else {
-            app.swipeUp()
-        }
     }
 }

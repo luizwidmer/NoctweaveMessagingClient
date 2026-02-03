@@ -13,7 +13,7 @@ struct StorageChoiceView: View {
                 Text("Choose Storage Protection")
                     .font(.system(size: 22, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white)
-                Text("Pick how Lattice stores local data and attachments. You can change this later in Settings.")
+                Text("Pick how Noctyra stores local data and attachments. You can change this later in Settings.")
                     .font(.callout)
                     .foregroundStyle(.white.opacity(0.7))
                     .multilineTextAlignment(.center)

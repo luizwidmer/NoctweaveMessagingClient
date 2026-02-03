@@ -158,7 +158,7 @@ struct ContentView: View {
         #if os(macOS)
         .navigationTitle("")
         #else
-        .navigationTitle("Lattice")
+        .navigationTitle("Noctyra")
         #endif
         .scrollContentBackground(.hidden)
         .listRowBackground(Color.clear)
@@ -212,7 +212,7 @@ private struct IntroOverlay: View {
 
     var body: some View {
         VStack {
-            WelcomeContent(title: "Welcome to Lattice", subtitle: "Post-quantum chat", imageSize: 300)
+            WelcomeContent(title: "Welcome to Noctyra", subtitle: "Post-quantum chat", imageSize: 300)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
@@ -224,7 +224,7 @@ private struct IntroOverlay: View {
 private struct SidebarHeader: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Lattice")
+            Text("Noctyra")
                 .font(.system(size: 20, weight: .semibold, design: .rounded))
             Text("Post-quantum chat")
                 .font(.caption)
@@ -458,7 +458,7 @@ private struct ConversationView: View {
                         .font(.system(size: 14, weight: .semibold))
                 }
                 .accessibilityLabel("Capture Photo")
-                .accessibilityHint("Enable in Settings > Privacy to capture within Lattice.")
+                .accessibilityHint("Enable in Settings > Privacy to capture within Noctyra.")
                 .glassCircleButton(diameter: 34)
                 .hoverLift()
                 PhotosPicker(selection: $selectedPhoto, matching: .images) {
@@ -1952,7 +1952,7 @@ private struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Toggle("Use in-app camera capture", isOn: $privacySettings.useSecureCameraCapture)
-            Text("Captures images inside Lattice without saving to Photos. This adds a camera button in chats. The OS camera stack can still access raw frames.")
+            Text("Captures images inside Noctyra without saving to Photos. This adds a camera button in chats. The OS camera stack can still access raw frames.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("If disabled, the camera button will use the system camera which may store photos in your library.")
