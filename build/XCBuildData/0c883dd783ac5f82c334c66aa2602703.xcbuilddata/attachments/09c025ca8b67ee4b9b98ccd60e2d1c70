@@ -1,0 +1,4 @@
+module PICCPCore {
+header "PICCPCore-Swift.h"
+export *
+}

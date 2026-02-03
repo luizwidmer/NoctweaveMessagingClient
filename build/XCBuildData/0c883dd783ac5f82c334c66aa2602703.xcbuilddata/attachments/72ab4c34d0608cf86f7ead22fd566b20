@@ -1,0 +1,151 @@
+{
+  "" : {
+    "const-values" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/PICCPCore-primary.swiftconstvalues",
+    "dependencies" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/PICCPCore-primary.d",
+    "diagnostics" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/PICCPCore-primary.dia",
+    "emit-module-dependencies" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/PICCPCore-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/PICCPCore-primary-emit-module.dia",
+    "pch" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/PICCPCore-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/PICCPCore-primary.swiftdeps"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/Attachment.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Attachment.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Attachment.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Attachment.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/ClientState.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ClientState.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ClientState.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ClientState.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/ClientStateStore.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ClientStateStore.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ClientStateStore.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ClientStateStore.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/Coding.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Coding.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Coding.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Coding.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/Contact.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Contact.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Contact.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Contact.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/ContactOffer.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ContactOffer.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ContactOffer.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ContactOffer.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/ContactShare.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ContactShare.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ContactShare.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ContactShare.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/Conversation.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Conversation.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Conversation.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Conversation.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/Crypto.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Crypto.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Crypto.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Crypto.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/Envelope.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Envelope.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Envelope.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Envelope.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/Identity.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Identity.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Identity.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Identity.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/IdentityReset.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/IdentityReset.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/IdentityReset.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/IdentityReset.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/InboxAddress.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/InboxAddress.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/InboxAddress.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/InboxAddress.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/InsecurePairing.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/InsecurePairing.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/InsecurePairing.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/InsecurePairing.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/Message.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Message.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Message.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Message.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/MessageEngine.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/MessageEngine.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/MessageEngine.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/MessageEngine.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/Prekeys.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Prekeys.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Prekeys.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Prekeys.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/QRCodeTransfer.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/QRCodeTransfer.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/QRCodeTransfer.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/QRCodeTransfer.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/Ratchet.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Ratchet.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Ratchet.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/Ratchet.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/RelayClient.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayClient.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayClient.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayClient.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/RelayNetwork.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayNetwork.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayNetwork.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayNetwork.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/RelayProtocol.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayProtocol.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayProtocol.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayProtocol.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/RelayServer.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayServer.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayServer.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayServer.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/RelayStore.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayStore.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayStore.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/RelayStore.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/ResendRequest.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ResendRequest.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ResendRequest.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ResendRequest.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/ServerDiscovery.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ServerDiscovery.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ServerDiscovery.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/ServerDiscovery.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/SessionRecovery.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/SessionRecovery.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/SessionRecovery.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/SessionRecovery.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/Sources/PICCPCore/SessionReset.swift" : {
+    "index-unit-output-path" : "/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/SessionReset.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/SessionReset.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCPCore/build/PICCPCore.build/Release/PICCPCore.build/Objects-normal/arm64/SessionReset.o"
+  }
+}

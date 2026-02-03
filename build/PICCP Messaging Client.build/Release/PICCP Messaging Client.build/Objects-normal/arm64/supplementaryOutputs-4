@@ -1,0 +1,12 @@
+{
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/AppLockView.swift" : {
+    "abi-baseline-json" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/Lattice.abi.json",
+    "const-values" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP Messaging Client-primary.swiftconstvalues",
+    "dependencies" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP Messaging Client-primary.d",
+    "diagnostics" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP Messaging Client-primary.dia",
+    "objc-header" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/Lattice-Swift.h",
+    "swiftdoc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/Lattice.swiftdoc",
+    "swiftmodule" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/Lattice.swiftmodule",
+    "swiftsourceinfo" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/Lattice.swiftsourceinfo"
+  }
+}

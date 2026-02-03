@@ -1,0 +1,101 @@
+{
+  "" : {
+    "const-values" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP Messaging Client-primary.swiftconstvalues",
+    "dependencies" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP Messaging Client-primary.d",
+    "diagnostics" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP Messaging Client-primary.dia",
+    "emit-module-dependencies" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP Messaging Client-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP Messaging Client-primary-emit-module.dia",
+    "pch" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP Messaging Client-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP Messaging Client-primary.swiftdeps"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/AppLockView.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/AppLockView.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/AppLockView.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/AppLockView.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/AttachmentStore.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/AttachmentStore.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/AttachmentStore.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/AttachmentStore.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/ClientViewModel.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ClientViewModel.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ClientViewModel.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ClientViewModel.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/ContactShareDocument.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ContactShareDocument.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ContactShareDocument.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ContactShareDocument.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/ContentView.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ContentView.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ContentView.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ContentView.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/GlassStyles.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/GlassStyles.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/GlassStyles.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/GlassStyles.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/IdentityBurnView.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/IdentityBurnView.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/IdentityBurnView.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/IdentityBurnView.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/NotificationManager.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/NotificationManager.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/NotificationManager.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/NotificationManager.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/PICCP_Messaging_ClientApp.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP_Messaging_ClientApp.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP_Messaging_ClientApp.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PICCP_Messaging_ClientApp.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/PinSetupView.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PinSetupView.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PinSetupView.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/PinSetupView.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/QRCodeScannerView.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/QRCodeScannerView.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/QRCodeScannerView.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/QRCodeScannerView.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/QRCodeView.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/QRCodeView.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/QRCodeView.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/QRCodeView.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/RelayEditorView.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/RelayEditorView.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/RelayEditorView.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/RelayEditorView.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/SecureCameraCaptureView.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/SecureCameraCaptureView.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/SecureCameraCaptureView.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/SecureCameraCaptureView.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/ShareSheet.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ShareSheet.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ShareSheet.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/ShareSheet.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/StorageChoiceView.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/StorageChoiceView.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/StorageChoiceView.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/StorageChoiceView.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/PICCP Messaging Client/SystemCameraPickerView.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/SystemCameraPickerView.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/SystemCameraPickerView.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/SystemCameraPickerView.o"
+  },
+  "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/DerivedSources/GeneratedAssetSymbols.swift" : {
+    "index-unit-output-path" : "/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/GeneratedAssetSymbols.o",
+    "llvm-bc" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/GeneratedAssetSymbols.bc",
+    "object" : "/Users/luiz/Desktop/Projects/PICCP Project/PICCP Messaging Client/build/PICCP Messaging Client.build/Release/PICCP Messaging Client.build/Objects-normal/arm64/GeneratedAssetSymbols.o"
+  }
+}
