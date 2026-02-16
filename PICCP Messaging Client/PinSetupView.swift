@@ -22,7 +22,7 @@ enum PinSetupKind: String, Identifiable {
     var subtitle: String {
         switch self {
         case .unlock:
-            return "Enter a 6-digit PIN to unlock Noctyra."
+            return "Enter a 6-digit PIN to unlock the app."
         case .burnIdentity:
             return "This PIN burns your identity immediately from the lock screen."
         case .clearChats:

@@ -11,6 +11,10 @@ import CoreGraphics
 final class ScreenProtectionMonitor: ObservableObject {
     @Published private(set) var isCaptureActive = false
     @Published private(set) var isSensitiveHidden = false
+    #if os(macOS)
+    @Published private(set) var isAppInFocus = true
+    private var hideWhenUnfocusedEnabled = true
+    #endif
 
     private var observers: [NSObjectProtocol] = []
 
@@ -33,6 +37,18 @@ final class ScreenProtectionMonitor: ObservableObject {
         #endif
     }
 
+    #if os(macOS)
+    func setHideWhenUnfocusedEnabled(_ enabled: Bool) {
+        hideWhenUnfocusedEnabled = enabled
+        updateHiddenStatus()
+    }
+
+    func setAppInFocus(_ focused: Bool) {
+        isAppInFocus = focused
+        updateHiddenStatus()
+    }
+    #endif
+
     #if os(iOS)
     private func setupObservers() {
         let center = NotificationCenter.default
@@ -41,22 +57,40 @@ final class ScreenProtectionMonitor: ObservableObject {
                 self?.updateCaptureStatus()
             }
         )
+        // iOS 26+ deprecates `UIScreen.didConnect/Disconnect` and `UIScreen.screens`.
+        // Track screen topology via scene lifecycle notifications instead.
+        let sceneNotifications: [NSNotification.Name] = [
+            UIScene.willConnectNotification,
+            UIScene.didDisconnectNotification,
+            UIScene.didActivateNotification,
+            UIScene.willDeactivateNotification,
+            UIScene.willEnterForegroundNotification,
+            UIScene.didEnterBackgroundNotification
+        ]
+        for name in sceneNotifications {
+            observers.append(
+                center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    self?.updateCaptureStatus()
+                }
+            )
+        }
         observers.append(
-            center.addObserver(forName: UIScreen.didConnectNotification, object: nil, queue: .main) { [weak self] _ in
-                self?.updateCaptureStatus()
-            }
-        )
-        observers.append(
-            center.addObserver(forName: UIScreen.didDisconnectNotification, object: nil, queue: .main) { [weak self] _ in
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
                 self?.updateCaptureStatus()
             }
         )
     }
 
     private func updateCaptureStatus() {
-        let isCaptured = UIScreen.main.isCaptured
-        let isMirroring = UIScreen.screens.contains { $0.mirrored != nil } || UIScreen.screens.count > 1
-        isCaptureActive = isCaptured || isMirroring
+        // Prefer scene-derived screens to avoid deprecated UIScreen globals.
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let screens = scenes.map(\.screen)
+
+        let isCaptured = screens.contains { $0.isCaptured }
+        let uniqueScreenCount = Set(screens.map { ObjectIdentifier($0) }).count
+        let isExternalOrSecondaryScreen = uniqueScreenCount > 1
+
+        isCaptureActive = isCaptured || isExternalOrSecondaryScreen
         updateHiddenStatus()
     }
 
@@ -106,6 +140,10 @@ final class ScreenProtectionMonitor: ObservableObject {
     #endif
 
     private func updateHiddenStatus() {
+        #if os(macOS)
+        isSensitiveHidden = isCaptureActive || (hideWhenUnfocusedEnabled && !isAppInFocus)
+        #else
         isSensitiveHidden = isCaptureActive
+        #endif
     }
 }

@@ -26,7 +26,7 @@ struct AppLockView: View {
                 Image(systemName: "lock.shield.fill")
                     .font(.system(size: 44, weight: .semibold))
                     .foregroundStyle(.white)
-                Text("Noctyra Locked")
+                Text("App Locked")
                     .font(.system(size: 22, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white)
                 Text(lockSubtitle)

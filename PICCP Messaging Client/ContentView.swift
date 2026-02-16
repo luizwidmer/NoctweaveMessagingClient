@@ -1,6 +1,7 @@
 import SwiftUI
 import PICCPCore
 import UniformTypeIdentifiers
+import ImageIO
 #if os(iOS)
 import UIKit
 import PhotosUI
@@ -18,11 +19,50 @@ private enum SidebarItem: Hashable {
     case settings
 }
 
+#if os(iOS)
+private enum IOSMainTab: Hashable {
+    case chats
+    case contacts
+    case myCode
+    case relays
+    case identity
+
+    static func initialFromLaunchArguments() -> IOSMainTab {
+        let args = ProcessInfo.processInfo.arguments
+        if let raw = args.first(where: { $0.hasPrefix("START_TAB=") })?.split(separator: "=", maxSplits: 1).last {
+            switch raw.lowercased() {
+            case "chats":
+                return .chats
+            case "contacts":
+                return .contacts
+            case "mycode", "my_code", "code":
+                return .myCode
+            case "relays":
+                return .relays
+            case "identity":
+                return .identity
+            default:
+                break
+            }
+        }
+        return .chats
+    }
+}
+#endif
+
 struct ContentView: View {
     @StateObject private var model = ClientViewModel()
     @StateObject private var screenProtection = ScreenProtectionMonitor()
     @State private var selection: SidebarItem?
     @State private var showingAddContact = false
+#if os(iOS)
+    @State private var iosTab: IOSMainTab = IOSMainTab.initialFromLaunchArguments()
+#endif
+    #if os(macOS)
+    @StateObject private var windowController = AppWindowController()
+    @State private var sidebarWidth: CGFloat = 292
+    @State private var isResizerHovering = false
+    #endif
     @State private var showIntro = !ProcessInfo.processInfo.arguments.contains("UI_TESTING")
     @State private var introOpacity = 1.0
     @State private var introScale: CGFloat = 1.0
@@ -36,28 +76,24 @@ struct ContentView: View {
             #else
             GlassBackground()
             #endif
-            NavigationSplitView {
-                sidebarView
-            } detail: {
-                detailView
-            }
-            #if os(iOS)
-            .background(Color.clear)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .toolbarBackground(.hidden, for: .automatic)
-            #endif
+            rootContainer
             .clearNavigationContainerBackground()
             .hideWindowToolbarIfNeeded()
             .secureContainerIfAvailable()
             #if os(iOS)
             HostingBackgroundClearer()
                 .frame(width: 0, height: 0)
+            #else
+            EmptyView()
             #endif
             if showIntro {
                 IntroOverlay(opacity: introOpacity, scale: introScale)
                     .allowsHitTesting(false)
             }
-            if model.isLocked {
+            if model.requiresOnboarding {
+                FirstRunSetupView(model: model)
+            }
+            if model.isLocked && !model.requiresOnboarding {
                 AppLockView(model: model)
             }
             if model.requiresStorageChoice {
@@ -70,12 +106,46 @@ struct ContentView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        #if os(macOS)
+        // Capture the NSWindow for custom window controls.
+        .overlay {
+            WindowCaptureView(controller: windowController)
+                .frame(width: 0, height: 0)
+        }
+        // Custom traffic lights: floating controls, no titlebar.
+        .overlay(alignment: .topLeading) {
+            NoctyraTrafficLights()
+                .padding(.leading, 14)
+                .padding(.top, 12)
+        }
+        #endif
+        // Noir is meant to be a privacy-forward baseline even if the system is in Light mode.
+        .applyIf(model.state.appearance.theme == .noir) { view in
+            view.preferredColorScheme(.dark)
+        }
         .environment(\.appTheme, themeStyle)
         .tint(themeStyle.accent)
         .environmentObject(screenProtection)
+        #if os(macOS)
+        .environmentObject(windowController)
+        #endif
         .sheet(isPresented: $showingAddContact) {
             AddContactView(model: model)
         }
+        #if os(macOS)
+        .onChange(of: model.state.privacy.hideSensitiveWhenUnfocused) { _, newValue in
+            screenProtection.setHideWhenUnfocusedEnabled(newValue)
+        }
+        .onChange(of: model.state.privacy.macBlockWindowCapture) { _, newValue in
+            windowController.setBlockWindowCapture(newValue)
+        }
+        .onChange(of: windowController.isAppActive) { _, _ in
+            screenProtection.setAppInFocus(windowController.isActiveForControls)
+        }
+        .onChange(of: windowController.isWindowKey) { _, _ in
+            screenProtection.setAppInFocus(windowController.isActiveForControls)
+        }
+        #endif
         .task(id: showIntro) {
             guard showIntro else { return }
             introOpacity = 1
@@ -90,6 +160,11 @@ struct ContentView: View {
         }
         .onAppear {
             screenProtection.refresh()
+            #if os(macOS)
+            screenProtection.setHideWhenUnfocusedEnabled(model.state.privacy.hideSensitiveWhenUnfocused)
+            screenProtection.setAppInFocus(windowController.isActiveForControls)
+            windowController.setBlockWindowCapture(model.state.privacy.macBlockWindowCapture)
+            #endif
         }
         .onChange(of: scenePhase) { _, newValue in
             model.handleScenePhaseChange(newValue)
@@ -97,15 +172,124 @@ struct ContentView: View {
                 screenProtection.refresh()
             }
         }
+        #if os(macOS)
+        // Ensure our background extends into the titlebar region so the traffic lights appear to float.
+        .ignoresSafeArea(.container, edges: .top)
+        #endif
     }
 
+    @ViewBuilder
+    private var rootContainer: some View {
+        #if os(macOS)
+        HStack(spacing: 0) {
+            macSidebarView
+                .frame(minWidth: 240, idealWidth: sidebarWidth, maxWidth: 420)
+                .layoutPriority(1)
+
+            sidebarResizer
+
+            detailView
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        #else
+        // iPhone portrait was overflowing in the split-view layout. Use a simple, width-safe Tab UI on iOS.
+        TabView(selection: $iosTab) {
+            NavigationStack {
+                ChatsListView(model: model) {
+                    showingAddContact = true
+                }
+            }
+            .tag(IOSMainTab.chats)
+            .tabItem {
+                Label("Chats", systemImage: "message")
+            }
+
+            NavigationStack {
+                ContactBookTabView(model: model) {
+                    showingAddContact = true
+                }
+            }
+            .tag(IOSMainTab.contacts)
+            .tabItem {
+                Label("Contacts", systemImage: "book.closed")
+            }
+
+            NavigationStack {
+                MyCodeView(model: model)
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .tag(IOSMainTab.myCode)
+            .tabItem {
+                Label("My Code", systemImage: "qrcode")
+            }
+
+            NavigationStack {
+                RelaysView(model: model)
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .tag(IOSMainTab.relays)
+            .tabItem {
+                Label("Relays", systemImage: "antenna.radiowaves.left.and.right")
+            }
+
+            NavigationStack {
+                IdentityManagementView(model: model)
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .tag(IOSMainTab.identity)
+            .tabItem {
+                Label("Identity", systemImage: "person.badge.shield.checkmark")
+            }
+        }
+        #endif
+    }
+
+    #if os(macOS)
+    private var sidebarResizer: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.white.opacity(isResizerHovering ? 0.12 : 0.06))
+                .frame(width: 1)
+                .animation(.easeInOut(duration: 0.18), value: isResizerHovering)
+
+            Color.clear
+                .frame(width: 8)
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    isResizerHovering = hovering
+                    if hovering {
+                        NSCursor.resizeLeftRight.push()
+                    } else {
+                        NSCursor.pop()
+                    }
+                }
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            let newWidth = sidebarWidth + value.translation.width
+                            sidebarWidth = min(420, max(240, newWidth))
+                        }
+                )
+        }
+        .frame(maxHeight: .infinity)
+        .background(Color.clear)
+    }
+    #endif
+
     private var sidebarView: some View {
+        #if os(macOS)
+        macSidebarView
+        #else
+        iosSidebarView
+        #endif
+    }
+
+    private var iosSidebarView: some View {
         List(selection: $selection) {
-            #if os(macOS)
             SidebarHeader()
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
-            #endif
+                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
 
             Section("Contacts") {
                 if screenProtection.isSensitiveHidden {
@@ -119,7 +303,12 @@ struct ContentView: View {
                     ForEach(model.state.contacts) { contact in
                         NavigationLink(value: SidebarItem.contact(contact.id)) {
                             HStack {
-                                Label(contact.displayName, systemImage: "person.circle")
+                                Image(systemName: "person.circle")
+                                    .foregroundStyle(.secondary)
+                                Text(contact.displayName)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .layoutPriority(1)
                                 Spacer()
                                 if unreadCount(for: contact) > 0 {
                                     UnreadBadge(count: unreadCount(for: contact))
@@ -155,22 +344,78 @@ struct ContentView: View {
                 .accessibilityIdentifier("sidebar-settings")
             }
         }
-        #if os(macOS)
-        .navigationTitle("")
-        #else
-        .navigationTitle("Noctyra")
-        #endif
         .scrollContentBackground(.hidden)
         .listRowBackground(Color.clear)
         .glassBackgroundIfNeeded()
-        #if os(macOS)
-        .listSectionSeparator(.hidden)
-        .listRowSeparator(.hidden)
-        .listStyle(.sidebar)
-        .background(.ultraThinMaterial)
-        #endif
+        .navigationTitle("")
         .privacySensitive()
     }
+
+    #if os(macOS)
+    private var macSidebarView: some View {
+        List(selection: $selection) {
+            // Reserve space for the floating custom traffic lights.
+            Color.clear
+                .frame(height: 32)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+
+            SidebarHeader()
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+
+            Section("Contacts") {
+                if screenProtection.isSensitiveHidden {
+                    Label("Contacts hidden while capture is active", systemImage: "eye.slash")
+                        .foregroundStyle(.secondary)
+                } else {
+                    if model.state.contacts.isEmpty {
+                        Text("No contacts yet")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(model.state.contacts) { contact in
+                        HStack {
+                            Label(contact.displayName, systemImage: "person.circle")
+                            Spacer()
+                            if unreadCount(for: contact) > 0 {
+                                UnreadBadge(count: unreadCount(for: contact))
+                            }
+                        }
+                        .tag(SidebarItem.contact(contact.id))
+                        .contextMenu {
+                            Button("Remove Contact", role: .destructive) {
+                                Task { await model.removeContact(id: contact.id) }
+                            }
+                        }
+                        .accessibilityIdentifier("contact-\(contact.id.uuidString)")
+                    }
+                }
+            }
+
+            Section("Tools") {
+                Label("Contact Book", systemImage: "book.closed")
+                    .tag(SidebarItem.contactBook)
+                Label("My Code", systemImage: "qrcode")
+                    .tag(SidebarItem.myCode)
+                Label("Relays", systemImage: "antenna.radiowaves.left.and.right")
+                    .tag(SidebarItem.relays)
+                Label("Identity Management", systemImage: "person.badge.shield.checkmark")
+                    .tag(SidebarItem.identityManagement)
+                Label("Settings", systemImage: "gearshape")
+                    .tag(SidebarItem.settings)
+                    .accessibilityIdentifier("sidebar-settings")
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .listSectionSeparator(.hidden)
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+        .listStyle(.sidebar)
+        // No sidebar material on macOS: keep the titlebar region clean and consistent with the app background.
+        .background(Color.clear)
+        .privacySensitive()
+    }
+    #endif
 
     @ViewBuilder
     private var detailView: some View {
@@ -222,17 +467,169 @@ private struct IntroOverlay: View {
 }
 
 private struct SidebarHeader: View {
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var isDark: Bool { colorScheme == .dark }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Noctyra")
-                .font(.system(size: 20, weight: .semibold, design: .rounded))
-            Text("Post-quantum chat")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        HStack(alignment: .center, spacing: 10) {
+            Image("Rhombus")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 26, height: 26)
+                .shadow(color: theme.accent.opacity(0.35), radius: 10, x: 0, y: 6)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Noctyra")
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                Text("Post-quantum chat")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
         }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                // Theme-tinted glass backing so the header feels intentional (not "default material").
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.black.opacity(isDark ? 0.20 : 0.08))
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                theme.accent.opacity(isDark ? 0.18 : 0.12),
+                                theme.glowSecondary.opacity(isDark ? 0.10 : 0.06),
+                                Color.white.opacity(isDark ? 0.03 : 0.06)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .blendMode(.plusLighter)
+                    .opacity(isDark ? 0.75 : 0.55)
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(isDark ? 0.26 : 0.42),
+                            theme.accent.opacity(isDark ? 0.20 : 0.16),
+                            Color.white.opacity(isDark ? 0.08 : 0.10)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.9
+                )
+        )
         .padding(.vertical, 6)
     }
 }
+
+#if os(iOS)
+private struct ChatsListView: View {
+    @ObservedObject var model: ClientViewModel
+    let onAddContact: () -> Void
+    @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
+
+    var body: some View {
+        VStack(spacing: 0) {
+            NoctyraTopBar(
+                title: "Chats",
+                subtitle: "Post-quantum chat",
+                trailing: AnyView(
+                    Button {
+                        onAddContact()
+                        FeedbackGenerator.light()
+                    } label: {
+                        Image(systemName: "person.badge.plus")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .accessibilityLabel("Add Contact")
+                    .glassCircleButton(prominent: true, diameter: 34)
+                    .hoverLift()
+                )
+            )
+
+            if screenProtection.isSensitiveHidden {
+                SensitiveContentPlaceholder(
+                    title: "Chats Hidden",
+                    message: "Screen capture or an external display is active. Chat list is hidden to protect your OPSEC."
+                )
+            } else {
+                List {
+                    if model.state.contacts.isEmpty {
+                        Text("No contacts yet")
+                            .foregroundStyle(.secondary)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    }
+                    ForEach(model.state.contacts) { contact in
+                        NavigationLink {
+                            ConversationView(model: model, contact: contact)
+                        } label: {
+                            HStack {
+                                Image(systemName: "person.circle")
+                                    .foregroundStyle(.secondary)
+                                Text(contact.displayName)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .layoutPriority(1)
+                                Spacer(minLength: 8)
+                                let unread = model.state.conversation(for: contact.id)?.unreadCount ?? 0
+                                if unread > 0 {
+                                    UnreadBadge(count: unread)
+                                }
+                            }
+                        }
+                        .accessibilityIdentifier("chat-\(contact.id.uuidString)")
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+                .glassBackgroundIfNeeded()
+                .privacySensitive()
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+    }
+}
+
+private struct ContactBookTabView: View {
+    @ObservedObject var model: ClientViewModel
+    let onAddContact: () -> Void
+
+    private struct Route: Identifiable, Hashable {
+        let id: UUID
+    }
+
+    @State private var route: Route?
+
+    var body: some View {
+        ContactBookView(model: model) { contactId in
+            route = Route(id: contactId)
+        } onAdd: {
+            onAddContact()
+        }
+        .navigationDestination(item: $route) { route in
+            if let contact = model.state.contacts.first(where: { $0.id == route.id }) {
+                ConversationView(model: model, contact: contact)
+            } else {
+                PlaceholderView(title: "Contact not found")
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+    }
+}
+#endif
 
 private struct PlaceholderView: View {
     let title: String
@@ -316,21 +713,70 @@ private struct WelcomeContent: View {
 private struct PaneHeader: View {
     let title: String
     var subtitle: String? = nil
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var isDark: Bool { colorScheme == .dark }
 
     @ViewBuilder
     var body: some View {
         #if os(macOS)
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(.system(size: 20, weight: .semibold, design: .rounded))
-            if let subtitle, !subtitle.isEmpty {
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
+            Spacer(minLength: 12)
         }
-        .padding(.top, 12)
-        .padding(.bottom, 4)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.black.opacity(isDark ? 0.20 : 0.08))
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                theme.accent.opacity(isDark ? 0.18 : 0.12),
+                                theme.glowSecondary.opacity(isDark ? 0.10 : 0.06),
+                                Color.white.opacity(isDark ? 0.03 : 0.06)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .blendMode(.plusLighter)
+                    .opacity(isDark ? 0.75 : 0.55)
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(isDark ? 0.26 : 0.42),
+                            theme.accent.opacity(isDark ? 0.20 : 0.16),
+                            Color.white.opacity(isDark ? 0.08 : 0.10)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.9
+                )
+        )
+        // Align with the sidebar header baseline (which is pushed down to clear the floating window controls).
+        .padding(.top, 32)
+        .padding(.bottom, 6)
         #else
         EmptyView()
         #endif
@@ -365,7 +811,26 @@ private struct ConversationView: View {
         let isSensitiveHidden = screenProtection.isSensitiveHidden
         let isRevealed = revealMessages && !isSensitiveHidden
         VStack(spacing: 0) {
-            #if os(macOS)
+            #if os(iOS)
+            NoctyraTopBar(
+                title: isSensitiveHidden ? "Secure Chat" : contact.displayName,
+                subtitle: isSensitiveHidden ? "Screen capture is active" : "Secure chat",
+                trailing: AnyView(
+                    HStack(spacing: 10) {
+                        Button {
+                            showingClearChatConfirm = true
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .accessibilityLabel("Clear Chat")
+                        .glassCircleButton(diameter: 32)
+                        .hoverLift()
+                        RevealToggleButton(isRevealed: $revealMessages, isDisabled: isSensitiveHidden)
+                    }
+                )
+            )
+            #else
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 3) {
                     if isSensitiveHidden {
@@ -596,20 +1061,6 @@ private struct ConversationView: View {
             }
         }
         #endif
-        .navigationTitle(isSensitiveHidden ? "Secure Chat" : contact.displayName)
-        .toolbar {
-            #if os(iOS)
-            ToolbarItemGroup(placement: .navigationBarTrailing) {
-                Button {
-                    showingClearChatConfirm = true
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .accessibilityLabel("Clear Chat")
-                RevealToggleButton(isRevealed: $revealMessages, isDisabled: isSensitiveHidden)
-            }
-            #endif
-        }
         .confirmationDialog("Clear chat?", isPresented: $showingClearChatConfirm) {
             Button("Clear Chat", role: .destructive) {
                 Task { await model.clearConversation(contactId: contact.id) }
@@ -906,6 +1357,9 @@ private struct AttachmentBubble: View {
         #endif
     }
 
+    private var maxPreviewDimension: CGFloat { 4096 }
+    private var maxPreviewPixels: Int { 16_000_000 }
+
     private var sizeLabel: String {
         ByteCountFormatter.string(fromByteCount: Int64(attachment.descriptor.byteCount), countStyle: .file)
     }
@@ -932,6 +1386,7 @@ private struct AttachmentBubble: View {
     }
 
     private func makeImage(from data: Data) -> Image? {
+        guard isPreviewImageWithinLimits(data) else { return nil }
         #if os(iOS)
         guard let uiImage = UIImage(data: data) else { return nil }
         return Image(uiImage: uiImage)
@@ -939,6 +1394,23 @@ private struct AttachmentBubble: View {
         guard let nsImage = NSImage(data: data) else { return nil }
         return Image(nsImage: nsImage)
         #endif
+    }
+
+    private func isPreviewImageWithinLimits(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let widthValue = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let heightValue = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+            return false
+        }
+        let width = widthValue.intValue
+        let height = heightValue.intValue
+        guard width > 0, height > 0 else { return false }
+        guard CGFloat(width) <= maxPreviewDimension, CGFloat(height) <= maxPreviewDimension else {
+            return false
+        }
+        let pixels = width * height
+        return pixels > 0 && pixels <= maxPreviewPixels
     }
 }
 
@@ -1165,16 +1637,33 @@ private struct MyCodeView: View {
 
     var body: some View {
         Group {
-            if screenProtection.isSensitiveHidden {
-                SensitiveContentPlaceholder(
-                    title: "My Code Hidden",
-                    message: "Screen capture or an external display is active. Your contact code is hidden to protect your OPSEC."
-                )
-            } else {
-                codeContent
+            #if os(iOS)
+            VStack(spacing: 0) {
+                NoctyraTopBar(title: "My Code", subtitle: "Export, AirDrop, or scan")
+                Group {
+                    if screenProtection.isSensitiveHidden {
+                        SensitiveContentPlaceholder(
+                            title: "My Code Hidden",
+                            message: "Screen capture or an external display is active. Your contact code is hidden to protect your OPSEC."
+                        )
+                    } else {
+                        codeContent
+                    }
+                }
             }
+            #else
+            Group {
+                if screenProtection.isSensitiveHidden {
+                    SensitiveContentPlaceholder(
+                        title: "My Code Hidden",
+                        message: "Screen capture or an external display is active. Your contact code is hidden to protect your OPSEC."
+                    )
+                } else {
+                    codeContent
+                }
+            }
+            #endif
         }
-        .navigationTitle("My Code")
         .onChange(of: screenProtection.isSensitiveHidden) { _, newValue in
             if newValue {
                 showingExporter = false
@@ -1194,17 +1683,13 @@ private struct MyCodeView: View {
                 Text("Share your contact code or export a password-protected file.")
                     .font(.headline)
 
-                VStack(spacing: 8) {
-                    if qrFrames.count > 1 {
-                        AnimatedQRCodeView(frames: qrFrames, size: 260, interval: 0.7)
-                        Text("Animated QR (scan frames in order)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        QRCodeView(text: code, size: 260)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .center)
+	                ViewThatFits(in: .horizontal) {
+	                    qrBlock(size: 260)
+	                    qrBlock(size: 230)
+	                    qrBlock(size: 200)
+	                    qrBlock(size: 180)
+	                }
+	                .frame(maxWidth: .infinity, alignment: .center)
 
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Password-Protected Share")
@@ -1213,31 +1698,23 @@ private struct MyCodeView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     SecureField("Password", text: $sharePassword)
-                    HStack {
-                        Button("Export File") {
-                            Task {
-                                guard !sharePassword.isEmpty else {
-                                    model.lastError = "Password required for export."
-                                    return
-                                }
-                                if let data = await model.contactShareData(password: sharePassword) {
-                                    exportDocument = ContactShareDocument(data: data)
-                                    showingExporter = true
-                                }
-                            }
+                    #if os(iOS)
+                    ViewThatFits(in: .horizontal) {
+                        HStack {
+                            exportFileButton
+                            shareAirDropButton
                         }
-                        .glassButton(prominent: true)
-                        .disabled(sharePassword.isEmpty)
-                        .hoverLift()
-                        Button("Share via AirDrop") {
-                            Task {
-                                await prepareAirDropShare()
-                            }
+                        VStack(alignment: .leading, spacing: 10) {
+                            exportFileButton
+                            shareAirDropButton
                         }
-                        .glassButton()
-                        .disabled(sharePassword.isEmpty)
-                        .hoverLift()
                     }
+                    #else
+                    HStack {
+                        exportFileButton
+                        shareAirDropButton
+                    }
+                    #endif
                     Text("Use Import File on the other device to accept an AirDrop share.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1280,6 +1757,38 @@ private struct MyCodeView: View {
                     )
                 }
 
+                #if os(iOS)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        revealCodeButton
+                        copyCodeButton
+                        refreshCodeButton
+                        fullScreenQRButton
+                    }
+                    HStack(spacing: 10) {
+                        revealCodeButton
+                        copyCodeButton
+                        Menu {
+                            Button("Refresh") { refreshCode() }
+                            Button("Full Screen QR") { showingFullScreenQR = true }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.system(size: 16, weight: .semibold))
+                        }
+                        .glassCircleButton(diameter: 36)
+                    }
+                    VStack(spacing: 10) {
+                        HStack(spacing: 10) {
+                            revealCodeButton
+                            copyCodeButton
+                        }
+                        HStack(spacing: 10) {
+                            refreshCodeButton
+                            fullScreenQRButton
+                        }
+                    }
+                }
+                #else
                 HStack {
                     Button(showingCode ? "Hide" : "Reveal") {
                         withAnimation(.easeInOut(duration: 0.15)) {
@@ -1299,22 +1808,20 @@ private struct MyCodeView: View {
                     }
                     .glassButton()
                     .hoverLift()
-                    #if os(iOS)
-                    Button("Full Screen QR") {
-                        showingFullScreenQR = true
-                    }
-                    .glassButton()
-                    .hoverLift()
-                    #endif
                 }
+                #endif
 
                 Text("Refresh regenerates the share code and QR frames from your current identity and relay. It does not rotate keys.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 20)
-        }
+	            #if os(iOS)
+	            .padding(.horizontal, 16)
+	            #else
+	            .padding(.horizontal, 20)
+	            #endif
+	            .padding(.bottom, 20)
+	        }
         .privacySensitive()
         .onAppear {
             refreshCode()
@@ -1349,10 +1856,26 @@ private struct MyCodeView: View {
         #endif
     }
 
-    private func refreshCode() {
-        code = model.contactOfferCode()
-        qrFrames = QRCodeTransfer.encodeFrames(code, maxChunkSize: 360)
-    }
+	    private func refreshCode() {
+	        code = model.contactOfferCode()
+	        qrFrames = QRCodeTransfer.encodeFrames(code, maxChunkSize: 360)
+	    }
+
+	    @ViewBuilder
+	    private func qrBlock(size: CGFloat) -> some View {
+	        VStack(spacing: 8) {
+	            if qrFrames.count > 1 {
+	                AnimatedQRCodeView(frames: qrFrames, size: size, interval: 0.7)
+	                Text("Animated QR (scan frames in order)")
+	                    .font(.caption)
+	                    .foregroundStyle(.secondary)
+	                    .multilineTextAlignment(.center)
+	            } else {
+	                QRCodeView(text: code, size: size)
+	            }
+	        }
+	        .frame(maxWidth: .infinity, alignment: .center)
+	    }
 
     private func prepareAirDropShare() async {
         guard !sharePassword.isEmpty else {
@@ -1370,6 +1893,88 @@ private struct MyCodeView: View {
             model.lastError = "Failed to prepare AirDrop file: \(error.localizedDescription)"
         }
     }
+
+    private var exportFileButton: some View {
+        Button("Export File") {
+            Task {
+                guard !sharePassword.isEmpty else {
+                    model.lastError = "Password required for export."
+                    return
+                }
+                if let data = await model.contactShareData(password: sharePassword) {
+                    exportDocument = ContactShareDocument(data: data)
+                    showingExporter = true
+                }
+            }
+        }
+        .glassButton(prominent: true)
+        .disabled(sharePassword.isEmpty)
+        .hoverLift()
+    }
+
+    private var shareAirDropButton: some View {
+        Button("Share via AirDrop") {
+            Task {
+                await prepareAirDropShare()
+            }
+        }
+        .glassButton()
+        .disabled(sharePassword.isEmpty)
+        .hoverLift()
+    }
+
+    #if os(iOS)
+    private var revealCodeButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                showingCode.toggle()
+            }
+        } label: {
+            Image(systemName: showingCode ? "eye.slash" : "eye")
+                .font(.system(size: 15, weight: .semibold))
+        }
+        .accessibilityLabel(showingCode ? "Hide code" : "Reveal code")
+        .glassCircleButton(diameter: 36)
+        .hoverLift()
+    }
+
+    private var copyCodeButton: some View {
+        Button {
+            Clipboard.copy(code)
+            model.lastInfo = "Copied contact code."
+        } label: {
+            Image(systemName: "doc.on.doc")
+                .font(.system(size: 15, weight: .semibold))
+        }
+        .accessibilityLabel("Copy code")
+        .glassCircleButton(diameter: 36)
+        .hoverLift()
+    }
+
+    private var refreshCodeButton: some View {
+        Button {
+            refreshCode()
+        } label: {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 15, weight: .semibold))
+        }
+        .accessibilityLabel("Refresh code")
+        .glassCircleButton(diameter: 36)
+        .hoverLift()
+    }
+
+    private var fullScreenQRButton: some View {
+        Button {
+            showingFullScreenQR = true
+        } label: {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 15, weight: .semibold))
+        }
+        .accessibilityLabel("Full screen QR")
+        .glassCircleButton(diameter: 36)
+        .hoverLift()
+    }
+    #endif
 
     private func writeShareFile(data: Data) throws -> URL {
         let filename = "piccp-contact-\(UUID().uuidString).piccp"
@@ -1396,13 +2001,22 @@ private struct AddContactView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Pairing Method") {
-                    Picker("Method", selection: $method) {
-                        ForEach(PairingMethod.allCases) { option in
-                            Text(option.title).tag(option)
+	                Section("Pairing Method") {
+	                    #if os(iOS)
+	                    ChipSegmentedControl(
+	                        selection: $method,
+	                        options: PairingMethod.allCases,
+	                        title: { $0.title },
+	                        minItemWidth: 112
+	                    )
+	                    #else
+	                    Picker("Method", selection: $method) {
+	                        ForEach(PairingMethod.allCases) { option in
+	                            Text(option.title).tag(option)
                         }
                     }
                     .pickerStyle(.segmented)
+                    #endif
                 }
 
                 switch method {
@@ -1568,18 +2182,29 @@ private struct AddContactView: View {
         }
 
         Section("Pairing Channel") {
-            Picker("Method", selection: Binding(
+            let binding = Binding(
                 get: { insecureSettings.method ?? .relay },
                 set: { newValue in
                     insecureSettings.method = newValue
                 }
-            )) {
+            )
+	            #if os(iOS)
+	            ChipSegmentedControl(
+	                selection: binding,
+	                options: InsecurePairingMethod.allCases,
+	                title: { $0.displayName },
+	                minItemWidth: 120
+	            )
+	            .disabled(!insecureSettings.isReady)
+	            #else
+	            Picker("Method", selection: binding) {
                 ForEach(InsecurePairingMethod.allCases) { option in
                     Text(option.displayName).tag(option)
                 }
             }
             .pickerStyle(.segmented)
             .disabled(!insecureSettings.isReady)
+            #endif
 
             if insecureSettings.method == .bluetooth {
                 Text("Bluetooth discovery is coming soon.")
@@ -1599,6 +2224,8 @@ private struct AddContactView: View {
                     Text("Relay: \(relay.host):\(relay.port)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                     Text("Announced: \(formattedDate(model.insecureLastAnnounceAt))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -1633,10 +2260,13 @@ private struct AddContactView: View {
                         Text("Last error: \(error)")
                             .font(.caption2)
                             .foregroundStyle(.orange)
+                            .lineLimit(2)
                     }
                     Text("Your fingerprint: \(model.state.identity.fingerprint)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
                 .contextMenu {
                     Button("Run Self Test") {
@@ -1646,20 +2276,23 @@ private struct AddContactView: View {
                 }
             }
             Section("Discovery") {
-                HStack {
-                    Button("Announce") {
-                        FeedbackGenerator.light()
-                        Task { await model.announceInsecurePairing() }
+                #if os(iOS)
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        announceButton
+                        refreshListButton
                     }
-                    .glassButton()
-                    .hoverLift()
-                    Button("Refresh List") {
-                        FeedbackGenerator.light()
-                        Task { await model.refreshInsecurePairing() }
+                    VStack(alignment: .leading, spacing: 10) {
+                        announceButton
+                        refreshListButton
                     }
-                    .glassButton()
-                    .hoverLift()
                 }
+                #else
+                HStack {
+                    announceButton
+                    refreshListButton
+                }
+                #endif
             }
 
             Section("Discovered Peers") {
@@ -1674,6 +2307,8 @@ private struct AddContactView: View {
                         Text("Relay: \(announcement.offer.relay.host):\(announcement.offer.relay.port)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                         Button("Send Pairing Request") {
                             Task { await model.sendPairRequest(to: announcement) }
                         }
@@ -1696,18 +2331,25 @@ private struct AddContactView: View {
                         Text("Relay: \(request.from.relay.host):\(request.from.relay.port)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        HStack {
-                            Button("Accept") {
-                                Task { await model.acceptPairRequest(request) }
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        #if os(iOS)
+                        ViewThatFits(in: .horizontal) {
+                            HStack {
+                                acceptRequestButton(request)
+                                dismissRequestButton(request)
                             }
-                            .glassButton(prominent: true)
-                            .hoverLift()
-                            Button("Dismiss") {
-                                model.dismissPairRequest(request)
+                            VStack(alignment: .leading, spacing: 10) {
+                                acceptRequestButton(request)
+                                dismissRequestButton(request)
                             }
-                            .glassButton()
-                            .hoverLift()
                         }
+                        #else
+                        HStack {
+                            acceptRequestButton(request)
+                            dismissRequestButton(request)
+                        }
+                        #endif
                     }
                     .padding(.vertical, 4)
                 }
@@ -1719,6 +2361,40 @@ private struct AddContactView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var announceButton: some View {
+        Button("Announce") {
+            FeedbackGenerator.light()
+            Task { await model.announceInsecurePairing() }
+        }
+        .glassButton()
+        .hoverLift()
+    }
+
+    private var refreshListButton: some View {
+        Button("Refresh List") {
+            FeedbackGenerator.light()
+            Task { await model.refreshInsecurePairing() }
+        }
+        .glassButton()
+        .hoverLift()
+    }
+
+    private func acceptRequestButton(_ request: PairingRequest) -> some View {
+        Button("Accept") {
+            Task { await model.acceptPairRequest(request) }
+        }
+        .glassButton(prominent: true)
+        .hoverLift()
+    }
+
+    private func dismissRequestButton(_ request: PairingRequest) -> some View {
+        Button("Dismiss") {
+            model.dismissPairRequest(request)
+        }
+        .glassButton()
+        .hoverLift()
     }
 }
 
@@ -1751,18 +2427,23 @@ private struct FullScreenQRView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
-                if frames.count > 1 {
-                    AnimatedQRCodeView(frames: frames, size: 320, interval: 0.8)
-                    Text("Animated QR (scan frames in order)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    QRCodeView(text: code, size: 320)
+            GeometryReader { proxy in
+                // Keep within the smallest iPhone widths (avoid horizontal overflow on 320pt devices).
+                let size = max(220, min(360, proxy.size.width - 48))
+                VStack(spacing: 16) {
+                    if frames.count > 1 {
+                        AnimatedQRCodeView(frames: frames, size: size, interval: 0.8)
+                        Text("Animated QR (scan frames in order)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    } else {
+                        QRCodeView(text: code, size: size)
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.opacity(0.02))
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.black.opacity(0.02))
             .navigationTitle("Full Screen QR")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -1784,6 +2465,7 @@ private struct SettingsView: View {
     @State private var pendingStorageMode: StorageProtectionMode?
     @State private var showStorageWarning = false
     @State private var pinSetupKind: PinSetupKind?
+    @State private var showingLegalDocuments = false
 
     var body: some View {
         #if os(macOS)
@@ -1802,24 +2484,35 @@ private struct SettingsView: View {
                 GroupBox("App Lock") {
                     appLockFields
                 }
+                GroupBox("Legal") {
+                    legalFields
+                }
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 20)
         }
-        .navigationTitle("Settings")
         .groupBoxStyle(GlassGroupBoxStyle())
         .background(setupAppearance)
-        #else
-        Form {
-            appearanceSection
-            storageSection
-            privacySection
-            appLockSection
+        .sheet(isPresented: $showingLegalDocuments) {
+            ClientLegalDocumentsView()
         }
-        .navigationTitle("Settings")
-        .scrollContentBackground(.hidden)
-        .glassBackgroundIfNeeded()
-        .background(setupAppearance)
+        #else
+        VStack(spacing: 0) {
+            NoctyraTopBar(title: "Settings", subtitle: "Appearance, privacy, and protection")
+            Form {
+                appearanceSection
+                storageSection
+                privacySection
+                appLockSection
+                legalSection
+            }
+            .scrollContentBackground(.hidden)
+            .glassBackgroundIfNeeded()
+            .background(setupAppearance)
+        }
+        .sheet(isPresented: $showingLegalDocuments) {
+            ClientLegalDocumentsView()
+        }
         #endif
     }
 
@@ -1927,11 +2620,24 @@ private struct SettingsView: View {
     }
 
     @ViewBuilder
-    private var appearanceFields: some View {
-        let columns = [GridItem(.adaptive(minimum: 140), spacing: 12)]
-        VStack(alignment: .leading, spacing: 8) {
-            LazyVGrid(columns: columns, spacing: 12) {
-                ForEach(ThemePalette.allCases) { palette in
+    private var legalSection: some View {
+        Section("Legal") {
+            legalFields
+        }
+    }
+
+    @ViewBuilder
+	    private var appearanceFields: some View {
+	        #if os(iOS)
+	        // iPhone portrait can be very narrow (including multi-column layouts). Keep swatches flexible.
+	        let columns = [GridItem(.adaptive(minimum: 112), spacing: 12)]
+	        #else
+	        let columns = [GridItem(.adaptive(minimum: 140), spacing: 12)]
+	        #endif
+	        let palettes = [ThemePalette.noir] + ThemePalette.allCases.filter { $0 != .noir }
+	        VStack(alignment: .leading, spacing: 8) {
+	            LazyVGrid(columns: columns, spacing: 12) {
+	                ForEach(palettes) { palette in
                     ThemeSwatch(palette: palette, isSelected: palette == selectedTheme) {
                         selectedTheme = palette
                     }
@@ -1958,6 +2664,17 @@ private struct SettingsView: View {
             Text("If disabled, the camera button will use the system camera which may store photos in your library.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            #if os(macOS)
+            Divider().opacity(0.35)
+            Toggle("Hide sensitive content when unfocused", isOn: $privacySettings.hideSensitiveWhenUnfocused)
+            Text("When Noctyra loses focus, chats, contact details, identities, and relays are hidden until the window is active again.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Toggle("Block window capture (best effort)", isOn: $privacySettings.macBlockWindowCapture)
+            Text("Asks macOS to prevent other processes from capturing this window via standard WindowServer APIs. This does not stop a physical camera.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            #endif
         }
     }
 
@@ -2028,6 +2745,19 @@ private struct SettingsView: View {
         }
     }
 
+    private var legalFields: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Review the Privacy Policy and Terms of Use accepted during onboarding.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("View Privacy Policy and Terms") {
+                showingLegalDocuments = true
+            }
+            .glassButton()
+            .hoverLift()
+        }
+    }
+
     private var pinActionsFields: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Pin Actions")
@@ -2085,19 +2815,59 @@ private struct IdentityManagementView: View {
     @State private var destination: IdentityDestination?
     @State private var newIdentityName = ""
     @State private var newIdentityRelayId: UUID?
+    #if os(iOS)
+    @State private var showingSettings = false
+    #endif
 
     var body: some View {
         Group {
-            if screenProtection.isSensitiveHidden {
-                SensitiveContentPlaceholder(
-                    title: "Identity Management Hidden",
-                    message: "Screen capture or an external display is active. Identity details are hidden to protect your OPSEC."
+            #if os(iOS)
+            VStack(spacing: 0) {
+                NoctyraTopBar(
+                    title: "Identity Management",
+                    subtitle: "Profiles, continuity, and burns",
+                    trailing: AnyView(
+                        Button {
+                            showingSettings = true
+                            FeedbackGenerator.light()
+                        } label: {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .accessibilityLabel("Settings")
+                        .glassCircleButton(diameter: 34)
+                        .hoverLift()
+                    )
                 )
-            } else {
-                destinationContent
+                Group {
+                    if screenProtection.isSensitiveHidden {
+                        SensitiveContentPlaceholder(
+                            title: "Identity Management Hidden",
+                            message: "Screen capture or an external display is active. Identity details are hidden to protect your OPSEC."
+                        )
+                    } else {
+                        destinationContent
+                    }
+                }
             }
+            #else
+            Group {
+                if screenProtection.isSensitiveHidden {
+                    SensitiveContentPlaceholder(
+                        title: "Identity Management Hidden",
+                        message: "Screen capture or an external display is active. Identity details are hidden to protect your OPSEC."
+                    )
+                } else {
+                    destinationContent
+                }
+            }
+            #endif
         }
-        .navigationTitle("Identity Management")
+        #if os(iOS)
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(model: model)
+        }
+        #endif
         .onAppear {
             if newIdentityRelayId == nil {
                 newIdentityRelayId = model.state.relayServers.first?.id
@@ -2362,7 +3132,7 @@ private struct IdentityAuditView: View {
                 auditContent
             }
         }
-        .navigationTitle("Continuity Audit")
+        .paneNavigationTitle("Continuity Audit")
         .confirmationDialog(
             "Purge continuity audit?",
             isPresented: $showingPurgeConfirm,
@@ -2602,7 +3372,7 @@ private struct IdentityDetailView: View {
                 detailContent
             }
         }
-        .navigationTitle("Profile Management")
+        .paneNavigationTitle("Profile Management")
         .onAppear {
             if let profile = profile {
                 displayName = profile.identity.displayName
@@ -2744,17 +3514,25 @@ private struct IdentityDetailView: View {
                 Text("Fingerprint")
                 Spacer()
                 Text(fingerprint)
-                    .font(.caption)
+                    .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.trailing)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .layoutPriority(1)
             }
             HStack {
                 Text("Inbox")
                 Spacer()
                 Text(inboxId)
-                    .font(.caption)
+                    .font(.caption2.monospaced())
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.trailing)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .layoutPriority(1)
             }
             Button("Save Identity") {
                 Task {
@@ -2906,16 +3684,33 @@ private struct RelaysView: View {
 
     var body: some View {
         Group {
-            if screenProtection.isSensitiveHidden {
-                SensitiveContentPlaceholder(
-                    title: "Relays Hidden",
-                    message: "Screen capture or an external display is active. Relay details are hidden to protect your OPSEC."
-                )
-            } else {
-                relaysContent
+            #if os(iOS)
+            VStack(spacing: 0) {
+                NoctyraTopBar(title: "Relays", subtitle: "Preferred servers and master lists")
+                Group {
+                    if screenProtection.isSensitiveHidden {
+                        SensitiveContentPlaceholder(
+                            title: "Relays Hidden",
+                            message: "Screen capture or an external display is active. Relay details are hidden to protect your OPSEC."
+                        )
+                    } else {
+                        relaysContent
+                    }
+                }
             }
+            #else
+            Group {
+                if screenProtection.isSensitiveHidden {
+                    SensitiveContentPlaceholder(
+                        title: "Relays Hidden",
+                        message: "Screen capture or an external display is active. Relay details are hidden to protect your OPSEC."
+                    )
+                } else {
+                    relaysContent
+                }
+            }
+            #endif
         }
-        .navigationTitle("Relays")
         .onChange(of: screenProtection.isSensitiveHidden) { _, newValue in
             if newValue {
                 relayEditorMode = nil
@@ -2968,13 +3763,28 @@ private struct RelaysView: View {
                 selectedRelayId = model.state.selectedRelayId
             }
             .sheet(item: $relayEditorMode) { mode in
-                RelayEditorView(title: mode.title, initial: mode.record) { name, host, port, note in
+                RelayEditorView(title: mode.title, initial: mode.record) { name, host, port, useTLS, note, relayPassword in
                     Task {
                         switch mode {
                         case .add:
-                            await model.addRelayServer(name: name, host: host, port: port, note: note)
+                            await model.addRelayServer(
+                                name: name,
+                                host: host,
+                                port: port,
+                                useTLS: useTLS,
+                                note: note,
+                                relayPassword: relayPassword
+                            )
                         case .edit(let record):
-                            await model.updateRelayServer(id: record.id, name: name, host: host, port: port, note: note)
+                            await model.updateRelayServer(
+                                id: record.id,
+                                name: name,
+                                host: host,
+                                port: port,
+                                useTLS: useTLS,
+                                note: note,
+                                relayPassword: relayPassword
+                            )
                         }
                     }
                 }
@@ -2999,7 +3809,7 @@ private struct RelaysView: View {
     private var masterSourcesSection: some View {
         Section(
             header: Text("Master Server Sources"),
-            footer: Text("Formats: JSON array, JSON {servers:[...]}, or text lines host:port,name,region,tags,website,note,kind,federationMode,federationName,federationDescription,temporalBucketSeconds,operatorNote,softwareVersion. Use | or ; to separate tags.")
+            footer: Text("Formats: JSON array, JSON {servers:[...]}, or text lines host:port,name,region,tags,website,note,kind,federationMode,federationName,federationDescription,temporalBucketSeconds,operatorNote,softwareVersion,requiresPassword,useTLS. Use | or ; to separate tags. host may also be https://host[:port].")
         ) {
             masterSourcesFields
         }
@@ -3068,7 +3878,7 @@ private struct RelaysView: View {
             .hoverLift()
         }
         #if os(macOS)
-        Text("Formats: JSON array, JSON {servers:[...]}, or text lines host:port,name,region,tags,website,note,kind,federationMode,federationName,federationDescription,temporalBucketSeconds,operatorNote,softwareVersion. Use | or ; to separate tags.")
+        Text("Formats: JSON array, JSON {servers:[...]}, or text lines host:port,name,region,tags,website,note,kind,federationMode,federationName,federationDescription,temporalBucketSeconds,operatorNote,softwareVersion,requiresPassword. Use | or ; to separate tags.")
             .font(.caption2)
             .foregroundStyle(.secondary)
         #endif
@@ -3112,6 +3922,8 @@ private struct RelaysView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(source.name)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Spacer()
                 Toggle("Enabled", isOn: Binding(
                     get: { source.isEnabled },
@@ -3124,7 +3936,19 @@ private struct RelaysView: View {
             Text(source.url)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            #if os(iOS)
+            Menu {
+                Button("Refresh") { Task { await model.fetchMasterSource(source) } }
+                Button("Remove", role: .destructive) { Task { await model.removeMasterSource(id: source.id) } }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            .glassCircleButton(diameter: 34)
+            .hoverLift()
+            #else
             HStack(spacing: 12) {
                 Button("Refresh") {
                     Task { await model.fetchMasterSource(source) }
@@ -3136,6 +3960,7 @@ private struct RelaysView: View {
                 .glassButton()
             }
             .hoverLift()
+            #endif
         }
         .padding(.vertical, 4)
     }
@@ -3150,16 +3975,45 @@ private struct ContactBookView: View {
 
     var body: some View {
         Group {
+            #if os(iOS)
+            VStack(spacing: 0) {
+                NoctyraTopBar(
+                    title: "Contact Book",
+                    subtitle: "Contacts and trust",
+                    trailing: AnyView(
+                        Button {
+                            onAdd()
+                        } label: {
+                            Image(systemName: "person.badge.plus")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .accessibilityLabel("Add Contact")
+                        .glassCircleButton(prominent: true, diameter: 34)
+                        .hoverLift()
+                    )
+                )
+                Group {
+                    if screenProtection.isSensitiveHidden {
+                        SensitiveContentPlaceholder(
+                            title: "Contact Book Hidden",
+                            message: "Screen capture or an external display is active. Contact details are hidden to protect your OPSEC."
+                        )
+                    } else {
+                        contactList
+                    }
+                }
+            }
+            #else
             if screenProtection.isSensitiveHidden {
                 SensitiveContentPlaceholder(
                     title: "Contact Book Hidden",
                     message: "Screen capture or an external display is active. Contact details are hidden to protect your OPSEC."
                 )
             } else {
-                contactList
+                contactBookMac
             }
+            #endif
         }
-        .navigationTitle("Contact Book")
         .sheet(item: $trustPrompt) { prompt in
             TrustAssertionSheet(prompt: prompt) { note in
                 Task {
@@ -3174,101 +4028,28 @@ private struct ContactBookView: View {
         }
     }
 
+    #if os(macOS)
+    private var contactBookMac: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            PaneHeader(title: "Contact Book", subtitle: "Contacts and trust")
+            List {
+                contactListRows
+            }
+            .scrollContentBackground(.hidden)
+            .listSectionSeparator(.hidden)
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .listStyle(.inset)
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 20)
+        .privacySensitive()
+    }
+    #endif
+
     private var contactList: some View {
         List {
-            #if os(macOS)
-            PaneHeader(title: "Contact Book")
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-            #endif
-            Section {
-                HStack {
-                    Button {
-                        onAdd()
-                    } label: {
-                        Label("Add Contact", systemImage: "person.badge.plus")
-                    }
-                    .glassButton()
-                    .hoverLift()
-                    Spacer()
-                }
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-            }
-
-            if model.state.contacts.isEmpty {
-                Text("No contacts yet")
-                    .foregroundStyle(.secondary)
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            }
-            ForEach(model.state.contacts) { contact in
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text(contact.displayName)
-                            .font(.headline)
-                        Spacer()
-                        if let unread = model.state.conversation(for: contact.id)?.unreadCount, unread > 0 {
-                            UnreadBadge(count: unread)
-                        }
-                        Button("Open") { onOpen(contact.id) }
-                            .glassButton()
-                            .hoverLift()
-                        Button("Delete") {
-                            Task { await model.removeContact(id: contact.id) }
-                        }
-                        .glassButton()
-                        .hoverLift()
-                    }
-                    Text("Inbox: \(contact.inboxId)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("Relay: \(contact.relay.host):\(contact.relay.port)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("Fingerprint: \(contact.fingerprint)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    trustSection(for: contact)
-                    Toggle("Receive new identity after burn", isOn: identityResetBinding(for: contact))
-                    Text("When you burn your identity, only contacts with this enabled are notified and kept.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(12)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(
-                            LinearGradient(
-                                colors: [
-                                    Color.white.opacity(0.5),
-                                    Color.white.opacity(0.08)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 0.8
-                        )
-                )
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
-                .contextMenu {
-                    Button("Remove Contact", role: .destructive) {
-                        Task { await model.removeContact(id: contact.id) }
-                    }
-                }
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(role: .destructive) {
-                        Task { await model.removeContact(id: contact.id) }
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
-                }
-            }
+            contactListRows
         }
         .privacySensitive()
         .scrollContentBackground(.hidden)
@@ -3279,6 +4060,132 @@ private struct ContactBookView: View {
         #else
         .listStyle(.plain)
         #endif
+    }
+
+    @ViewBuilder
+    private var contactListRows: some View {
+        Section {
+            HStack {
+                Button {
+                    onAdd()
+                } label: {
+                    Label("Add Contact", systemImage: "person.badge.plus")
+                }
+                .glassButton()
+                .hoverLift()
+                Spacer()
+            }
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        }
+
+        if model.state.contacts.isEmpty {
+            Text("No contacts yet")
+                .foregroundStyle(.secondary)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+        }
+
+        ForEach(model.state.contacts) { contact in
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(contact.displayName)
+                        .font(.headline)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
+                    Spacer()
+                    if let unread = model.state.conversation(for: contact.id)?.unreadCount, unread > 0 {
+                        UnreadBadge(count: unread)
+                    }
+                    #if os(iOS)
+                    Button { onOpen(contact.id) } label: {
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .glassCircleButton(diameter: 32)
+                    .hoverLift()
+                    Button {
+                        Task { await model.removeContact(id: contact.id) }
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .glassCircleButton(diameter: 32)
+                    .hoverLift()
+                    #else
+                    Button("Open") { onOpen(contact.id) }
+                        .glassButton()
+                        .hoverLift()
+                    Button("Delete") {
+                        Task { await model.removeContact(id: contact.id) }
+                    }
+                    .glassButton()
+                    .hoverLift()
+                    #endif
+                }
+                Text("Inbox: \(contact.inboxId)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Relay: \(contact.relay.host):\(contact.relay.port)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Fingerprint: \(contact.fingerprint)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                trustSection(for: contact)
+                Toggle(isOn: identityResetBinding(for: contact)) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Receive new identity after burn")
+                            .font(.caption.weight(.semibold))
+                        Text("Only contacts with this enabled are notified and kept.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(.ultraThinMaterial)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.5),
+                                Color.white.opacity(0.08)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.8
+                    )
+            )
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .contextMenu {
+                Button("Remove Contact", role: .destructive) {
+                    Task { await model.removeContact(id: contact.id) }
+                }
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                Button(role: .destructive) {
+                    Task { await model.removeContact(id: contact.id) }
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            }
+        }
     }
 
     private func identityResetBinding(for contact: Contact) -> Binding<Bool> {
@@ -3302,6 +4209,7 @@ private struct ContactBookView: View {
                 Text(detail)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
                 if let lastVerified = contact.lastVerifiedAssertion {
                     Text("Last verified: \(formatTrustDate(lastVerified.timestamp))")
                         .font(.caption2)
@@ -3313,6 +4221,21 @@ private struct ContactBookView: View {
                 }
             }
             Spacer()
+            #if os(iOS)
+            Menu {
+                Button(trustActionLabel(for: contact)) {
+                    trustPrompt = TrustPrompt(contact: contact, action: .verified)
+                }
+                Button("Revoke", role: .destructive) {
+                    trustPrompt = TrustPrompt(contact: contact, action: .revoked)
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            .glassCircleButton(diameter: 34)
+            .hoverLift()
+            #else
             VStack(alignment: .trailing, spacing: 6) {
                 Button(trustActionLabel(for: contact)) {
                     trustPrompt = TrustPrompt(contact: contact, action: .verified)
@@ -3325,6 +4248,7 @@ private struct ContactBookView: View {
                 .glassButton(compact: true)
                 .hoverLift()
             }
+            #endif
         }
     }
 
@@ -3454,41 +4378,65 @@ private struct RelayServerRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(server.displayName)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .layoutPriority(1)
                 if isPreferred {
                     Text("Preferred")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                transportBadge
                 Spacer()
+                #if os(iOS)
+                Menu {
+                    Button("Refresh Info") { onRefreshInfo() }
+                    Button("Edit") { onEdit() }
+                    Button("Remove", role: .destructive) { onRemove() }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 16, weight: .semibold))
+                }
+                .glassCircleButton(diameter: 34)
+                .hoverLift()
+                #else
                 Button("Info") { onRefreshInfo() }
                     .glassButton(compact: true)
                     .hoverLift()
                 Button("Edit") { onEdit() }
                     .glassButton(compact: true)
                     .hoverLift()
+                #endif
             }
             Text("\(server.endpoint.host):\(server.endpoint.port)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
             if let region = server.region, !region.isEmpty {
                 Text("Region: \(region)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
             if let tags = server.tags, !tags.isEmpty {
                 Text("Tags: \(tags.joined(separator: ", "))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
             if let website = server.website, !website.isEmpty {
                 Text(website)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
             if let note = server.note, !note.isEmpty {
                 Text(note)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .lineLimit(3)
             }
             relayInfoSection
         }
@@ -3502,6 +4450,47 @@ private struct RelayServerRow: View {
                 Label("Remove", systemImage: "trash")
             }
         }
+    }
+
+    @ViewBuilder
+    private var transportBadge: some View {
+        let badge = transportBadgeData
+        #if os(macOS)
+        Label(badge.text, systemImage: badge.icon)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .foregroundStyle(badge.color)
+            .background(Capsule().fill(badge.color.opacity(0.18)))
+            .help(badge.help)
+        #else
+        Label(badge.text, systemImage: badge.icon)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .foregroundStyle(badge.color)
+            .background(Capsule().fill(badge.color.opacity(0.18)))
+        #endif
+    }
+
+    private var transportBadgeData: (text: String, icon: String, color: Color, help: String) {
+        let configuredTLS = server.endpoint.useTLS
+        if let advertisedTLS = server.advertisedInfo?.tlsEnabled {
+            if configuredTLS && advertisedTLS {
+                return ("TLS On", "lock.shield.fill", .green, "Client and relay are both set to TLS.")
+            }
+            if configuredTLS && !advertisedTLS {
+                return ("TLS Mismatch", "exclamationmark.triangle.fill", .orange, "Client expects TLS, but relay reports TLS disabled.")
+            }
+            if !configuredTLS && advertisedTLS {
+                return ("No TLS", "lock.open.fill", .orange, "Relay supports TLS, but this client entry is using plain transport.")
+            }
+            return ("No TLS", "lock.open.fill", .secondary, "Client and relay are both using plain transport.")
+        }
+        if configuredTLS {
+            return ("TLS On", "lock.fill", .blue, "Client entry is configured for TLS. Refresh info to verify relay status.")
+        }
+        return ("No TLS", "lock.open", .secondary, "Client entry is configured for plain transport.")
     }
 
     @ViewBuilder
@@ -3520,16 +4509,26 @@ private struct RelayServerRow: View {
                 Text("Relay name: \(relayName)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
             if let operatorNote = info.operatorNote, !operatorNote.isEmpty {
                 Text(operatorNote)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .lineLimit(3)
             }
             if let software = info.softwareVersion, !software.isEmpty {
                 Text("Software: \(software)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            if info.requiresPassword == true {
+                let configured = !(server.relayPassword?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                Text(configured ? "Relay password configured." : "Relay requires password: configure it in Edit.")
+                    .font(.caption2)
+                    .foregroundStyle(configured ? Color.secondary : Color.orange)
             }
             if let fetchedAt = server.lastInfoFetchedAt {
                 Text("Info updated \(formatInfoDate(fetchedAt))")
@@ -3768,8 +4767,11 @@ private extension View {
         return self
             .padding(12)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.ultraThinMaterial)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    GlassCardBacking(cornerRadius: 16)
+                }
             )
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -3778,8 +4780,11 @@ private extension View {
         return self
             .padding(12)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.ultraThinMaterial)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    GlassCardBacking(cornerRadius: 16)
+                }
             )
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -3789,6 +4794,25 @@ private extension View {
                     .shadow(color: Color.white.opacity(0.14), radius: 7, x: 0, y: 2)
             )
         #endif
+    }
+}
+
+private struct GlassCardBacking: View {
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
+    let cornerRadius: CGFloat
+
+    var body: some View {
+        let isDark = (colorScheme == .dark)
+        let opacity: Double = {
+            if isDark {
+                return theme.palette == .noir ? 0.28 : 0.18
+            }
+            return theme.palette == .noir ? 0.12 : 0.06
+        }()
+        return RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(Color.black.opacity(opacity))
     }
 }
 
@@ -3811,7 +4835,20 @@ private extension View {
     @ViewBuilder
     func glassBackgroundIfNeeded() -> some View {
         #if os(iOS)
-        self.background(GlassBackground())
+        // Use the secure-friendly wallpaper on iOS so it renders correctly even when the
+        // whole UI is hosted inside the secure screenshot-protection container.
+        self.background(SecureGlassBackground())
+        #else
+        self
+        #endif
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func paneNavigationTitle(_ title: String) -> some View {
+        #if os(iOS)
+        navigationTitle(title)
         #else
         self
         #endif
@@ -3832,6 +4869,97 @@ private extension View {
         #endif
     }
 }
+
+#if os(macOS)
+private struct WindowTitleHider: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        TitleHiderView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? TitleHiderView)?.apply()
+    }
+
+    private final class TitleHiderView: NSView {
+        private var observedWindow: NSWindow?
+        private var windowObserver: NSObjectProtocol?
+        private var titleObservation: NSKeyValueObservation?
+
+        deinit {
+            if let windowObserver {
+                NotificationCenter.default.removeObserver(windowObserver)
+            }
+            titleObservation?.invalidate()
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if observedWindow !== window {
+                if let windowObserver {
+                    NotificationCenter.default.removeObserver(windowObserver)
+                    self.windowObserver = nil
+                }
+                titleObservation?.invalidate()
+                titleObservation = nil
+                observedWindow = window
+                if let window {
+                    windowObserver = NotificationCenter.default.addObserver(
+                        forName: NSWindow.didBecomeKeyNotification,
+                        object: window,
+                        queue: .main
+                    ) { [weak self] _ in
+                        self?.apply()
+                    }
+                    titleObservation = window.observe(\.title, options: [.new]) { w, _ in
+                        if w.title.isEmpty == false {
+                            w.title = ""
+                        }
+                    }
+                }
+            }
+            apply()
+        }
+
+        func apply() {
+            guard let window else { return }
+            window.titleVisibility = .hidden
+            // Clean titlebar: traffic lights float over the app background with no extra bars.
+            window.titlebarAppearsTransparent = true
+            window.styleMask.insert(.fullSizeContentView)
+            window.isMovableByWindowBackground = true
+            window.tabbingMode = .disallowed
+            window.toolbar = nil
+            if #available(macOS 11.0, *) {
+                window.titlebarSeparatorStyle = .none
+            }
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.title = ""
+
+            // User preference: completely remove the macOS chrome in the traffic-light area.
+            // Hiding the titlebar view eliminates the faint bar/shading that persists even with transparent titlebars.
+            if let titlebarView = window.standardWindowButton(.closeButton)?.superview {
+                titlebarView.isHidden = true
+                titlebarView.alphaValue = 0
+            }
+            window.standardWindowButton(.closeButton)?.isHidden = true
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window.standardWindowButton(.zoomButton)?.isHidden = true
+
+            // SwiftUI sometimes re-applies the window title after the view attaches.
+            // Re-assert a couple of times to keep the title text from flashing back.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.applyOnce() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.60) { [weak self] in self?.applyOnce() }
+        }
+
+        private func applyOnce() {
+            guard let window else { return }
+            window.titleVisibility = .hidden
+            window.title = ""
+        }
+    }
+}
+#endif
 
 #if os(iOS)
 private struct HostingBackgroundClearer: UIViewControllerRepresentable {

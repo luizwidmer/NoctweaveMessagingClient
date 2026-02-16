@@ -54,6 +54,7 @@ enum ProfileSyncState: Equatable {
 final class ClientViewModel: ObservableObject {
     @Published var state: ClientState
     @Published var isReady = false
+    @Published var requiresOnboarding = false
     @Published var lastError: String?
     @Published var lastInfo: String?
     @Published var isSyncing = false
@@ -84,6 +85,16 @@ final class ClientViewModel: ObservableObject {
     private let resendRequestCount = 1
     private let attachmentChunkSize = 64 * 1024
     private let attachmentUploadTTLSeconds = 1800
+    private let maxAttachmentBytes = 8 * 1024 * 1024
+    private let maxAttachmentChunkCount = 128
+    private let maxAttachmentInputDimension: CGFloat = 8192
+    private let maxAttachmentInputPixels = 48_000_000
+    private let attachmentOutputMaxDimension: CGFloat = 1600
+    private let attachmentOutputQuality: CGFloat = 0.82
+    private let attachmentQuotaWindowSeconds: TimeInterval = 3600
+    private let maxAttachmentCountPerContactPerWindow = 20
+    private let maxAttachmentBytesPerContactPerWindow = 24 * 1024 * 1024
+    private let maxAttachmentBytesPerRelayPerWindow = 96 * 1024 * 1024
     private let prekeyMinimumCount = 4
     private let prekeyTargetCount = 8
     private let rootRatchetInterval: UInt64 = 50
@@ -94,6 +105,10 @@ final class ClientViewModel: ObservableObject {
     private var lastInactiveAt: Date?
     private let stateFileURL: URL
     private let attachmentDirectory: URL
+    private var outboundAttachmentQuotaByContact: [UUID: [AttachmentQuotaEvent]] = [:]
+    private var inboundAttachmentQuotaByContact: [UUID: [AttachmentQuotaEvent]] = [:]
+    private var outboundAttachmentQuotaByRelay: [String: [AttachmentQuotaEvent]] = [:]
+    private var inboundAttachmentQuotaByRelay: [String: [AttachmentQuotaEvent]] = [:]
     private static let storageModeKey = "lattice.storageProtection.mode.v1"
     private static let legacyKeychainConsentKey = "lattice.keychainConsent.v1"
     private struct InsecureSelfTestFailure: LocalizedError {
@@ -106,6 +121,10 @@ final class ClientViewModel: ObservableObject {
         case invalidChunkSize
         case invalidSize
         case invalidChecksum
+        case unsupportedType
+        case imageProcessingFailed
+        case attachmentTooLarge(maxBytes: Int)
+        case quotaExceeded(String)
         case uploadFailed(message: String)
 
         var errorDescription: String? {
@@ -120,10 +139,25 @@ final class ClientViewModel: ObservableObject {
                 return "Attachment size mismatch."
             case .invalidChecksum:
                 return "Attachment checksum mismatch."
+            case .unsupportedType:
+                return "Unsupported image type."
+            case .imageProcessingFailed:
+                return "Failed to process image securely."
+            case .attachmentTooLarge(let maxBytes):
+                let formatter = ByteCountFormatter()
+                formatter.countStyle = .file
+                return "Attachment exceeds size limit (\(formatter.string(fromByteCount: Int64(maxBytes))))."
+            case .quotaExceeded(let message):
+                return message
             case .uploadFailed(let message):
                 return message
             }
         }
+    }
+
+    private struct AttachmentQuotaEvent {
+        let timestamp: Date
+        let bytes: Int
     }
     private struct PrekeySelection {
         let reference: PrekeyReference
@@ -161,8 +195,10 @@ final class ClientViewModel: ObservableObject {
             self.state = ClientViewModel.makeUITestState()
             self.isReady = true
             self.requiresStorageChoice = false
+            self.requiresOnboarding = false
         } else {
-            let defaultIdentity = Identity(displayName: "New User")
+            // Placeholder identity: first-run setup will replace this before any relay publish happens.
+            let defaultIdentity = Identity(displayName: "Setup Required")
             let defaultRelay = RelayEndpoint(host: "127.0.0.1", port: 9339)
             let defaultServer = RelayServerRecord(name: "Local Relay", endpoint: defaultRelay)
             let defaultInbox = InboxAddress.generate()
@@ -171,8 +207,10 @@ final class ClientViewModel: ObservableObject {
                 relay: defaultRelay,
                 inboxId: defaultInbox,
                 relayServers: [defaultServer],
-                selectedRelayId: defaultServer.id
+                selectedRelayId: defaultServer.id,
+                hasCompletedOnboarding: true
             )
+            self.requiresOnboarding = false
 
             if requiresStorageChoice {
                 isReady = false
@@ -192,11 +230,25 @@ final class ClientViewModel: ObservableObject {
             if let stored = try await store.load() {
                 state = stored
             } else {
-                try await store.save(state)
+                // First boot: don't persist an identity until the user finishes onboarding.
+                state.hasCompletedOnboarding = false
+                state.hasAcceptedPrivacyPolicy = false
+                state.hasAcceptedTermsOfUse = false
+                requiresOnboarding = true
+                isReady = true
+                return
             }
             if state.insecurePairing.isEnabled {
                 state.insecurePairing.isEnabled = false
                 try await store.save(state)
+            }
+            requiresOnboarding = !state.hasCompletedOnboarding
+                || !state.hasAcceptedPrivacyPolicy
+                || !state.hasAcceptedTermsOfUse
+            if requiresOnboarding {
+                // Defer relay publish/autofetch until first-run setup completes.
+                isReady = true
+                return
             }
             await ensureRelaySelection()
             await ensurePrekeysForActiveProfiles()
@@ -209,6 +261,63 @@ final class ClientViewModel: ObservableObject {
         } catch {
             lastError = "Failed to load state: \(error.localizedDescription)"
         }
+    }
+
+    func completeOnboarding(
+        displayName: String,
+        relayId: UUID?,
+        acceptedPrivacyPolicy: Bool,
+        acceptedTermsOfUse: Bool
+    ) async {
+        guard acceptedPrivacyPolicy && acceptedTermsOfUse else {
+            lastError = "Accept the Privacy Policy and Terms of Use to continue."
+            return
+        }
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            lastError = "Choose a display name."
+            return
+        }
+        let relaySelection = relayId.flatMap { id in
+            state.relayServers.first(where: { $0.id == id })
+        } ?? state.relayServers.first
+        guard let relaySelection else {
+            lastError = "Add a relay server first."
+            return
+        }
+
+        let identity = Identity(displayName: trimmed)
+        let inboxId = InboxAddress.generate()
+        let prekeys = (try? PrekeyState.generate(identity: identity, oneTimeCount: prekeyTargetCount)) ?? PrekeyState(
+            signedPrekeyId: UUID(),
+            signedPrekeyPublicKey: Data(),
+            signedPrekeyPrivateKey: Data(),
+            signedPrekeySignature: Data(),
+            signedPrekeyIssuedAt: Date(),
+            oneTimePrekeys: []
+        )
+        let profile = IdentityProfile(
+            identity: identity,
+            inboxId: inboxId,
+            relay: relaySelection.endpoint,
+            selectedRelayId: relaySelection.id,
+            prekeys: prekeys
+        )
+        state.identityProfiles = [profile]
+        state.activeIdentityId = profile.id
+        state.selectedRelayId = relaySelection.id
+        state.relay = relaySelection.endpoint
+        state.hasCompletedOnboarding = true
+        state.hasAcceptedPrivacyPolicy = acceptedPrivacyPolicy
+        state.hasAcceptedTermsOfUse = acceptedTermsOfUse
+        requiresOnboarding = false
+        await save()
+
+        await ensureRelaySelection()
+        await ensurePrekeysForActiveProfiles()
+        await notifier.requestAuthorization()
+        startAutoFetch()
+        lastInfo = "Setup complete."
     }
 
     private func ensurePrekeys() async {
@@ -277,7 +386,7 @@ final class ClientViewModel: ObservableObject {
             bundle: bundle
         )
         do {
-            let client = RelayClient(endpoint: relay)
+            let client = relayClient(for: relay)
             let response = try await client.send(.uploadPrekeys(request))
             if response.type != .ok {
                 lastError = "Failed to publish prekeys: \(response.error ?? "Relay error")"
@@ -466,7 +575,7 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func fetchPrekeyBundle(for contact: Contact) async -> PrekeyBundle? {
-        let client = RelayClient(endpoint: contact.relay)
+        let client = relayClient(for: contact.relay)
         do {
             let response = try await client.send(
                 .fetchPrekeyBundle(FetchPrekeyBundleRequest(fingerprint: contact.fingerprint))
@@ -604,8 +713,17 @@ final class ClientViewModel: ObservableObject {
             return
         }
         do {
-            let preparedPayload = prepareAttachmentPayload(data: data, fileName: fileName, mimeType: mimeType)
+            let preparedPayload = try prepareAttachmentPayload(data: data, fileName: fileName, mimeType: mimeType)
+            guard preparedPayload.data.count <= maxAttachmentBytes else {
+                throw AttachmentTransferError.attachmentTooLarge(maxBytes: maxAttachmentBytes)
+            }
             let contact = state.contacts[contactIndex]
+            try validateAttachmentQuota(
+                bytes: preparedPayload.data.count,
+                contactId: contact.id,
+                relay: contact.relay,
+                direction: .outbound
+            )
             let session = try await prepareOutboundSession(for: contact)
             var conversation = session.conversation
             let rootRatchet = prepareRootRatchetIfNeeded(conversation: conversation, contact: contact)
@@ -613,6 +731,9 @@ final class ClientViewModel: ObservableObject {
             let attachmentId = UUID()
             let chunkSize = attachmentChunkSize
             let chunkCount = Int(ceil(Double(preparedPayload.data.count) / Double(chunkSize)))
+            guard chunkCount > 0, chunkCount <= maxAttachmentChunkCount else {
+                throw AttachmentTransferError.invalidDescriptor
+            }
             let descriptor = AttachmentDescriptor(
                 id: attachmentId,
                 fileName: preparedPayload.fileName,
@@ -623,7 +744,7 @@ final class ClientViewModel: ObservableObject {
                 chunkSize: chunkSize
             )
             let sessionId = conversation.sessionId
-            let relayClient = RelayClient(endpoint: contact.relay)
+            let relayClient = relayClient(for: contact.relay)
             for chunkIndex in 0..<chunkCount {
                 let start = chunkIndex * chunkSize
                 let end = min(start + chunkSize, preparedPayload.data.count)
@@ -681,6 +802,12 @@ final class ClientViewModel: ObservableObject {
             state.upsert(conversation: conversation)
             try await store.save(state)
             try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
+            recordAttachmentQuotaUsage(
+                bytes: preparedPayload.data.count,
+                contactId: contact.id,
+                relay: contact.relay,
+                direction: .outbound
+            )
             lastInfo = "Sent attachment to \(contact.displayName)."
         } catch {
             lastError = "Failed to send attachment: \(error.localizedDescription)"
@@ -706,7 +833,7 @@ final class ClientViewModel: ObservableObject {
         }
         profileSyncStatus[profileId] = .syncing
         do {
-            let client = RelayClient(endpoint: profile.relay)
+            let client = relayClient(for: profile.relay)
             let response = try await client.send(
                 .fetch(FetchRequest(inboxId: profile.inboxId, routingToken: profile.inboxId))
             )
@@ -832,6 +959,13 @@ final class ClientViewModel: ObservableObject {
                         let sessionId = envelope.sessionId ?? conversation.sessionId
                         let localFileName: String?
                         do {
+                            try validateInboundAttachmentDescriptor(descriptor)
+                            try validateAttachmentQuota(
+                                bytes: descriptor.byteCount,
+                                contactId: contact.id,
+                                relay: contact.relay,
+                                direction: .inbound
+                            )
                             localFileName = try await downloadAttachment(
                                 descriptor: descriptor,
                                 contact: contact,
@@ -840,6 +974,14 @@ final class ClientViewModel: ObservableObject {
                                 messageCounter: envelope.messageCounter,
                                 messageKey: messageKey
                             )
+                            if localFileName != nil {
+                                recordAttachmentQuotaUsage(
+                                    bytes: descriptor.byteCount,
+                                    contactId: contact.id,
+                                    relay: contact.relay,
+                                    direction: .inbound
+                                )
+                            }
                         } catch {
                             localFileName = nil
                             lastError = "Attachment download failed: \(error.localizedDescription)"
@@ -1452,7 +1594,7 @@ final class ClientViewModel: ObservableObject {
             return false
         }
         return await withCheckedContinuation { continuation in
-            context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Unlock Noctyra") { success, _ in
+            context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Unlock app") { success, _ in
                 continuation.resume(returning: success)
             }
         }
@@ -1589,7 +1731,7 @@ final class ClientViewModel: ObservableObject {
             insecureLastRelay = relay
             insecureLastError = nil
             let offer = MessageEngine.makeContactOffer(identity: state.identity, inboxId: state.inboxId, relay: relay)
-            let announceResponse = try await RelayClient(endpoint: relay).send(.announce(AnnounceRequest(offer: offer, ttlSeconds: 120)))
+            let announceResponse = try await relayClient(for: relay).send(.announce(AnnounceRequest(offer: offer, ttlSeconds: 120)))
             if announceResponse.type == .error, let error = announceResponse.error {
                 let message = "Insecure pairing announce failed: \(error)"
                 lastError = message
@@ -1597,7 +1739,7 @@ final class ClientViewModel: ObservableObject {
             } else {
                 insecureLastAnnounceAt = Date()
             }
-            let announcementsResponse = try await RelayClient(endpoint: relay).send(.listAnnouncements(ListAnnouncementsRequest(limit: 50)))
+            let announcementsResponse = try await relayClient(for: relay).send(.listAnnouncements(ListAnnouncementsRequest(limit: 50)))
             if announcementsResponse.type == .announcements {
                 insecureAnnouncements = (announcementsResponse.announcements ?? [])
                     .filter { $0.offer.fingerprint != state.identity.fingerprint }
@@ -1610,7 +1752,7 @@ final class ClientViewModel: ObservableObject {
             }
             if state.insecurePairing.allowInboundRequests {
                 let fetch = FetchPairRequestsRequest(fingerprint: state.identity.fingerprint, maxCount: 50)
-                let requestsResponse = try await RelayClient(endpoint: relay).send(.fetchPairRequests(fetch))
+                let requestsResponse = try await relayClient(for: relay).send(.fetchPairRequests(fetch))
                 if requestsResponse.type == .pairRequests {
                     insecureRequests = requestsResponse.pairRequests ?? []
                     insecureLastRequestCount = insecureRequests.count
@@ -1635,7 +1777,7 @@ final class ClientViewModel: ObservableObject {
             insecureLastRelay = relay
             insecureLastError = nil
             let offer = MessageEngine.makeContactOffer(identity: state.identity, inboxId: state.inboxId, relay: relay)
-            let response = try await RelayClient(endpoint: relay).send(.announce(AnnounceRequest(offer: offer, ttlSeconds: 120)))
+            let response = try await relayClient(for: relay).send(.announce(AnnounceRequest(offer: offer, ttlSeconds: 120)))
             if response.type == .error, let error = response.error {
                 let message = "Insecure pairing announce failed: \(error)"
                 lastError = message
@@ -1683,7 +1825,7 @@ final class ClientViewModel: ObservableObject {
             insecureLastError = nil
             insecureSelfTestStep = "Announce"
             let offer = MessageEngine.makeContactOffer(identity: state.identity, inboxId: state.inboxId, relay: relay)
-            let announceResponse = try await RelayClient(endpoint: relay)
+            let announceResponse = try await relayClient(for: relay)
                 .send(.announce(AnnounceRequest(offer: offer, ttlSeconds: 120)))
             if announceResponse.type == .error, let error = announceResponse.error {
                 throw InsecureSelfTestFailure(message: "Announce error: \(error)")
@@ -1696,7 +1838,7 @@ final class ClientViewModel: ObservableObject {
             insecureLastAnnounceAt = Date()
 
             insecureSelfTestStep = "List"
-            let listResponse = try await RelayClient(endpoint: relay)
+            let listResponse = try await relayClient(for: relay)
                 .send(.listAnnouncements(ListAnnouncementsRequest(limit: 50)))
             if listResponse.type == .error, let error = listResponse.error {
                 throw InsecureSelfTestFailure(message: "List error: \(error)")
@@ -1713,7 +1855,7 @@ final class ClientViewModel: ObservableObject {
             insecureLastPeerCount = listed.filter { $0.offer.fingerprint != state.identity.fingerprint }.count
 
             insecureSelfTestStep = "Pair request"
-            let pairResponse = try await RelayClient(endpoint: relay)
+            let pairResponse = try await relayClient(for: relay)
                 .send(.sendPairRequest(SendPairRequest(targetFingerprint: state.identity.fingerprint, offer: offer)))
             if pairResponse.type == .error, let error = pairResponse.error {
                 throw InsecureSelfTestFailure(message: "Pair request error: \(error)")
@@ -1723,7 +1865,7 @@ final class ClientViewModel: ObservableObject {
             }
 
             insecureSelfTestStep = "Fetch requests"
-            let fetchResponse = try await RelayClient(endpoint: relay)
+            let fetchResponse = try await relayClient(for: relay)
                 .send(.fetchPairRequests(FetchPairRequestsRequest(fingerprint: state.identity.fingerprint, maxCount: 5)))
             if fetchResponse.type == .error, let error = fetchResponse.error {
                 throw InsecureSelfTestFailure(message: "Fetch error: \(error)")
@@ -1774,7 +1916,7 @@ final class ClientViewModel: ObservableObject {
         do {
             let offer = MessageEngine.makeContactOffer(identity: state.identity, inboxId: state.inboxId, relay: relay)
             let request = SendPairRequest(targetFingerprint: announcement.offer.fingerprint, offer: offer)
-            _ = try await RelayClient(endpoint: relay).send(.sendPairRequest(request))
+            _ = try await relayClient(for: relay).send(.sendPairRequest(request))
             lastInfo = "Pairing request sent to \(announcement.offer.displayName)."
         } catch {
             lastError = "Failed to send pairing request: \(error.localizedDescription)"
@@ -1811,7 +1953,9 @@ final class ClientViewModel: ObservableObject {
                 contact: contact,
                 existingConversation: conversation,
                 preferredRelay: state.relay,
-                resendCount: resendRequestCount
+                resendCount: resendRequestCount,
+                preferredRelayAuthToken: relayAuthToken(for: state.relay),
+                destinationRelayAuthToken: relayAuthToken(for: contact.relay)
             )
             state.upsert(conversation: rebuilt)
             await save()
@@ -1837,10 +1981,8 @@ final class ClientViewModel: ObservableObject {
         messageCounter: UInt64,
         messageKey: SymmetricKey
     ) async throws -> String? {
-        guard descriptor.chunkCount > 0 else {
-            throw AttachmentTransferError.invalidDescriptor
-        }
-        let client = RelayClient(endpoint: contact.relay)
+        try validateInboundAttachmentDescriptor(descriptor)
+        let client = relayClient(for: contact.relay)
         var data = Data()
         data.reserveCapacity(descriptor.byteCount)
         for chunkIndex in 0..<descriptor.chunkCount {
@@ -1878,17 +2020,30 @@ final class ClientViewModel: ObservableObject {
         guard data.count == descriptor.byteCount else {
             throw AttachmentTransferError.invalidSize
         }
+        guard detectSupportedImageFormat(data) != nil else {
+            throw AttachmentTransferError.unsupportedType
+        }
         guard AttachmentCrypto.sha256(data) == descriptor.sha256 else {
             throw AttachmentTransferError.invalidChecksum
         }
         return try attachmentStore.saveAttachment(data, descriptor: descriptor)
     }
 
-    func addRelayServer(name: String, host: String, port: UInt16, note: String? = nil, origin: RelayServerOrigin = .manual, sourceId: UUID? = nil) async {
-        let endpoint = RelayEndpoint(host: host, port: port)
+    func addRelayServer(
+        name: String,
+        host: String,
+        port: UInt16,
+        useTLS: Bool = false,
+        note: String? = nil,
+        relayPassword: String? = nil,
+        origin: RelayServerOrigin = .manual,
+        sourceId: UUID? = nil
+    ) async {
+        let endpoint = RelayEndpoint(host: host, port: port, useTLS: useTLS)
         if let index = state.relayServers.firstIndex(where: { $0.endpoint == endpoint }) {
             state.relayServers[index].name = name
             state.relayServers[index].note = note
+            state.relayServers[index].relayPassword = relayPassword
             state.relayServers[index].origin = origin
             state.relayServers[index].sourceId = sourceId
         } else {
@@ -1897,6 +2052,7 @@ final class ClientViewModel: ObservableObject {
                     name: name,
                     endpoint: endpoint,
                     note: note,
+                    relayPassword: relayPassword,
                     origin: origin,
                     sourceId: sourceId
                 )
@@ -1909,8 +2065,16 @@ final class ClientViewModel: ObservableObject {
         await save()
     }
 
-    func updateRelayServer(id: UUID, name: String, host: String, port: UInt16, note: String?) async {
-        let endpoint = RelayEndpoint(host: host, port: port)
+    func updateRelayServer(
+        id: UUID,
+        name: String,
+        host: String,
+        port: UInt16,
+        useTLS: Bool,
+        note: String?,
+        relayPassword: String?
+    ) async {
+        let endpoint = RelayEndpoint(host: host, port: port, useTLS: useTLS)
         if state.relayServers.contains(where: { $0.id != id && $0.endpoint == endpoint }) {
             lastError = "That relay already exists."
             return
@@ -1923,6 +2087,7 @@ final class ClientViewModel: ObservableObject {
         state.relayServers[index].name = name
         state.relayServers[index].endpoint = endpoint
         state.relayServers[index].note = note
+        state.relayServers[index].relayPassword = relayPassword
         if oldEndpoint != endpoint {
             state.relayServers[index].advertisedInfo = nil
             state.relayServers[index].lastInfoFetchedAt = nil
@@ -1979,7 +2144,7 @@ final class ClientViewModel: ObservableObject {
     func testSelectedRelay() async {
         let endpoint = state.relay
         do {
-            let client = RelayClient(endpoint: endpoint)
+            let client = relayClient(for: endpoint)
             let response = try await client.send(.health())
             if response.type == .ok {
                 lastInfo = "Relay \(endpoint.host):\(endpoint.port) is reachable."
@@ -2106,7 +2271,7 @@ final class ClientViewModel: ObservableObject {
             for line in lines {
                 let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
-                let parts = trimmed.split(separator: ",", maxSplits: 12, omittingEmptySubsequences: false)
+                let parts = trimmed.split(separator: ",", maxSplits: 14, omittingEmptySubsequences: false)
                 let hostPort = String(parts[0]).trimmingCharacters(in: .whitespaces)
                 let name = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : nil
                 let region = parts.count > 2 ? String(parts[2]).trimmingCharacters(in: .whitespaces) : nil
@@ -2120,11 +2285,13 @@ final class ClientViewModel: ObservableObject {
                 let temporalBucketSeconds = parts.count > 10 ? parseBucketSeconds(String(parts[10])) : nil
                 let operatorNote = parts.count > 11 ? String(parts[11]).trimmingCharacters(in: .whitespaces) : nil
                 let softwareVersion = parts.count > 12 ? String(parts[12]).trimmingCharacters(in: .whitespaces) : nil
-                guard let (host, port) = parseHostPort(hostPort) else { continue }
+                let requiresPassword = parts.count > 13 ? parseBool(String(parts[13])) : nil
+                let tlsFlag = parts.count > 14 ? parseBool(String(parts[14])) : nil
+                guard let parsedEndpoint = parseHostPort(hostPort) else { continue }
                 let entry = MasterServerEntry(
                     name: name?.isEmpty == true ? nil : name,
-                    host: host,
-                    port: port,
+                    host: parsedEndpoint.host,
+                    port: parsedEndpoint.port,
                     note: note?.isEmpty == true ? nil : note,
                     region: region?.isEmpty == true ? nil : region,
                     tags: tags,
@@ -2135,7 +2302,9 @@ final class ClientViewModel: ObservableObject {
                     federationDescription: federationDescription?.isEmpty == true ? nil : federationDescription,
                     temporalBucketSeconds: temporalBucketSeconds,
                     operatorNote: operatorNote?.isEmpty == true ? nil : operatorNote,
-                    softwareVersion: softwareVersion?.isEmpty == true ? nil : softwareVersion
+                    softwareVersion: softwareVersion?.isEmpty == true ? nil : softwareVersion,
+                    requiresPassword: requiresPassword,
+                    useTLS: tlsFlag ?? parsedEndpoint.useTLS
                 )
                 records.append(RelayServerRecord(entry: entry, sourceId: sourceId))
             }
@@ -2147,13 +2316,30 @@ final class ClientViewModel: ObservableObject {
         throw CryptoError.invalidPayload
     }
 
-    private func parseHostPort(_ value: String) -> (String, UInt16)? {
-        let parts = value.split(separator: ":", maxSplits: 1)
+    private func parseHostPort(_ value: String) -> RelayEndpoint? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let components = URLComponents(string: trimmed), let scheme = components.scheme, !scheme.isEmpty {
+            guard let host = components.host else { return nil }
+            guard let port = UInt16(exactly: components.port ?? 9339) else { return nil }
+            let useTLS = scheme.lowercased() == "https"
+            return RelayEndpoint(host: host, port: port, useTLS: useTLS)
+        }
+        if trimmed.hasPrefix("["), let close = trimmed.firstIndex(of: "]") {
+            let host = String(trimmed[trimmed.index(after: trimmed.startIndex)..<close])
+            let remainder = trimmed[trimmed.index(after: close)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            guard remainder.hasPrefix(":"),
+                  let port = UInt16(remainder.dropFirst()) else {
+                return nil
+            }
+            return RelayEndpoint(host: host, port: port, useTLS: false)
+        }
+        let parts = trimmed.split(separator: ":", maxSplits: 1)
         guard parts.count == 2, let port = UInt16(parts[1]) else {
             return nil
         }
         let host = String(parts[0])
-        return host.isEmpty ? nil : (host, port)
+        return host.isEmpty ? nil : RelayEndpoint(host: host, port: port, useTLS: false)
     }
 
     private func parseTags(_ value: String) -> [String]? {
@@ -2195,6 +2381,17 @@ final class ClientViewModel: ObservableObject {
         return Int(trimmed)
     }
 
+    private func parseBool(_ value: String) -> Bool? {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "y":
+            return true
+        case "0", "false", "no", "n":
+            return false
+        default:
+            return nil
+        }
+    }
+
     private func mergeMasterServers(_ records: [RelayServerRecord]) {
         let filtered = filterFederationCompatible(records)
         for record in filtered {
@@ -2206,6 +2403,9 @@ final class ClientViewModel: ObservableObject {
                 state.relayServers[index].note = record.note
                 state.relayServers[index].origin = record.origin
                 state.relayServers[index].sourceId = record.sourceId
+                if let password = record.relayPassword {
+                    state.relayServers[index].relayPassword = password
+                }
                 if let advertisedInfo = record.advertisedInfo {
                     state.relayServers[index].advertisedInfo = advertisedInfo
                     state.relayServers[index].lastInfoFetchedAt = record.lastInfoFetchedAt ?? Date()
@@ -2263,8 +2463,21 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
+    private func relayAuthToken(for endpoint: RelayEndpoint) -> String? {
+        guard let value = state.relayServers.first(where: { $0.endpoint == endpoint })?.relayPassword?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return value
+    }
+
+    private func relayClient(for endpoint: RelayEndpoint) -> RelayClient {
+        RelayClient(endpoint: endpoint, authToken: relayAuthToken(for: endpoint))
+    }
+
     private func loadRelayInfo(endpoint: RelayEndpoint) async throws -> RelayInfo {
-        let client = RelayClient(endpoint: endpoint)
+        let client = relayClient(for: endpoint)
         let response = try await client.send(.info())
         guard response.type == .info, let info = response.relayInfo else {
             throw RelayInfoError.missing
@@ -2342,7 +2555,9 @@ final class ClientViewModel: ObservableObject {
                 contact: contact,
                 existingConversation: existingConversation,
                 preferredRelay: preferredRelay,
-                resendCount: resendRequestCount
+                resendCount: resendRequestCount,
+                preferredRelayAuthToken: relayAuthToken(for: preferredRelay),
+                destinationRelayAuthToken: relayAuthToken(for: contact.relay)
             )
         } catch {
             // Silent auto-recovery: avoid surfacing transient errors to the user.
@@ -2481,7 +2696,9 @@ final class ClientViewModel: ObservableObject {
             envelope: envelope,
             inboxId: contact.inboxId,
             preferredRelay: preferredRelay,
-            destinationRelay: contact.relay
+            destinationRelay: contact.relay,
+            preferredRelayAuthToken: relayAuthToken(for: preferredRelay),
+            destinationRelayAuthToken: relayAuthToken(for: contact.relay)
         )
     }
 
@@ -2509,31 +2726,191 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
+    private enum AttachmentQuotaDirection {
+        case outbound
+        case inbound
+    }
+
+    private enum SupportedImageFormat {
+        case jpeg
+        case png
+        case heic
+        case heif
+        case avif
+    }
+
     private func prepareAttachmentPayload(
         data: Data,
         fileName: String?,
         mimeType: String
-    ) -> (data: Data, fileName: String?, mimeType: String) {
-        guard mimeType.lowercased().hasPrefix("image/") else {
-            return (data, fileName, mimeType)
+    ) throws -> (data: Data, fileName: String?, mimeType: String) {
+        let normalizedMime = normalizeMimeType(mimeType)
+        guard normalizedMime.hasPrefix("image/"), detectSupportedImageFormat(data) != nil else {
+            throw AttachmentTransferError.unsupportedType
         }
-        guard let compressed = compressImageData(data) else {
-            return (data, fileName, mimeType)
-        }
-        guard compressed.count < data.count else {
-            return (data, fileName, mimeType)
+        try validateImageInputDimensions(data)
+        guard let canonicalJPEG = transcodeImageToCanonicalJPEG(data) else {
+            throw AttachmentTransferError.imageProcessingFailed
         }
         var updatedName = fileName
         if let fileName, !fileName.isEmpty {
             let base = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
             updatedName = "\(base).jpg"
         }
-        return (compressed, updatedName, "image/jpeg")
+        return (canonicalJPEG, updatedName, "image/jpeg")
     }
 
-    private func compressImageData(_ data: Data) -> Data? {
-        let maxDimension: CGFloat = 1600
-        let quality: CGFloat = 0.82
+    private func validateInboundAttachmentDescriptor(_ descriptor: AttachmentDescriptor) throws {
+        guard descriptor.byteCount > 0 else {
+            throw AttachmentTransferError.invalidDescriptor
+        }
+        guard descriptor.byteCount <= maxAttachmentBytes else {
+            throw AttachmentTransferError.attachmentTooLarge(maxBytes: maxAttachmentBytes)
+        }
+        guard descriptor.chunkSize > 0, descriptor.chunkSize <= attachmentChunkSize else {
+            throw AttachmentTransferError.invalidDescriptor
+        }
+        guard descriptor.chunkCount > 0, descriptor.chunkCount <= maxAttachmentChunkCount else {
+            throw AttachmentTransferError.invalidDescriptor
+        }
+        let expectedChunkCount = Int(ceil(Double(descriptor.byteCount) / Double(descriptor.chunkSize)))
+        guard expectedChunkCount == descriptor.chunkCount else {
+            throw AttachmentTransferError.invalidDescriptor
+        }
+        guard descriptor.sha256.count == 32 else {
+            throw AttachmentTransferError.invalidDescriptor
+        }
+        guard normalizeMimeType(descriptor.mimeType).hasPrefix("image/") else {
+            throw AttachmentTransferError.unsupportedType
+        }
+    }
+
+    private func validateAttachmentQuota(
+        bytes: Int,
+        contactId: UUID,
+        relay: RelayEndpoint,
+        direction: AttachmentQuotaDirection
+    ) throws {
+        let now = Date()
+        let relayKey = quotaRelayKey(relay)
+        var contactMap = quotaMapByContact(direction: direction)
+        var relayMap = quotaMapByRelay(direction: direction)
+
+        let contactEvents = pruneQuotaEvents(contactMap[contactId] ?? [], now: now)
+        let relayEvents = pruneQuotaEvents(relayMap[relayKey] ?? [], now: now)
+        contactMap[contactId] = contactEvents
+        relayMap[relayKey] = relayEvents
+        setQuotaMaps(contactMap: contactMap, relayMap: relayMap, direction: direction)
+
+        let contactCount = contactEvents.count
+        let contactBytes = contactEvents.reduce(0) { $0 + $1.bytes }
+        let relayBytes = relayEvents.reduce(0) { $0 + $1.bytes }
+
+        guard contactCount < maxAttachmentCountPerContactPerWindow else {
+            throw AttachmentTransferError.quotaExceeded("Attachment rate limit reached for this contact. Try again later.")
+        }
+        guard contactBytes + bytes <= maxAttachmentBytesPerContactPerWindow else {
+            throw AttachmentTransferError.quotaExceeded("Attachment byte quota reached for this contact.")
+        }
+        guard relayBytes + bytes <= maxAttachmentBytesPerRelayPerWindow else {
+            throw AttachmentTransferError.quotaExceeded("Attachment byte quota reached for this relay.")
+        }
+    }
+
+    private func recordAttachmentQuotaUsage(
+        bytes: Int,
+        contactId: UUID,
+        relay: RelayEndpoint,
+        direction: AttachmentQuotaDirection
+    ) {
+        let now = Date()
+        let relayKey = quotaRelayKey(relay)
+        var contactMap = quotaMapByContact(direction: direction)
+        var relayMap = quotaMapByRelay(direction: direction)
+
+        var contactEvents = pruneQuotaEvents(contactMap[contactId] ?? [], now: now)
+        contactEvents.append(AttachmentQuotaEvent(timestamp: now, bytes: bytes))
+        contactMap[contactId] = contactEvents
+
+        var relayEvents = pruneQuotaEvents(relayMap[relayKey] ?? [], now: now)
+        relayEvents.append(AttachmentQuotaEvent(timestamp: now, bytes: bytes))
+        relayMap[relayKey] = relayEvents
+
+        setQuotaMaps(contactMap: contactMap, relayMap: relayMap, direction: direction)
+    }
+
+    private func pruneQuotaEvents(_ events: [AttachmentQuotaEvent], now: Date) -> [AttachmentQuotaEvent] {
+        events.filter { now.timeIntervalSince($0.timestamp) <= attachmentQuotaWindowSeconds }
+    }
+
+    private func quotaMapByContact(direction: AttachmentQuotaDirection) -> [UUID: [AttachmentQuotaEvent]] {
+        switch direction {
+        case .outbound:
+            return outboundAttachmentQuotaByContact
+        case .inbound:
+            return inboundAttachmentQuotaByContact
+        }
+    }
+
+    private func quotaMapByRelay(direction: AttachmentQuotaDirection) -> [String: [AttachmentQuotaEvent]] {
+        switch direction {
+        case .outbound:
+            return outboundAttachmentQuotaByRelay
+        case .inbound:
+            return inboundAttachmentQuotaByRelay
+        }
+    }
+
+    private func setQuotaMaps(
+        contactMap: [UUID: [AttachmentQuotaEvent]],
+        relayMap: [String: [AttachmentQuotaEvent]],
+        direction: AttachmentQuotaDirection
+    ) {
+        switch direction {
+        case .outbound:
+            outboundAttachmentQuotaByContact = contactMap
+            outboundAttachmentQuotaByRelay = relayMap
+        case .inbound:
+            inboundAttachmentQuotaByContact = contactMap
+            inboundAttachmentQuotaByRelay = relayMap
+        }
+    }
+
+    private func quotaRelayKey(_ relay: RelayEndpoint) -> String {
+        "\(relay.host.lowercased()):\(relay.port)"
+    }
+
+    private func normalizeMimeType(_ mimeType: String) -> String {
+        mimeType
+            .split(separator: ";", maxSplits: 1)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? mimeType.lowercased()
+    }
+
+    private func validateImageInputDimensions(_ data: Data) throws {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let widthValue = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let heightValue = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+            throw AttachmentTransferError.imageProcessingFailed
+        }
+        let width = widthValue.intValue
+        let height = heightValue.intValue
+        guard width > 0, height > 0 else {
+            throw AttachmentTransferError.imageProcessingFailed
+        }
+        guard CGFloat(width) <= maxAttachmentInputDimension,
+              CGFloat(height) <= maxAttachmentInputDimension else {
+            throw AttachmentTransferError.invalidDescriptor
+        }
+        let pixels = width * height
+        guard pixels > 0, pixels <= maxAttachmentInputPixels else {
+            throw AttachmentTransferError.invalidDescriptor
+        }
+    }
+
+    private func transcodeImageToCanonicalJPEG(_ data: Data) -> Data? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             return nil
@@ -2543,9 +2920,9 @@ final class ClientViewModel: ObservableObject {
         guard width > 0, height > 0 else {
             return nil
         }
-        let scale = min(1, maxDimension / max(width, height))
-        let targetWidth = Int(width * scale)
-        let targetHeight = Int(height * scale)
+        let scale = min(1, attachmentOutputMaxDimension / max(width, height))
+        let targetWidth = max(1, Int(width * scale))
+        let targetHeight = max(1, Int(height * scale))
         let colorSpace = image.colorSpace ?? CGColorSpaceCreateDeviceRGB()
         guard let context = CGContext(
             data: nil,
@@ -2564,16 +2941,55 @@ final class ClientViewModel: ObservableObject {
             return nil
         }
         let output = NSMutableData()
-        let type = UTType.jpeg.identifier as CFString
-        guard let destination = CGImageDestinationCreateWithData(output, type, 1, nil) else {
+        guard let destination = CGImageDestinationCreateWithData(output, UTType.jpeg.identifier as CFString, 1, nil) else {
             return nil
         }
-        let options = [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
+        let options = [kCGImageDestinationLossyCompressionQuality: attachmentOutputQuality] as CFDictionary
+        // Write only the rendered raster and no source metadata to strip EXIF/GPS fields.
         CGImageDestinationAddImage(destination, scaled, options)
         guard CGImageDestinationFinalize(destination) else {
             return nil
         }
         return output as Data
+    }
+
+    private func detectSupportedImageFormat(_ data: Data) -> SupportedImageFormat? {
+        guard data.count >= 12 else { return nil }
+        let bytes = [UInt8](data.prefix(32))
+        if bytes.count >= 3, bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF {
+            return .jpeg
+        }
+        if bytes.count >= 8,
+           bytes[0] == 0x89,
+           bytes[1] == 0x50,
+           bytes[2] == 0x4E,
+           bytes[3] == 0x47,
+           bytes[4] == 0x0D,
+           bytes[5] == 0x0A,
+           bytes[6] == 0x1A,
+           bytes[7] == 0x0A {
+            return .png
+        }
+        if bytes.count >= 12,
+           bytes[4] == 0x66,
+           bytes[5] == 0x74,
+           bytes[6] == 0x79,
+           bytes[7] == 0x70 {
+            let brandBytes = Array(bytes[8..<12])
+            guard let brand = String(bytes: brandBytes, encoding: .ascii)?.lowercased() else {
+                return nil
+            }
+            if ["heic", "heix", "hevc", "hevx"].contains(brand) {
+                return .heic
+            }
+            if ["mif1", "msf1", "heif"].contains(brand) {
+                return .heif
+            }
+            if ["avif", "avis"].contains(brand) {
+                return .avif
+            }
+        }
+        return nil
     }
 
     private func shouldLockForTimeout() -> Bool {
