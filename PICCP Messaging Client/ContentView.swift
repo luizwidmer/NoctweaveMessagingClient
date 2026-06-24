@@ -4832,8 +4832,6 @@ private struct FullScreenQRView: View {
 
 private struct SettingsView: View {
     @ObservedObject var model: ClientViewModel
-    @Environment(\.appTheme) private var theme
-    @Environment(\.colorScheme) private var colorScheme
     @State private var selectedTheme: ThemePalette = .glacier
     @State private var privacySettings = PrivacySettings()
     @State private var appLockSettings = AppLockSettings()
@@ -5085,6 +5083,81 @@ private struct SettingsView: View {
         nonmutating set { settingsDestinationRaw = newValue?.rawValue ?? "" }
     }
 
+    private struct SettingsDestinationCard: View {
+        let destination: SettingsDestination
+
+        @Environment(\.appTheme) private var theme
+        @Environment(\.colorScheme) private var colorScheme
+        #if os(macOS)
+        @State private var hovering = false
+        #endif
+
+        private var isDark: Bool {
+            colorScheme == .dark
+        }
+
+        var body: some View {
+            HStack(spacing: 13) {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            Circle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            theme.accent.opacity(isDark ? 0.22 : 0.16),
+                                            theme.glowSecondary.opacity(isDark ? 0.16 : 0.08)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                        )
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white.opacity(isDark ? 0.22 : 0.38), lineWidth: 0.8)
+                        )
+                        .frame(width: 34, height: 34)
+
+                    Image(systemName: destination.symbol)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(destination.title)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary)
+                    Text(destination.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(theme.accent.opacity(0.86))
+                    .frame(width: 26, height: 26)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(isDark ? 0.16 : 0.30), lineWidth: 0.7)
+                    )
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .uniformGlassCard(cornerRadius: 15, minHeight: 72)
+            #if os(macOS)
+            .shadow(color: theme.accent.opacity(hovering ? 0.18 : 0.06), radius: hovering ? 14 : 7, x: 0, y: hovering ? 7 : 3)
+            .scaleEffect(hovering ? 1.006 : 1.0)
+            .animation(.easeOut(duration: 0.16), value: hovering)
+            .onHover { hovering = $0 }
+            #endif
+        }
+    }
+
     private func settingsDetail(for destination: SettingsDestination) -> some View {
         ScrollView {
             VStack(spacing: 14) {
@@ -5130,47 +5203,11 @@ private struct SettingsView: View {
                         settingsDestination = destination
                         FeedbackGenerator.light()
                     } label: {
-                        HStack(spacing: 12) {
-                            ZStack {
-                                Circle()
-                                    .fill(
-                                        LinearGradient(
-                                            colors: [
-                                                theme.accent.opacity(colorScheme == .dark ? 0.26 : 0.20),
-                                                theme.glowSecondary.opacity(colorScheme == .dark ? 0.16 : 0.10)
-                                            ],
-                                            startPoint: .topLeading,
-                                            endPoint: .bottomTrailing
-                                        )
-                                    )
-                                    .frame(width: 30, height: 30)
-                                Image(systemName: destination.symbol)
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(theme.accent)
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(destination.title)
-                                    .font(.headline)
-                                    .foregroundStyle(.primary)
-                                Text(destination.subtitle)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(6)
-                                .background(.ultraThinMaterial, in: Circle())
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
+                        SettingsDestinationCard(destination: destination)
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("settings-destination-\(destination.rawValue)")
                     .frame(maxWidth: .infinity)
-                    .uniformGlassCard(cornerRadius: 14, minHeight: 68)
-                    .contentShape(Rectangle())
                 }
             }
             .padding(.horizontal, 16)
@@ -5295,17 +5332,17 @@ private struct SettingsView: View {
     }
 
     @ViewBuilder
-	    private var appearanceFields: some View {
-	        #if os(iOS)
-	        // iPhone portrait can be very narrow (including multi-column layouts). Keep swatches flexible.
-	        let columns = [GridItem(.adaptive(minimum: 112), spacing: 12)]
-	        #else
-	        let columns = [GridItem(.adaptive(minimum: 140), spacing: 12)]
-	        #endif
-	        let palettes = [ThemePalette.noir] + ThemePalette.allCases.filter { $0 != .noir }
-	        VStack(alignment: .leading, spacing: 8) {
-	            LazyVGrid(columns: columns, spacing: 12) {
-	                ForEach(palettes) { palette in
+    private var appearanceFields: some View {
+        #if os(iOS)
+        // iPhone portrait can be very narrow (including multi-column layouts). Keep swatches flexible.
+        let columns = [GridItem(.adaptive(minimum: 112), spacing: 12)]
+        #else
+        let columns = [GridItem(.adaptive(minimum: 140), spacing: 12)]
+        #endif
+        let palettes = [ThemePalette.noir] + ThemePalette.allCases.filter { $0 != .noir }
+        VStack(alignment: .leading, spacing: 8) {
+            LazyVGrid(columns: columns, spacing: 12) {
+                ForEach(palettes) { palette in
                     ThemeSwatch(palette: palette, isSelected: palette == selectedTheme) {
                         selectedTheme = palette
                     }
