@@ -6260,6 +6260,7 @@ private struct IdentityManagementView: View {
     @State private var newIdentityName = ""
     @State private var newIdentityRelayId: UUID?
     @State private var identitySearchText = ""
+    @State private var showingCreateIdentity = false
 
     var body: some View {
         Group {
@@ -6311,6 +6312,10 @@ private struct IdentityManagementView: View {
             if newIdentityRelayId == nil {
                 newIdentityRelayId = model.state.relayServers.first?.id
             }
+        }
+        .sheet(isPresented: $showingCreateIdentity) {
+            createIdentitySheet
+                .noctyraSheetPresentation()
         }
         .simultaneousGesture(
             DragGesture(minimumDistance: 20)
@@ -6377,7 +6382,6 @@ private struct IdentityManagementView: View {
             VStack(alignment: .leading, spacing: 16) {
                 PaneHeader(title: "Identity Management", subtitle: "Manage key continuity and full resets")
                 identityOverviewCard
-                addIdentityCard
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Identity Book")
                         .font(.headline)
@@ -6394,13 +6398,7 @@ private struct IdentityManagementView: View {
         #else
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Overview")
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
                 identityOverviewCard
-
-                addIdentityCard
 
                 Text("Identity Book")
                     .font(.headline)
@@ -6426,22 +6424,113 @@ private struct IdentityManagementView: View {
         let archived = model.state.identityProfiles.filter(\.isArchived).count
         let activeName = model.state.identityProfile(id: model.state.activeIdentityId)?.identity.displayName ?? "None"
 
-        return VStack(alignment: .leading, spacing: 10) {
-            Text("Active identity")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(activeName)
-                .font(.headline)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            HStack(spacing: 10) {
-                identityMetricBadge(title: "Profiles", value: "\(total)")
-                identityMetricBadge(title: "Archived", value: "\(archived)")
-                identityMetricBadge(title: "Audit Events", value: "\(continuityEventCount)")
-            }
+        return ViewThatFits(in: .horizontal) {
+            identityOverviewRow(activeName: activeName, total: total, archived: archived)
+            identityOverviewStack(activeName: activeName, total: total, archived: archived)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .uniformGlassCard(cornerRadius: 14, minHeight: 92)
+        .uniformGlassCard(cornerRadius: 16, minHeight: 96)
+    }
+
+    private func identityOverviewRow(activeName: String, total: Int, archived: Int) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .frame(width: 44, height: 44)
+                Image(systemName: "person.badge.key.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Active Identity")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(activeName)
+                    .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                HStack(spacing: 8) {
+                    identityMetricBadge(title: "Profiles", value: "\(total)")
+                    identityMetricBadge(title: "Archived", value: "\(archived)")
+                    identityMetricBadge(title: "Audit", value: "\(continuityEventCount)")
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            Button {
+                showingCreateIdentity = true
+            } label: {
+                Label("New", systemImage: "plus")
+            }
+            .glassButton(prominent: true, compact: true)
+            .hoverLift()
+            .disabled(model.state.relayServers.isEmpty)
+            #if os(macOS)
+            .help(model.state.relayServers.isEmpty ? "Add a relay before creating another identity." : "Create a new identity")
+            #endif
+        }
+    }
+
+    private func identityOverviewStack(activeName: String, total: Int, archived: Int) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 40, height: 40)
+                    Image(systemName: "person.badge.key.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Active Identity")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(activeName)
+                        .font(.headline)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+
+                Spacer(minLength: 8)
+
+                Button {
+                    showingCreateIdentity = true
+                } label: {
+                    Label("New", systemImage: "plus")
+                }
+                .glassButton(prominent: true, compact: true)
+                .hoverLift()
+                .disabled(model.state.relayServers.isEmpty)
+            }
+
+            HStack(spacing: 8) {
+                identityMetricBadge(title: "Profiles", value: "\(total)")
+                identityMetricBadge(title: "Archived", value: "\(archived)")
+                identityMetricBadge(title: "Audit", value: "\(continuityEventCount)")
+            }
+        }
+    }
+
+    private var createIdentitySheet: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                SheetHero(
+                    icon: "person.crop.circle.badge.plus",
+                    title: "Create Identity",
+                    subtitle: "Create an independent inbox with its own home relay."
+                )
+                addIdentityCard
+            }
+            .padding(20)
+            .frame(maxWidth: 560)
+            .frame(maxWidth: .infinity)
+        }
+        .glassBackgroundIfNeeded()
     }
 
     private func identityMetricBadge(title: String, value: String) -> some View {
@@ -6453,7 +6542,7 @@ private struct IdentityManagementView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.vertical, 7)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
@@ -6476,7 +6565,8 @@ private struct IdentityManagementView: View {
             let haystack = [
                 profile.identity.displayName,
                 profile.identity.fingerprint,
-                profile.inboxId
+                profile.inboxId,
+                currentRelayName(for: profile)
             ]
             .joined(separator: " ")
             .lowercased()
@@ -6491,86 +6581,76 @@ private struct IdentityManagementView: View {
                     .foregroundStyle(.secondary)
             }
             ForEach(filtered) { profile in
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 12) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(profile.identity.displayName)
-                                .font(.headline)
-                            Text(shortFingerprint(profile.identity.fingerprint))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if profile.id == model.state.activeIdentityId {
-                            Text("Active")
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Capsule().fill(Color.white.opacity(0.15)))
-                        } else if profile.isArchived {
-                            Text("Archived")
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Capsule().fill(Color.white.opacity(0.12)))
-                        }
-                        syncBadge(for: profile)
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                identityProfileCard(profile)
+            }
+        }
+    }
+
+    private func identityProfileCard(_ profile: IdentityProfile) -> some View {
+        Button {
+            destination = .profile(profile.id)
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 36, height: 36)
+                    Image(systemName: profile.isArchived ? "archivebox.fill" : "person.text.rectangle.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(profile.isArchived ? .secondary : Color.accentColor)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(profile.identity.displayName)
+                            .font(.headline)
+                            .lineLimit(1)
+                        identityStatusBadge(for: profile)
                     }
-                    Text("Inbox: \(profile.inboxId)")
-                        .font(.caption2.monospaced())
+                    Text("\(shortFingerprint(profile.identity.fingerprint)) • \(currentRelayName(for: profile))")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    HStack(spacing: 10) {
-                        Label("Home Relay", systemImage: "antenna.radiowaves.left.and.right")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        if model.state.relayServers.isEmpty {
-                            Text("None")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Menu(currentRelayName(for: profile)) {
-                                ForEach(model.state.relayServers) { server in
-                                    Button(server.displayName) {
-                                        Task {
-                                            await model.updateIdentityRelay(profileId: profile.id, relayId: server.id)
-                                        }
-                                    }
-                                }
-                            }
-                            .font(.caption)
-                            .disabled(profile.isArchived)
-                        }
-                    }
-                    if !profile.isArchived, profile.id != model.state.activeIdentityId {
-                        HStack {
-                            Spacer()
-                            Button("Use") {
-                                Task { await model.setActiveIdentity(profile.id) }
-                            }
-                            .glassButton(compact: true)
-                            .hoverLift()
-                        }
-                    }
                 }
-                .cardButtonStyle()
-                .onTapGesture {
-                    destination = .profile(profile.id)
-                }
+
+                Spacer(minLength: 8)
+                syncBadge(for: profile)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .uniformGlassCard(cornerRadius: 14, minHeight: 66)
+        .hoverLift()
+    }
+
+    @ViewBuilder
+    private func identityStatusBadge(for profile: IdentityProfile) -> some View {
+        if profile.id == model.state.activeIdentityId {
+            Text("Active")
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.white.opacity(0.15)))
+        } else if profile.isArchived {
+            Text("Archived")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.white.opacity(0.12)))
         }
     }
 
     private var addIdentityCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Add Identity", systemImage: "person.crop.circle.badge.plus")
+            Label("New Identity", systemImage: "person.crop.circle.badge.plus")
                 .font(.headline)
-            Text("Create an independent identity with its own inbox and home relay. Other identities remain active and encrypted at rest.")
+            Text("Creates a separate identity, inbox, and relay assignment. Existing identities remain encrypted and continue syncing.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             TextField("Display name", text: $newIdentityName)
@@ -6600,6 +6680,7 @@ private struct IdentityManagementView: View {
                     Task {
                         await model.addIdentityProfile(displayName: newIdentityName, relayId: newIdentityRelayId)
                         newIdentityName = ""
+                        showingCreateIdentity = false
                     }
                 } label: {
                     Label("Create Identity", systemImage: "plus")
@@ -7147,6 +7228,9 @@ private struct IdentityDetailView: View {
             identityFields
             Divider()
                 .opacity(0.4)
+            homeRelaySection
+            Divider()
+                .opacity(0.4)
             VStack(alignment: .leading, spacing: 8) {
                 Text("Active Status")
                     .font(.subheadline.weight(.semibold))
@@ -7219,6 +7303,46 @@ private struct IdentityDetailView: View {
                 }
             }
         }
+    }
+
+    private var homeRelaySection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Home Relay")
+                .font(.subheadline.weight(.semibold))
+            Text("This identity syncs and receives messages through its selected relay.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if model.state.relayServers.isEmpty {
+                Label("No relays configured.", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else {
+                Menu(selectedRelayName) {
+                    if let profile {
+                        ForEach(model.state.relayServers) { server in
+                            Button(server.displayName) {
+                                Task {
+                                    await model.updateIdentityRelay(profileId: profile.id, relayId: server.id)
+                                }
+                            }
+                        }
+                    }
+                }
+                .disabled(profile?.isArchived == true)
+                .glassButton(compact: true)
+                .hoverLift()
+            }
+        }
+    }
+
+    private var selectedRelayName: String {
+        guard
+            let relayId = profile?.selectedRelayId,
+            let relay = model.state.relayServers.first(where: { $0.id == relayId })
+        else {
+            return "Select Relay"
+        }
+        return relay.displayName
     }
 
     private var burnSection: some View {
