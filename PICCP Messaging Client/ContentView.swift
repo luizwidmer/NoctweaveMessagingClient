@@ -1313,6 +1313,67 @@ private struct EmptyConversationState: View {
     }
 }
 
+private struct ChatWallpaper: View {
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var isDark: Bool {
+        colorScheme == .dark
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(isDark ? 0.18 : 0.03),
+                        theme.backgroundTint.opacity(isDark ? 0.36 : 0.18),
+                        theme.glowSecondary.opacity(isDark ? 0.14 : 0.08)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+
+                Image(assetName(for: proxy.size))
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
+                    .opacity(isDark ? 0.30 : 0.24)
+                    .blendMode(isDark ? .plusLighter : .normal)
+
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.black.opacity(isDark ? 0.04 : 0.00),
+                                Color.black.opacity(isDark ? 0.18 : 0.04)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func assetName(for size: CGSize) -> String {
+        let usesTabletArtwork = size.width >= 700 || size.width > size.height
+        switch (usesTabletArtwork, isDark) {
+        case (true, true):
+            return "ChatDoodlesTabletDark"
+        case (true, false):
+            return "ChatDoodlesTablet"
+        case (false, true):
+            return "ChatDoodlesPhoneDark"
+        case (false, false):
+            return "ChatDoodlesPhone"
+        }
+    }
+}
+
 private struct InlineSearchField: View {
     @Binding var text: String
     let prompt: String
@@ -1584,7 +1645,9 @@ private struct ConversationView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 10)
                 }
-                .glassBackgroundIfNeeded()
+                .background {
+                    ChatWallpaper()
+                }
                 .onAppear {
                     scrollToBottom(messages, proxy: proxy, animated: false)
                 }
@@ -2055,7 +2118,9 @@ private struct GroupConversationView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 10)
                 }
-                .glassBackgroundIfNeeded()
+                .background {
+                    ChatWallpaper()
+                }
                 .onAppear {
                     scrollToBottom(groupMessages, proxy: proxy, animated: false)
                 }
