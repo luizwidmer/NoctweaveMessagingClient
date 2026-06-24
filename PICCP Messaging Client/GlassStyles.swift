@@ -48,10 +48,17 @@ struct GlassButtonStyle: ButtonStyle {
         #endif
     }
 
+    private var ipadLabelFontSize: CGFloat {
+        size == .compact ? 24 : 28
+    }
+
     func makeBody(configuration: Configuration) -> some View {
         let fillOpacity = prominent ? (configuration.isPressed ? 0.24 : 0.17) : (configuration.isPressed ? 0.08 : 0.03)
         let strokeOpacity = prominent ? 0.42 : 0.26
         return configuration.label
+            #if os(iOS)
+            .font(IOSControlMetrics.isPad ? .system(size: ipadLabelFontSize, weight: .semibold, design: .rounded) : nil)
+            #endif
             .padding(.vertical, verticalPadding)
             .padding(.horizontal, horizontalPadding)
             .background(

@@ -5,8 +5,8 @@ import UIKit
 
 enum IOSControlMetrics {
     static let padControlScale: CGFloat = 2.0
-    static let padTextScale: CGFloat = 1.72
-    static let padInsetScale: CGFloat = 1.6
+    static let padTextScale: CGFloat = 2.0
+    static let padInsetScale: CGFloat = 2.0
 
     static var isPad: Bool {
         UIDevice.current.userInterfaceIdiom == .pad
@@ -25,15 +25,23 @@ enum IOSControlMetrics {
     }
 
     static var composerHeight: CGFloat {
-        isPad ? 68 : 42
+        isPad ? 84 : 42
     }
 
     static var tabIconSize: CGFloat {
         isPad ? 15 * padControlScale : 15
     }
 
+    static var tabIconFrameHeight: CGFloat {
+        isPad ? 38 : 18
+    }
+
     static var tabTextSize: CGFloat {
         isPad ? 9.5 * padTextScale : 9.5
+    }
+
+    static var tabItemSpacing: CGFloat {
+        isPad ? 5 : 2
     }
 
     static var tabItemVerticalPadding: CGFloat {

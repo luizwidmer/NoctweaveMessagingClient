@@ -665,10 +665,10 @@ private struct IOSBottomBar: View {
                     onSelect(tab)
                     FeedbackGenerator.light()
                 } label: {
-                    VStack(spacing: 2) {
+                    VStack(spacing: IOSControlMetrics.tabItemSpacing) {
                         Image(systemName: icon)
                             .font(.system(size: IOSControlMetrics.tabIconSize, weight: .semibold))
-                            .frame(height: IOSControlMetrics.isPad ? 28 : 18)
+                            .frame(height: IOSControlMetrics.tabIconFrameHeight)
                         Text(title)
                             .font(.system(size: IOSControlMetrics.tabTextSize, weight: .semibold, design: .rounded))
                             .lineLimit(1)
@@ -2030,11 +2030,11 @@ private struct ConversationView: View {
     }
 
     private var chatHeaderButtonDiameter: CGFloat {
-        IOSControlMetrics.isPad ? 64 : (isRegularWidth ? 58 : 32)
+        IOSControlMetrics.isPad ? IOSControlMetrics.circleButtonDiameter : (isRegularWidth ? 58 : 32)
     }
 
     private var chatHeaderIconSize: CGFloat {
-        IOSControlMetrics.isPad ? 23 : (isRegularWidth ? 22 : 14)
+        IOSControlMetrics.isPad ? IOSControlMetrics.circleIconSize : (isRegularWidth ? 22 : 14)
     }
 
     private var chatHeaderSpacing: CGFloat {
@@ -2373,11 +2373,11 @@ private struct GroupConversationView: View {
     }
 
     private var chatHeaderButtonDiameter: CGFloat {
-        IOSControlMetrics.isPad ? 64 : (isRegularWidth ? 58 : 32)
+        IOSControlMetrics.isPad ? IOSControlMetrics.circleButtonDiameter : (isRegularWidth ? 58 : 32)
     }
 
     private var chatHeaderIconSize: CGFloat {
-        IOSControlMetrics.isPad ? 23 : (isRegularWidth ? 22 : 14)
+        IOSControlMetrics.isPad ? IOSControlMetrics.circleIconSize : (isRegularWidth ? 22 : 14)
     }
 
     private var chatHeaderSpacing: CGFloat {
