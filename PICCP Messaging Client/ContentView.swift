@@ -1387,11 +1387,11 @@ private struct ChatTopBar: View {
 
     private var isDark: Bool { colorScheme == .dark }
     private var isRegularWidth: Bool { horizontalSizeClass == .regular }
-    private var buttonDiameter: CGFloat { isRegularWidth ? 40 : 34 }
-    private var titleSize: CGFloat { isRegularWidth ? 21 : 18 }
-    private var statusSize: CGFloat { isRegularWidth ? 14 : 12 }
-    private var horizontalPadding: CGFloat { isRegularWidth ? 18 : 12 }
-    private var verticalPadding: CGFloat { isRegularWidth ? 10 : 8 }
+    private var buttonDiameter: CGFloat { isRegularWidth ? 58 : 34 }
+    private var titleSize: CGFloat { isRegularWidth ? 28 : 18 }
+    private var statusSize: CGFloat { isRegularWidth ? 17 : 12 }
+    private var horizontalPadding: CGFloat { isRegularWidth ? 24 : 12 }
+    private var verticalPadding: CGFloat { isRegularWidth ? 14 : 8 }
 
     var body: some View {
         HStack(spacing: isRegularWidth ? 12 : 9) {
@@ -1400,7 +1400,7 @@ private struct ChatTopBar: View {
                 FeedbackGenerator.light()
             } label: {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: isRegularWidth ? 17 : 15, weight: .semibold))
+                    .font(.system(size: isRegularWidth ? 24 : 15, weight: .semibold))
             }
             .accessibilityLabel("Back")
             .glassCircleButton(diameter: buttonDiameter)
@@ -1417,7 +1417,7 @@ private struct ChatTopBar: View {
                 if !status.isEmpty {
                     Circle()
                         .fill(Color.secondary.opacity(0.55))
-                        .frame(width: 3.5, height: 3.5)
+                        .frame(width: isRegularWidth ? 5 : 3.5, height: isRegularWidth ? 5 : 3.5)
                         .accessibilityHidden(true)
                     Text(status)
                         .font(.system(size: statusSize, weight: .medium, design: .rounded))
@@ -1433,7 +1433,7 @@ private struct ChatTopBar: View {
                 trailing
             }
         }
-        .frame(maxWidth: .infinity, minHeight: isRegularWidth ? 60 : 52, alignment: .center)
+        .frame(maxWidth: .infinity, minHeight: isRegularWidth ? 84 : 52, alignment: .center)
         .padding(.horizontal, horizontalPadding)
         .padding(.vertical, verticalPadding)
         .background {
@@ -2018,15 +2018,15 @@ private struct ConversationView: View {
     }
 
     private var chatHeaderButtonDiameter: CGFloat {
-        isRegularWidth ? 40 : 32
+        isRegularWidth ? 58 : 32
     }
 
     private var chatHeaderIconSize: CGFloat {
-        isRegularWidth ? 16 : 14
+        isRegularWidth ? 22 : 14
     }
 
     private var chatHeaderSpacing: CGFloat {
-        isRegularWidth ? 10 : 8
+        isRegularWidth ? 14 : 8
     }
     #endif
 
@@ -2353,15 +2353,15 @@ private struct GroupConversationView: View {
     }
 
     private var chatHeaderButtonDiameter: CGFloat {
-        isRegularWidth ? 40 : 32
+        isRegularWidth ? 58 : 32
     }
 
     private var chatHeaderIconSize: CGFloat {
-        isRegularWidth ? 16 : 14
+        isRegularWidth ? 22 : 14
     }
 
     private var chatHeaderSpacing: CGFloat {
-        isRegularWidth ? 10 : 8
+        isRegularWidth ? 14 : 8
     }
     #endif
 
