@@ -4,44 +4,48 @@ import SwiftUI
 import UIKit
 
 enum IOSControlMetrics {
+    static let padControlScale: CGFloat = 2.0
+    static let padTextScale: CGFloat = 1.72
+    static let padInsetScale: CGFloat = 1.6
+
     static var isPad: Bool {
         UIDevice.current.userInterfaceIdiom == .pad
     }
 
     static var circleButtonDiameter: CGFloat {
-        isPad ? 62 : 34
+        isPad ? 34 * padControlScale : 34
     }
 
     static var circleIconSize: CGFloat {
-        isPad ? 21 : 14
+        isPad ? 14 * padControlScale : 14
     }
 
     static var prominentCircleIconSize: CGFloat {
-        isPad ? 22 : 15
+        isPad ? 15 * padControlScale : 15
     }
 
     static var composerHeight: CGFloat {
-        isPad ? 56 : 42
+        isPad ? 68 : 42
     }
 
     static var tabIconSize: CGFloat {
-        isPad ? 24 : 15
+        isPad ? 15 * padControlScale : 15
     }
 
     static var tabTextSize: CGFloat {
-        isPad ? 12.5 : 9.5
+        isPad ? 9.5 * padTextScale : 9.5
     }
 
     static var tabItemVerticalPadding: CGFloat {
-        isPad ? 11 : 6
+        isPad ? 6 * padInsetScale : 6
     }
 
     static var tabBarHorizontalPadding: CGFloat {
-        isPad ? 18 : 10
+        isPad ? 10 * padInsetScale : 10
     }
 
     static var tabBarBottomPadding: CGFloat {
-        isPad ? 12 : 6
+        isPad ? 6 * padInsetScale : 6
     }
 }
 

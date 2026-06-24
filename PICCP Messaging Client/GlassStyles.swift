@@ -33,7 +33,7 @@ struct GlassButtonStyle: ButtonStyle {
     private var verticalPadding: CGFloat {
         let base: CGFloat = size == .compact ? 6 : 8
         #if os(iOS)
-        return IOSControlMetrics.isPad ? base * 1.35 : base
+        return IOSControlMetrics.isPad ? base * IOSControlMetrics.padInsetScale : base
         #else
         return base
         #endif
@@ -42,7 +42,7 @@ struct GlassButtonStyle: ButtonStyle {
     private var horizontalPadding: CGFloat {
         let base: CGFloat = size == .compact ? 12 : 14
         #if os(iOS)
-        return IOSControlMetrics.isPad ? base * 1.35 : base
+        return IOSControlMetrics.isPad ? base * IOSControlMetrics.padInsetScale : base
         #else
         return base
         #endif
@@ -113,7 +113,7 @@ struct GlassCircleButtonStyle: ButtonStyle {
     private var resolvedDiameter: CGFloat {
         #if os(iOS)
         if IOSControlMetrics.isPad && diameter <= 44 {
-            return diameter * 1.82
+            return diameter * IOSControlMetrics.padControlScale
         }
         #endif
         return diameter
@@ -122,7 +122,7 @@ struct GlassCircleButtonStyle: ButtonStyle {
     private var labelScale: CGFloat {
         #if os(iOS)
         if IOSControlMetrics.isPad && diameter <= 44 {
-            return 1.45
+            return IOSControlMetrics.padControlScale
         }
         #endif
         return 1.0

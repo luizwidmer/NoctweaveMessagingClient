@@ -11,10 +11,10 @@ struct NoctyraTopBar: View {
 
     private var isDark: Bool { colorScheme == .dark }
     #if os(iOS)
-    private var titleSize: CGFloat { IOSControlMetrics.isPad ? 24 : 19 }
-    private var subtitleSize: CGFloat { IOSControlMetrics.isPad ? 15 : 12 }
-    private var horizontalPadding: CGFloat { IOSControlMetrics.isPad ? 22 : 14 }
-    private var verticalPadding: CGFloat { IOSControlMetrics.isPad ? 13 : 9 }
+    private var titleSize: CGFloat { IOSControlMetrics.isPad ? 31 : 19 }
+    private var subtitleSize: CGFloat { IOSControlMetrics.isPad ? 18 : 12 }
+    private var horizontalPadding: CGFloat { IOSControlMetrics.isPad ? 28 : 14 }
+    private var verticalPadding: CGFloat { IOSControlMetrics.isPad ? 16 : 9 }
     #endif
 
     var body: some View {

@@ -1390,12 +1390,12 @@ private struct ChatTopBar: View {
     private var isDark: Bool { colorScheme == .dark }
     private var isRegularWidth: Bool { horizontalSizeClass == .regular }
     private var isPad: Bool { IOSControlMetrics.isPad }
-    private var buttonDiameter: CGFloat { isPad ? 64 : (isRegularWidth ? 58 : 34) }
-    private var titleSize: CGFloat { isPad ? 31 : (isRegularWidth ? 28 : 18) }
-    private var statusSize: CGFloat { isPad ? 18 : (isRegularWidth ? 17 : 12) }
-    private var horizontalPadding: CGFloat { isPad ? 28 : (isRegularWidth ? 24 : 12) }
-    private var verticalPadding: CGFloat { isPad ? 16 : (isRegularWidth ? 14 : 8) }
-    private var barMinHeight: CGFloat { isPad ? 92 : (isRegularWidth ? 84 : 52) }
+    private var buttonDiameter: CGFloat { isPad ? IOSControlMetrics.circleButtonDiameter : (isRegularWidth ? 58 : 34) }
+    private var titleSize: CGFloat { isPad ? 34 : (isRegularWidth ? 28 : 18) }
+    private var statusSize: CGFloat { isPad ? 20 : (isRegularWidth ? 17 : 12) }
+    private var horizontalPadding: CGFloat { isPad ? 32 : (isRegularWidth ? 24 : 12) }
+    private var verticalPadding: CGFloat { isPad ? 18 : (isRegularWidth ? 14 : 8) }
+    private var barMinHeight: CGFloat { isPad ? 104 : (isRegularWidth ? 84 : 52) }
 
     var body: some View {
         HStack(spacing: isRegularWidth ? 12 : 9) {
@@ -1404,7 +1404,7 @@ private struct ChatTopBar: View {
                 FeedbackGenerator.light()
             } label: {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: isPad ? 26 : (isRegularWidth ? 24 : 15), weight: .semibold))
+                    .font(.system(size: isPad ? IOSControlMetrics.circleIconSize : (isRegularWidth ? 24 : 15), weight: .semibold))
             }
             .accessibilityLabel("Back")
             .glassCircleButton(diameter: buttonDiameter)
@@ -1421,7 +1421,7 @@ private struct ChatTopBar: View {
                 if !status.isEmpty {
                     Circle()
                         .fill(Color.secondary.opacity(0.55))
-                        .frame(width: isPad ? 6 : (isRegularWidth ? 5 : 3.5), height: isPad ? 6 : (isRegularWidth ? 5 : 3.5))
+                        .frame(width: isPad ? 7 : (isRegularWidth ? 5 : 3.5), height: isPad ? 7 : (isRegularWidth ? 5 : 3.5))
                         .accessibilityHidden(true)
                     Text(status)
                         .font(.system(size: statusSize, weight: .medium, design: .rounded))
@@ -3360,14 +3360,14 @@ private struct MessageInputField: View {
         ZStack(alignment: .leading) {
             if text.isEmpty {
                 Text("Message")
-                    .font(.system(size: IOSControlMetrics.isPad ? 20 : 17, weight: .regular, design: .rounded))
+                    .font(.system(size: IOSControlMetrics.isPad ? 24 : 17, weight: .regular, design: .rounded))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                    .padding(.leading, IOSControlMetrics.isPad ? 12 : 8)
+                    .padding(.leading, IOSControlMetrics.isPad ? 16 : 8)
             }
             UIKitMessageInput(text: $text, secureTypingEnabled: secureTypingEnabled, onSubmit: onSubmit)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .padding(.horizontal, IOSControlMetrics.isPad ? 5 : 2)
+                .padding(.horizontal, IOSControlMetrics.isPad ? 8 : 2)
         }
         .frame(height: IOSControlMetrics.composerHeight)
         .background(Color.clear)
@@ -3390,7 +3390,7 @@ private struct UIKitMessageInput: UIViewRepresentable {
         view.isOpaque = false
         view.textColor = .label
         view.font = IOSControlMetrics.isPad
-            ? UIFont.systemFont(ofSize: 20, weight: .regular)
+            ? UIFont.systemFont(ofSize: 24, weight: .regular)
             : UIFont.preferredFont(forTextStyle: .body)
         view.isScrollEnabled = true
         view.textContainerInset = .zero
@@ -3409,7 +3409,7 @@ private struct UIKitMessageInput: UIViewRepresentable {
             uiView.text = text
         }
         uiView.font = IOSControlMetrics.isPad
-            ? UIFont.systemFont(ofSize: 20, weight: .regular)
+            ? UIFont.systemFont(ofSize: 24, weight: .regular)
             : UIFont.preferredFont(forTextStyle: .body)
         applyPrivacyTraits(to: uiView)
         uiView.setNeedsLayout()
