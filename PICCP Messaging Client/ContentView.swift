@@ -4885,6 +4885,96 @@ private struct FullScreenQRView: View {
     }
 }
 
+private struct NoctyraMenuCard<TitleAccessory: View, TrailingAccessory: View>: View {
+    let title: String
+    let subtitle: String
+    let symbol: String
+    var accent: Color?
+    @ViewBuilder var titleAccessory: () -> TitleAccessory
+    @ViewBuilder var trailingAccessory: () -> TrailingAccessory
+
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+    #if os(macOS)
+    @State private var hovering = false
+    #endif
+
+    private var cardAccent: Color {
+        accent ?? theme.accent
+    }
+
+    private var isDark: Bool {
+        colorScheme == .dark
+    }
+
+    var body: some View {
+        HStack(spacing: 13) {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        cardAccent.opacity(isDark ? 0.22 : 0.16),
+                                        theme.glowSecondary.opacity(isDark ? 0.16 : 0.08)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(isDark ? 0.22 : 0.38), lineWidth: 0.8)
+                    )
+                    .frame(width: 34, height: 34)
+
+                Image(systemName: symbol)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(cardAccent)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    titleAccessory()
+                }
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            trailingAccessory()
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(cardAccent.opacity(0.86))
+                .frame(width: 26, height: 26)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(
+                    Circle()
+                        .stroke(Color.white.opacity(isDark ? 0.16 : 0.30), lineWidth: 0.7)
+                )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .uniformGlassCard(cornerRadius: 15, minHeight: 72)
+        #if os(macOS)
+        .shadow(color: theme.accent.opacity(hovering ? 0.18 : 0.06), radius: hovering ? 14 : 7, x: 0, y: hovering ? 7 : 3)
+        .scaleEffect(hovering ? 1.006 : 1.0)
+        .animation(.easeOut(duration: 0.16), value: hovering)
+        .onHover { hovering = $0 }
+        #endif
+    }
+}
+
 private struct SettingsView: View {
     @ObservedObject var model: ClientViewModel
     @State private var selectedTheme: ThemePalette = .glacier
@@ -5141,75 +5231,17 @@ private struct SettingsView: View {
     private struct SettingsDestinationCard: View {
         let destination: SettingsDestination
 
-        @Environment(\.appTheme) private var theme
-        @Environment(\.colorScheme) private var colorScheme
-        #if os(macOS)
-        @State private var hovering = false
-        #endif
-
-        private var isDark: Bool {
-            colorScheme == .dark
-        }
-
         var body: some View {
-            HStack(spacing: 13) {
-                ZStack {
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .overlay(
-                            Circle()
-                                .fill(
-                                    LinearGradient(
-                                        colors: [
-                                            theme.accent.opacity(isDark ? 0.22 : 0.16),
-                                            theme.glowSecondary.opacity(isDark ? 0.16 : 0.08)
-                                        ],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                        )
-                        .overlay(
-                            Circle()
-                                .stroke(Color.white.opacity(isDark ? 0.22 : 0.38), lineWidth: 0.8)
-                        )
-                        .frame(width: 34, height: 34)
-
-                    Image(systemName: destination.symbol)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(theme.accent)
-                }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(destination.title)
-                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.primary)
-                    Text(destination.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(theme.accent.opacity(0.86))
-                    .frame(width: 26, height: 26)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay(
-                        Circle()
-                            .stroke(Color.white.opacity(isDark ? 0.16 : 0.30), lineWidth: 0.7)
-                    )
+            NoctyraMenuCard(
+                title: destination.title,
+                subtitle: destination.subtitle,
+                symbol: destination.symbol,
+                accent: nil
+            ) {
+                EmptyView()
+            } trailingAccessory: {
+                EmptyView()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-            .uniformGlassCard(cornerRadius: 15, minHeight: 72)
-            #if os(macOS)
-            .shadow(color: theme.accent.opacity(hovering ? 0.18 : 0.06), radius: hovering ? 14 : 7, x: 0, y: hovering ? 7 : 3)
-            .scaleEffect(hovering ? 1.006 : 1.0)
-            .animation(.easeOut(duration: 0.16), value: hovering)
-            .onHover { hovering = $0 }
-            #endif
         }
     }
 
@@ -6284,16 +6316,11 @@ private struct IdentityManagementView: View {
     @ObservedObject var model: ClientViewModel
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     @Environment(\.appTheme) private var theme
-    @Environment(\.colorScheme) private var colorScheme
     @State private var destination: IdentityDestination?
     @State private var newIdentityName = ""
     @State private var newIdentityRelayId: UUID?
     @State private var identitySearchText = ""
     @State private var showingCreateIdentity = false
-
-    private var isDark: Bool {
-        colorScheme == .dark
-    }
 
     var body: some View {
         Group {
@@ -6415,12 +6442,7 @@ private struct IdentityManagementView: View {
             VStack(alignment: .leading, spacing: 16) {
                 PaneHeader(title: "Identity Management", subtitle: "Manage key continuity and full resets")
                 identityOverviewCard
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Identity Book")
-                        .font(.headline)
-                    identityBookSection
-                }
-                .uniformGlassCard(cornerRadius: 16, minHeight: 140)
+                identityBookSection
                 continuityAuditLink
             }
             .padding(.horizontal, 20)
@@ -6433,11 +6455,6 @@ private struct IdentityManagementView: View {
             VStack(alignment: .leading, spacing: 18) {
                 identityOverviewCard
 
-                Text("Identity Book")
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
-                    .padding(.top, 4)
                 identityBookSection
 
                 continuityAuditLink
@@ -6607,6 +6624,10 @@ private struct IdentityManagementView: View {
         }
 
         return VStack(alignment: .leading, spacing: 12) {
+            Text("Identity Book")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
             InlineSearchField(text: $identitySearchText, prompt: "Search identities")
             if filtered.isEmpty {
                 Text("No matching identities.")
@@ -6623,68 +6644,18 @@ private struct IdentityManagementView: View {
         Button {
             destination = .profile(profile.id)
         } label: {
-            HStack(spacing: 13) {
-                ZStack {
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .overlay(
-                            Circle()
-                                .fill(
-                                    LinearGradient(
-                                        colors: [
-                                            identityAccent(for: profile).opacity(isDark ? 0.22 : 0.16),
-                                            theme.glowSecondary.opacity(isDark ? 0.16 : 0.08)
-                                        ],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                        )
-                        .overlay(
-                            Circle()
-                                .stroke(Color.white.opacity(isDark ? 0.22 : 0.38), lineWidth: 0.8)
-                        )
-                        .frame(width: 34, height: 34)
-
-                    Image(systemName: profile.isArchived ? "archivebox.fill" : "person.text.rectangle.fill")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(identityAccent(for: profile))
-                }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 8) {
-                        Text(profile.identity.displayName)
-                            .font(.system(size: 15, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        identityStatusBadge(for: profile)
-                    }
-                    Text("\(shortFingerprint(profile.identity.fingerprint)) • \(currentRelayName(for: profile))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                Spacer(minLength: 8)
+            NoctyraMenuCard(
+                title: profile.identity.displayName,
+                subtitle: "\(shortFingerprint(profile.identity.fingerprint)) • \(currentRelayName(for: profile))",
+                symbol: profile.isArchived ? "archivebox.fill" : "person.text.rectangle.fill",
+                accent: identityAccent(for: profile)
+            ) {
+                identityStatusBadge(for: profile)
+            } trailingAccessory: {
                 syncBadge(for: profile)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(identityAccent(for: profile).opacity(0.86))
-                    .frame(width: 26, height: 26)
-                    .background(.ultraThinMaterial, in: Circle())
-                    .overlay(
-                        Circle()
-                            .stroke(Color.white.opacity(isDark ? 0.16 : 0.30), lineWidth: 0.7)
-                    )
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
         }
         .buttonStyle(.plain)
-        .uniformGlassCard(cornerRadius: 15, minHeight: 72)
-        .hoverLift(cornerRadius: 15)
     }
 
     private func identityAccent(for profile: IdentityProfile) -> Color {
@@ -6808,40 +6779,18 @@ private struct IdentityManagementView: View {
         Button {
             destination = .audit
         } label: {
-            HStack(spacing: 12) {
-                ZStack {
-                    Circle()
-                        .fill(Color.accentColor.opacity(0.16))
-                        .frame(width: 34, height: 34)
-                    Image(systemName: "checkmark.shield")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Continuity Audit")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                    Text("\(continuityEventCount) events recorded for the active identity.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(6)
-                    .background(.ultraThinMaterial, in: Circle())
+            NoctyraMenuCard(
+                title: "Continuity Audit",
+                subtitle: "\(continuityEventCount) events recorded for the active identity.",
+                symbol: "checkmark.shield",
+                accent: nil
+            ) {
+                EmptyView()
+            } trailingAccessory: {
+                EmptyView()
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .uniformGlassCard(cornerRadius: 14, minHeight: 70)
         }
         .buttonStyle(.plain)
-        #if os(macOS)
-        .hoverLift()
-        #else
-        .listRowBackground(Color.clear)
-        #endif
     }
 
     private func currentRelayName(for profile: IdentityProfile) -> String {

@@ -355,11 +355,11 @@ final class ClientViewModel: ObservableObject {
             await ensureRelaySelection()
             await ensurePrekeysForActiveProfiles()
             await syncRelayGroupsForActiveProfiles()
+            isLocked = shouldLockImmediately()
             isReady = true
-            await notifier.requestAuthorization()
-            startAutoFetch()
-            if shouldLockImmediately() {
-                isLocked = true
+            if !isLocked {
+                await notifier.requestAuthorization()
+                startAutoFetch()
             }
         } catch {
             lastError = "Failed to load state: \(error.localizedDescription)"
