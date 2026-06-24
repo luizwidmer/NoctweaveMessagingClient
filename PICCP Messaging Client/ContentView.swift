@@ -1871,9 +1871,6 @@ private struct ConversationView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 10)
                 }
-                .background {
-                    ChatWallpaper()
-                }
                 .onAppear {
                     scrollToBottom(messages, proxy: proxy, animated: false)
                 }
@@ -1991,6 +1988,10 @@ private struct ConversationView: View {
             #endif
             .padding(.horizontal, 8)
             .padding(.bottom, 6)
+        }
+        .background {
+            ChatWallpaper()
+                .ignoresSafeArea()
         }
         .glassBackgroundIfNeeded()
         .privacySensitive()
@@ -2441,9 +2442,6 @@ private struct GroupConversationView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 10)
                 }
-                .background {
-                    ChatWallpaper()
-                }
                 .onAppear {
                     scrollToBottom(groupMessages, proxy: proxy, animated: false)
                 }
@@ -2514,6 +2512,10 @@ private struct GroupConversationView: View {
             #endif
             .padding(.horizontal, 8)
             .padding(.bottom, 6)
+        }
+        .background {
+            ChatWallpaper()
+                .ignoresSafeArea()
         }
         .glassBackgroundIfNeeded()
         .privacySensitive()
@@ -3040,7 +3042,29 @@ private struct MessageRow: View {
         .padding(.vertical, 2)
     }
 
+    @ViewBuilder
     private var bubble: some View {
+        if message.attachment == nil {
+            ViewThatFits(in: .horizontal) {
+                bubbleChrome {
+                    bubbleContent
+                }
+                .fixedSize(horizontal: true, vertical: false)
+
+                bubbleChrome {
+                    bubbleContent
+                }
+                .frame(maxWidth: bubbleMaxWidth, alignment: .leading)
+            }
+        } else {
+            bubbleChrome {
+                bubbleContent
+            }
+            .frame(maxWidth: bubbleMaxWidth, alignment: .leading)
+        }
+    }
+
+    private var bubbleContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let sender = message.senderDisplayName, message.direction == .received {
                 Text(sender)
@@ -3070,11 +3094,15 @@ private struct MessageRow: View {
             } else {
                 Text(messageText)
                     .foregroundStyle(isRevealed ? .primary : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    private func bubbleChrome<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        content()
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .frame(maxWidth: bubbleMaxWidth, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(message.direction == .sent ? bubbleTint.opacity(colorScheme == .dark ? 0.28 : 0.22) : Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.055))
@@ -7391,6 +7419,7 @@ private struct RelaysView: View {
             }
         }
         .privacySensitive()
+        .glassBackgroundIfNeeded()
         .background(setupRelays)
         #else
         Group {
@@ -7482,6 +7511,82 @@ private struct RelaysView: View {
         }
     }
 
+    private struct RelayDestinationCard: View {
+        let destination: RelayDestination
+        let subtitle: String
+
+        @Environment(\.appTheme) private var theme
+        @Environment(\.colorScheme) private var colorScheme
+        #if os(macOS)
+        @State private var hovering = false
+        #endif
+
+        private var isDark: Bool {
+            colorScheme == .dark
+        }
+
+        var body: some View {
+            HStack(spacing: 13) {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            Circle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            theme.accent.opacity(isDark ? 0.22 : 0.16),
+                                            theme.glowSecondary.opacity(isDark ? 0.16 : 0.08)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                        )
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white.opacity(isDark ? 0.22 : 0.38), lineWidth: 0.8)
+                        )
+                        .frame(width: 34, height: 34)
+
+                    Image(systemName: destination.symbol)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(destination.title)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(theme.accent.opacity(0.86))
+                    .frame(width: 26, height: 26)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(isDark ? 0.16 : 0.30), lineWidth: 0.7)
+                    )
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .uniformGlassCard(cornerRadius: 15, minHeight: 72)
+            #if os(macOS)
+            .shadow(color: theme.accent.opacity(hovering ? 0.18 : 0.06), radius: hovering ? 14 : 7, x: 0, y: hovering ? 7 : 3)
+            .scaleEffect(hovering ? 1.006 : 1.0)
+            .animation(.easeOut(duration: 0.16), value: hovering)
+            .onHover { hovering = $0 }
+            #endif
+        }
+    }
+
     private var relayMenuCards: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -7490,45 +7595,10 @@ private struct RelaysView: View {
                         relayDestination = destination
                         FeedbackGenerator.light()
                     } label: {
-                        HStack(spacing: 12) {
-                            ZStack {
-                                Circle()
-                                    .fill(
-                                        LinearGradient(
-                                            colors: [
-                                                Color.accentColor.opacity(0.24),
-                                                Color.accentColor.opacity(0.08)
-                                            ],
-                                            startPoint: .topLeading,
-                                            endPoint: .bottomTrailing
-                                        )
-                                    )
-                                    .frame(width: 32, height: 32)
-                                Image(systemName: destination.symbol)
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundStyle(Color.accentColor)
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(destination.title)
-                                    .font(.headline)
-                                    .foregroundStyle(.primary)
-                                Text(relaySubtitle(for: destination))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(6)
-                                .background(.ultraThinMaterial, in: Circle())
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
+                        RelayDestinationCard(destination: destination, subtitle: relaySubtitle(for: destination))
                     }
                     .buttonStyle(.plain)
                     .frame(maxWidth: .infinity)
-                    .uniformGlassCard(cornerRadius: 14, minHeight: 68)
                 }
             }
             .padding(.horizontal, 16)
@@ -7562,6 +7632,7 @@ private struct RelaysView: View {
         Button("Add Relay") {
             relayEditorMode = .add
         }
+        .glassButton(prominent: true, compact: true)
         .hoverLift()
     }
 
