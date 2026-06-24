@@ -654,9 +654,11 @@ private struct IOSBottomBar: View {
     }
 
     private var isDark: Bool { colorScheme == .dark }
+    private var tabSpacing: CGFloat { IOSControlMetrics.isPad ? 8 : 4 }
+    private var barPadding: CGFloat { IOSControlMetrics.isPad ? 8 : 6 }
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: tabSpacing) {
             ForEach(tabs, id: \.0.rawValue) { tab, title, icon in
                 Button {
                     guard selectedTab.wrappedValue != tab else { return }
@@ -665,15 +667,15 @@ private struct IOSBottomBar: View {
                 } label: {
                     VStack(spacing: 2) {
                         Image(systemName: icon)
-                            .font(.system(size: 15, weight: .semibold))
-                            .frame(height: 18)
+                            .font(.system(size: IOSControlMetrics.tabIconSize, weight: .semibold))
+                            .frame(height: IOSControlMetrics.isPad ? 28 : 18)
                         Text(title)
-                            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                            .font(.system(size: IOSControlMetrics.tabTextSize, weight: .semibold, design: .rounded))
                             .lineLimit(1)
                             .minimumScaleFactor(0.78)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
+                    .padding(.vertical, IOSControlMetrics.tabItemVerticalPadding)
                     .foregroundStyle(selectedTab.wrappedValue == tab ? theme.accent : Color.secondary)
                     .background(
                         Capsule(style: .continuous)
@@ -684,7 +686,7 @@ private struct IOSBottomBar: View {
                 .accessibilityIdentifier("tab-\(tab.rawValue)")
             }
         }
-        .padding(6)
+        .padding(barPadding)
         .background(
             Capsule(style: .continuous)
                 .fill(.ultraThinMaterial)
@@ -698,9 +700,9 @@ private struct IOSBottomBar: View {
                 )
                 .shadow(color: theme.accent.opacity(isDark ? 0.08 : 0.05), radius: 7, x: 0, y: 2)
         )
-        .padding(.horizontal, 10)
-        .padding(.top, 4)
-        .padding(.bottom, 6)
+        .padding(.horizontal, IOSControlMetrics.tabBarHorizontalPadding)
+        .padding(.top, IOSControlMetrics.isPad ? 8 : 4)
+        .padding(.bottom, IOSControlMetrics.tabBarBottomPadding)
     }
 }
 
@@ -1387,11 +1389,13 @@ private struct ChatTopBar: View {
 
     private var isDark: Bool { colorScheme == .dark }
     private var isRegularWidth: Bool { horizontalSizeClass == .regular }
-    private var buttonDiameter: CGFloat { isRegularWidth ? 58 : 34 }
-    private var titleSize: CGFloat { isRegularWidth ? 28 : 18 }
-    private var statusSize: CGFloat { isRegularWidth ? 17 : 12 }
-    private var horizontalPadding: CGFloat { isRegularWidth ? 24 : 12 }
-    private var verticalPadding: CGFloat { isRegularWidth ? 14 : 8 }
+    private var isPad: Bool { IOSControlMetrics.isPad }
+    private var buttonDiameter: CGFloat { isPad ? 64 : (isRegularWidth ? 58 : 34) }
+    private var titleSize: CGFloat { isPad ? 31 : (isRegularWidth ? 28 : 18) }
+    private var statusSize: CGFloat { isPad ? 18 : (isRegularWidth ? 17 : 12) }
+    private var horizontalPadding: CGFloat { isPad ? 28 : (isRegularWidth ? 24 : 12) }
+    private var verticalPadding: CGFloat { isPad ? 16 : (isRegularWidth ? 14 : 8) }
+    private var barMinHeight: CGFloat { isPad ? 92 : (isRegularWidth ? 84 : 52) }
 
     var body: some View {
         HStack(spacing: isRegularWidth ? 12 : 9) {
@@ -1400,7 +1404,7 @@ private struct ChatTopBar: View {
                 FeedbackGenerator.light()
             } label: {
                 Image(systemName: "chevron.left")
-                    .font(.system(size: isRegularWidth ? 24 : 15, weight: .semibold))
+                    .font(.system(size: isPad ? 26 : (isRegularWidth ? 24 : 15), weight: .semibold))
             }
             .accessibilityLabel("Back")
             .glassCircleButton(diameter: buttonDiameter)
@@ -1417,7 +1421,7 @@ private struct ChatTopBar: View {
                 if !status.isEmpty {
                     Circle()
                         .fill(Color.secondary.opacity(0.55))
-                        .frame(width: isRegularWidth ? 5 : 3.5, height: isRegularWidth ? 5 : 3.5)
+                        .frame(width: isPad ? 6 : (isRegularWidth ? 5 : 3.5), height: isPad ? 6 : (isRegularWidth ? 5 : 3.5))
                         .accessibilityHidden(true)
                     Text(status)
                         .font(.system(size: statusSize, weight: .medium, design: .rounded))
@@ -1433,7 +1437,7 @@ private struct ChatTopBar: View {
                 trailing
             }
         }
-        .frame(maxWidth: .infinity, minHeight: isRegularWidth ? 84 : 52, alignment: .center)
+        .frame(maxWidth: .infinity, minHeight: barMinHeight, alignment: .center)
         .padding(.horizontal, horizontalPadding)
         .padding(.vertical, verticalPadding)
         .background {
@@ -1760,27 +1764,27 @@ private struct ConversationView: View {
                     handleCameraButtonTap()
                 } label: {
                     Image(systemName: "camera")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: IOSControlMetrics.circleIconSize, weight: .semibold))
                 }
                 .accessibilityLabel("Capture Photo")
                 .accessibilityHint("Enable in Settings > Privacy to capture within Noctyra.")
-                .glassCircleButton(diameter: 34)
+                .glassCircleButton(diameter: IOSControlMetrics.circleButtonDiameter)
                 .hoverLift()
                 PhotosPicker(selection: $selectedPhoto, matching: .images) {
                     Image(systemName: "paperclip")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: IOSControlMetrics.circleIconSize, weight: .semibold))
                 }
                 .accessibilityLabel("Attach Image")
-                .glassCircleButton(diameter: 34)
+                .glassCircleButton(diameter: IOSControlMetrics.circleButtonDiameter)
                 .hoverLift()
                 Button {
                     showingVoiceRecorder = true
                 } label: {
                     Image(systemName: "mic")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: IOSControlMetrics.circleIconSize, weight: .semibold))
                 }
                 .accessibilityLabel("Record Voice Message")
-                .glassCircleButton(diameter: 34)
+                .glassCircleButton(diameter: IOSControlMetrics.circleButtonDiameter)
                 .hoverLift()
                 #else
                 Button {
@@ -1821,10 +1825,18 @@ private struct ConversationView: View {
                     sendMessage()
                 } label: {
                     Image(systemName: "paperplane.fill")
+                        #if os(iOS)
+                        .font(.system(size: IOSControlMetrics.prominentCircleIconSize, weight: .semibold))
+                        #else
                         .font(.system(size: 15, weight: .semibold))
+                        #endif
                 }
                 .accessibilityLabel("Send")
+                #if os(iOS)
+                .glassCircleButton(prominent: true, diameter: IOSControlMetrics.circleButtonDiameter)
+                #else
                 .glassCircleButton(prominent: true, diameter: 34)
+                #endif
                 .hoverLift()
             }
             .padding(.vertical, 6)
@@ -2018,15 +2030,15 @@ private struct ConversationView: View {
     }
 
     private var chatHeaderButtonDiameter: CGFloat {
-        isRegularWidth ? 58 : 32
+        IOSControlMetrics.isPad ? 64 : (isRegularWidth ? 58 : 32)
     }
 
     private var chatHeaderIconSize: CGFloat {
-        isRegularWidth ? 22 : 14
+        IOSControlMetrics.isPad ? 23 : (isRegularWidth ? 22 : 14)
     }
 
     private var chatHeaderSpacing: CGFloat {
-        isRegularWidth ? 14 : 8
+        IOSControlMetrics.isPad ? 16 : (isRegularWidth ? 14 : 8)
     }
     #endif
 
@@ -2276,10 +2288,18 @@ private struct GroupConversationView: View {
                     sendMessage()
                 } label: {
                     Image(systemName: "paperplane.fill")
+                        #if os(iOS)
+                        .font(.system(size: IOSControlMetrics.prominentCircleIconSize, weight: .semibold))
+                        #else
                         .font(.system(size: 15, weight: .semibold))
+                        #endif
                 }
                 .accessibilityLabel("Send Group Message")
+                #if os(iOS)
+                .glassCircleButton(prominent: true, diameter: IOSControlMetrics.circleButtonDiameter)
+                #else
                 .glassCircleButton(prominent: true, diameter: 34)
+                #endif
                 .hoverLift()
             }
             .padding(.vertical, 6)
@@ -2353,15 +2373,15 @@ private struct GroupConversationView: View {
     }
 
     private var chatHeaderButtonDiameter: CGFloat {
-        isRegularWidth ? 58 : 32
+        IOSControlMetrics.isPad ? 64 : (isRegularWidth ? 58 : 32)
     }
 
     private var chatHeaderIconSize: CGFloat {
-        isRegularWidth ? 22 : 14
+        IOSControlMetrics.isPad ? 23 : (isRegularWidth ? 22 : 14)
     }
 
     private var chatHeaderSpacing: CGFloat {
-        isRegularWidth ? 14 : 8
+        IOSControlMetrics.isPad ? 16 : (isRegularWidth ? 14 : 8)
     }
     #endif
 
@@ -3340,18 +3360,19 @@ private struct MessageInputField: View {
         ZStack(alignment: .leading) {
             if text.isEmpty {
                 Text("Message")
+                    .font(.system(size: IOSControlMetrics.isPad ? 20 : 17, weight: .regular, design: .rounded))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                    .padding(.leading, 8)
+                    .padding(.leading, IOSControlMetrics.isPad ? 12 : 8)
             }
             UIKitMessageInput(text: $text, secureTypingEnabled: secureTypingEnabled, onSubmit: onSubmit)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                .padding(.horizontal, 2)
+                .padding(.horizontal, IOSControlMetrics.isPad ? 5 : 2)
         }
-        .frame(height: 42)
+        .frame(height: IOSControlMetrics.composerHeight)
         .background(Color.clear)
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: IOSControlMetrics.isPad ? 16 : 12, style: .continuous)
                 .stroke(Color.white.opacity(0.16), lineWidth: 0.8)
         )
     }
@@ -3368,7 +3389,9 @@ private struct UIKitMessageInput: UIViewRepresentable {
         view.backgroundColor = .clear
         view.isOpaque = false
         view.textColor = .label
-        view.font = UIFont.preferredFont(forTextStyle: .body)
+        view.font = IOSControlMetrics.isPad
+            ? UIFont.systemFont(ofSize: 20, weight: .regular)
+            : UIFont.preferredFont(forTextStyle: .body)
         view.isScrollEnabled = true
         view.textContainerInset = .zero
         view.textContainer.maximumNumberOfLines = 2
@@ -3385,6 +3408,9 @@ private struct UIKitMessageInput: UIViewRepresentable {
         if uiView.text != text {
             uiView.text = text
         }
+        uiView.font = IOSControlMetrics.isPad
+            ? UIFont.systemFont(ofSize: 20, weight: .regular)
+            : UIFont.preferredFont(forTextStyle: .body)
         applyPrivacyTraits(to: uiView)
         uiView.setNeedsLayout()
     }

@@ -31,11 +31,21 @@ struct GlassButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
 
     private var verticalPadding: CGFloat {
-        size == .compact ? 6 : 8
+        let base: CGFloat = size == .compact ? 6 : 8
+        #if os(iOS)
+        return IOSControlMetrics.isPad ? base * 1.35 : base
+        #else
+        return base
+        #endif
     }
 
     private var horizontalPadding: CGFloat {
-        size == .compact ? 12 : 14
+        let base: CGFloat = size == .compact ? 12 : 14
+        #if os(iOS)
+        return IOSControlMetrics.isPad ? base * 1.35 : base
+        #else
+        return base
+        #endif
     }
 
     func makeBody(configuration: Configuration) -> some View {
@@ -100,11 +110,30 @@ struct GlassCircleButtonStyle: ButtonStyle {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.isEnabled) private var isEnabled
 
+    private var resolvedDiameter: CGFloat {
+        #if os(iOS)
+        if IOSControlMetrics.isPad && diameter <= 44 {
+            return diameter * 1.82
+        }
+        #endif
+        return diameter
+    }
+
+    private var labelScale: CGFloat {
+        #if os(iOS)
+        if IOSControlMetrics.isPad && diameter <= 44 {
+            return 1.45
+        }
+        #endif
+        return 1.0
+    }
+
     func makeBody(configuration: Configuration) -> some View {
         let fillOpacity = prominent ? (configuration.isPressed ? 0.25 : 0.17) : (configuration.isPressed ? 0.08 : 0.03)
         let strokeOpacity = prominent ? 0.42 : 0.26
         return configuration.label
-            .frame(width: diameter, height: diameter)
+            .scaleEffect(labelScale)
+            .frame(width: resolvedDiameter, height: resolvedDiameter)
             .background(
                 Circle()
                     .fill(.ultraThinMaterial)

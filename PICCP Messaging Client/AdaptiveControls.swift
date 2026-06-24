@@ -1,6 +1,49 @@
 import SwiftUI
 
 #if os(iOS)
+import UIKit
+
+enum IOSControlMetrics {
+    static var isPad: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad
+    }
+
+    static var circleButtonDiameter: CGFloat {
+        isPad ? 62 : 34
+    }
+
+    static var circleIconSize: CGFloat {
+        isPad ? 21 : 14
+    }
+
+    static var prominentCircleIconSize: CGFloat {
+        isPad ? 22 : 15
+    }
+
+    static var composerHeight: CGFloat {
+        isPad ? 56 : 42
+    }
+
+    static var tabIconSize: CGFloat {
+        isPad ? 24 : 15
+    }
+
+    static var tabTextSize: CGFloat {
+        isPad ? 12.5 : 9.5
+    }
+
+    static var tabItemVerticalPadding: CGFloat {
+        isPad ? 11 : 6
+    }
+
+    static var tabBarHorizontalPadding: CGFloat {
+        isPad ? 18 : 10
+    }
+
+    static var tabBarBottomPadding: CGFloat {
+        isPad ? 12 : 6
+    }
+}
 
 /// iOS-friendly segmented control that always fits by wrapping into multiple rows.
 /// Use instead of `.pickerStyle(.segmented)` which can overflow in portrait on iPhones.
@@ -56,4 +99,3 @@ struct ChipSegmentedControl<Option: Hashable & Identifiable>: View {
 }
 
 #endif
-

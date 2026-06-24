@@ -10,6 +10,12 @@ struct NoctyraTopBar: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var isDark: Bool { colorScheme == .dark }
+    #if os(iOS)
+    private var titleSize: CGFloat { IOSControlMetrics.isPad ? 24 : 19 }
+    private var subtitleSize: CGFloat { IOSControlMetrics.isPad ? 15 : 12 }
+    private var horizontalPadding: CGFloat { IOSControlMetrics.isPad ? 22 : 14 }
+    private var verticalPadding: CGFloat { IOSControlMetrics.isPad ? 13 : 9 }
+    #endif
 
     var body: some View {
         HStack(spacing: 12) {
@@ -17,7 +23,7 @@ struct NoctyraTopBar: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     #if os(iOS)
-                    .font(.system(size: 19, weight: .semibold, design: .rounded))
+                    .font(.system(size: titleSize, weight: .semibold, design: .rounded))
                     #else
                     .font(.system(size: 17, weight: .semibold, design: .rounded))
                     #endif
@@ -25,7 +31,7 @@ struct NoctyraTopBar: View {
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
                         #if os(iOS)
-                        .font(.caption)
+                        .font(.system(size: subtitleSize, weight: .medium, design: .rounded))
                         #else
                         .font(.caption2)
                         #endif
@@ -37,8 +43,13 @@ struct NoctyraTopBar: View {
             if let trailing { trailing }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        #if os(iOS)
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, verticalPadding)
+        #else
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
+        #endif
         .background {
             Rectangle()
                 .fill(.ultraThinMaterial)
