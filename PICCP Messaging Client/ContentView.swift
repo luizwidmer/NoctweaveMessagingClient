@@ -85,7 +85,7 @@ struct ContentView: View {
             #else
             GlassBackground()
             #endif
-            if !model.requiresOnboarding {
+            if shouldShowMainContent {
                 rootContainer
                     .clearNavigationContainerBackground()
                     .hideWindowToolbarIfNeeded()
@@ -106,13 +106,16 @@ struct ContentView: View {
             if model.requiresOnboarding {
                 FirstRunSetupView(model: model)
             }
-            if model.isLocked && !model.requiresOnboarding {
+            if model.isLocked && model.isReady && !model.requiresOnboarding {
                 AppLockView(model: model)
             }
             if model.requiresStorageChoice && !model.requiresOnboarding {
                 StorageChoiceView { mode in
                     model.selectStorageProtection(mode)
                 }
+            }
+            if shouldShowStartupPrivacyShield {
+                StartupPrivacyShield()
             }
             if let status = model.storageProtectionStatus {
                 StorageStatusToast(message: status)
@@ -194,6 +197,17 @@ struct ContentView: View {
         // Ensure our background extends into the titlebar region so the traffic lights appear to float.
         .ignoresSafeArea(.container, edges: .top)
         #endif
+    }
+
+    private var shouldShowMainContent: Bool {
+        model.isReady
+            && !model.requiresStorageChoice
+            && !model.requiresOnboarding
+            && !model.isLocked
+    }
+
+    private var shouldShowStartupPrivacyShield: Bool {
+        !model.isReady && !model.requiresStorageChoice && !model.requiresOnboarding
     }
 
     @ViewBuilder
@@ -578,6 +592,19 @@ private struct IntroOverlay: View {
         .background(Color.black)
         .opacity(opacity)
         .scaleEffect(scale)
+    }
+}
+
+private struct StartupPrivacyShield: View {
+    var body: some View {
+        ZStack {
+            Color.black
+                .ignoresSafeArea()
+            ProgressView()
+                .controlSize(.small)
+                .tint(.white.opacity(0.72))
+        }
+        .transition(.opacity)
     }
 }
 
@@ -6256,11 +6283,17 @@ private struct AppSecurityUnlockSetupSheet: View {
 private struct IdentityManagementView: View {
     @ObservedObject var model: ClientViewModel
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
     @State private var destination: IdentityDestination?
     @State private var newIdentityName = ""
     @State private var newIdentityRelayId: UUID?
     @State private var identitySearchText = ""
     @State private var showingCreateIdentity = false
+
+    private var isDark: Bool {
+        colorScheme == .dark
+    }
 
     var body: some View {
         Group {
@@ -6590,20 +6623,39 @@ private struct IdentityManagementView: View {
         Button {
             destination = .profile(profile.id)
         } label: {
-            HStack(alignment: .center, spacing: 12) {
+            HStack(spacing: 13) {
                 ZStack {
                     Circle()
                         .fill(.ultraThinMaterial)
-                        .frame(width: 36, height: 36)
+                        .overlay(
+                            Circle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            identityAccent(for: profile).opacity(isDark ? 0.22 : 0.16),
+                                            theme.glowSecondary.opacity(isDark ? 0.16 : 0.08)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                        )
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white.opacity(isDark ? 0.22 : 0.38), lineWidth: 0.8)
+                        )
+                        .frame(width: 34, height: 34)
+
                     Image(systemName: profile.isArchived ? "archivebox.fill" : "person.text.rectangle.fill")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(profile.isArchived ? .secondary : Color.accentColor)
+                        .foregroundStyle(identityAccent(for: profile))
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
                         Text(profile.identity.displayName)
-                            .font(.headline)
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.primary)
                             .lineLimit(1)
                         identityStatusBadge(for: profile)
                     }
@@ -6613,19 +6665,30 @@ private struct IdentityManagementView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 Spacer(minLength: 8)
                 syncBadge(for: profile)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(identityAccent(for: profile).opacity(0.86))
+                    .frame(width: 26, height: 26)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(isDark ? 0.16 : 0.30), lineWidth: 0.7)
+                    )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
         }
         .buttonStyle(.plain)
-        .uniformGlassCard(cornerRadius: 14, minHeight: 66)
-        .hoverLift()
+        .uniformGlassCard(cornerRadius: 15, minHeight: 72)
+        .hoverLift(cornerRadius: 15)
+    }
+
+    private func identityAccent(for profile: IdentityProfile) -> Color {
+        profile.isArchived ? .secondary : theme.accent
     }
 
     @ViewBuilder
