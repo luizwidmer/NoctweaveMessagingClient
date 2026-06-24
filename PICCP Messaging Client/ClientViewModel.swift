@@ -99,7 +99,7 @@ final class ClientViewModel: ObservableObject {
     private let notifier = NotificationManager()
     private var autoFetchTask: Task<Void, Never>?
     private var sessionResetCooldown = SessionRecovery.Cooldown(interval: 30)
-    private let resendRequestCount = 1
+    private let resendRequestCount = 32
     private let attachmentChunkSize = 64 * 1024
     private let attachmentUploadTTLSeconds = 1800
     private let maxAttachmentBytes = 8 * 1024 * 1024
@@ -1154,8 +1154,10 @@ final class ClientViewModel: ObservableObject {
             }
             let envelopes = response.messages ?? []
             var pendingResends: [UUID: Int] = [:]
+            var acknowledgedEnvelopeIds = Set<UUID>()
             for envelope in envelopes {
                 guard let contactIndex = profile.contacts.firstIndex(where: { $0.fingerprint == envelope.senderFingerprint }) else {
+                    acknowledgedEnvelopeIds.insert(envelope.id)
                     continue
                 }
                 var signatureValid = false
@@ -1169,6 +1171,7 @@ final class ClientViewModel: ObservableObject {
                     var inboundContext: InboundSessionContext?
                     signatureValid = envelope.verifySignature(publicSigningKey: contact.signingPublicKey)
                     if !signatureValid {
+                        acknowledgedEnvelopeIds.insert(envelope.id)
                         continue
                     }
                     if let existing = conversation(for: contact.id, in: profile), existing.id == envelope.conversationId {
@@ -1192,6 +1195,7 @@ final class ClientViewModel: ObservableObject {
                         usedPrekeyForSession = inbound.usedPrekey
                         inboundContext = inbound
                     } else {
+                        acknowledgedEnvelopeIds.insert(envelope.id)
                         continue
                     }
                     recoveryConversation = existingConversation ?? baseConversation
@@ -1220,6 +1224,7 @@ final class ClientViewModel: ObservableObject {
                                 preferredRelay: profile.relay
                             ) {
                                 upsertConversation(rebuilt, in: &profile)
+                                acknowledgedEnvelopeIds.insert(envelope.id)
                             }
                             continue
                         }
@@ -1435,6 +1440,7 @@ final class ClientViewModel: ObservableObject {
                     contact = normalizedContact(contact, preferredRelay: profile.relay)
                     upsertConversation(conversation, in: &profile)
                     updateContact(contact, in: &profile)
+                    acknowledgedEnvelopeIds.insert(envelope.id)
                 } catch {
                     if signatureValid, let ratchet = envelope.rootRatchet, var conversation = recoveryConversation {
                         do {
@@ -1448,24 +1454,31 @@ final class ClientViewModel: ObservableObject {
                             )
                             upsertConversation(conversation, in: &profile)
                             updateContact(profile.contacts[contactIndex], in: &profile)
+                            acknowledgedEnvelopeIds.insert(envelope.id)
                             continue
                         } catch {
                             lastError = "Failed to apply root ratchet: \(error.localizedDescription)"
                         }
                     }
-                    if shouldSkipEnvelope(error) {
-                        if shouldAttemptSilentReset(for: error),
-                           let recovery = recoveryConversation {
-                            _ = await attemptSilentSessionReset(
+                    switch RatchetRecoveryPolicy.decision(for: error) {
+                    case .recover:
+                        if let recovery = recoveryConversation,
+                           let rebuilt = await attemptSilentSessionReset(
                                 contact: profile.contacts[contactIndex],
                                 existingConversation: recovery,
                                 identity: profile.identity,
                                 preferredRelay: profile.relay
-                            )
+                           ) {
+                            upsertConversation(rebuilt, in: &profile)
+                            acknowledgedEnvelopeIds.insert(envelope.id)
                         }
                         continue
+                    case .acknowledge:
+                        acknowledgedEnvelopeIds.insert(envelope.id)
+                        continue
+                    case .retryLater:
+                        lastError = "Failed to process envelope: \(error.localizedDescription)"
                     }
-                    lastError = "Failed to process envelope: \(error.localizedDescription)"
                 }
             }
             for (contactId, count) in pendingResends {
@@ -1473,10 +1486,11 @@ final class ClientViewModel: ObservableObject {
             }
             state.updateIdentityProfile(profile)
             try await persistState()
-            if !envelopes.isEmpty {
+            let acknowledgementIds = envelopes.map(\.id).filter { acknowledgedEnvelopeIds.contains($0) }
+            if !acknowledgementIds.isEmpty {
                 var acknowledgement = AcknowledgeMessagesRequest(
                     inboxId: profile.inboxId,
-                    messageIds: envelopes.map(\.id)
+                    messageIds: acknowledgementIds
                 )
                 let acknowledgementProof = try makeActorProof(
                     fingerprint: CryptoBox.fingerprint(for: inboxAccessKey.publicKeyData),
@@ -1488,7 +1502,7 @@ final class ClientViewModel: ObservableObject {
                 )
                 acknowledgement = AcknowledgeMessagesRequest(
                     inboxId: profile.inboxId,
-                    messageIds: envelopes.map(\.id),
+                    messageIds: acknowledgementIds,
                     accessProof: acknowledgementProof
                 )
                 let acknowledgementResponse = try await client.send(
@@ -4885,38 +4899,6 @@ final class ClientViewModel: ObservableObject {
         } catch {
             // Silent auto-recovery: avoid surfacing transient errors to the user.
             return nil
-        }
-    }
-
-    private func shouldSkipEnvelope(_ error: Error) -> Bool {
-        if error is CryptoKitError {
-            return true
-        }
-        if let coreError = error as? CryptoError {
-            switch coreError {
-            case .counterOutOfOrder, .counterReplay, .counterWindowExceeded, .invalidPayload, .invalidSignature:
-                return true
-            default:
-                return false
-            }
-        }
-        return false
-    }
-
-    private func shouldAttemptSilentReset(for error: Error) -> Bool {
-        if error is CryptoKitError {
-            return true
-        }
-        guard let coreError = error as? CryptoError else {
-            return false
-        }
-        switch coreError {
-        case .invalidPayload:
-            return true
-        case .counterOutOfOrder, .counterReplay, .counterWindowExceeded, .invalidSignature:
-            return false
-        default:
-            return false
         }
     }
 
