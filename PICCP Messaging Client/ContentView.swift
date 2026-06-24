@@ -438,15 +438,17 @@ struct ContentView: View {
                     if model.state.contacts.isEmpty {
                         Text("No contacts yet")
                             .foregroundStyle(.secondary)
+                            .font(.caption)
+                            .padding(.vertical, 6)
                     }
                     ForEach(model.state.contacts) { contact in
-                        HStack {
-                            Label(contact.displayName, systemImage: "person.circle")
-                            Spacer()
-                            if unreadCount(for: contact) > 0 {
-                                UnreadBadge(count: unreadCount(for: contact))
-                            }
-                        }
+                        MacSidebarRow(
+                            title: contact.displayName,
+                            subtitle: model.state.conversation(for: contact.id)?.messages.last?.body,
+                            systemImage: "person.circle",
+                            unreadCount: unreadCount(for: contact),
+                            isSelected: selection == .contact(contact.id)
+                        )
                         .tag(SidebarItem.contact(contact.id))
                         .contextMenu {
                             Button("Remove Contact", role: .destructive) {
@@ -466,20 +468,29 @@ struct ContentView: View {
                     Button {
                         showingCreateGroup = true
                     } label: {
-                        Label("Create Group", systemImage: "plus.circle")
+                        MacSidebarRow(
+                            title: "Create Group",
+                            subtitle: "Start a private group",
+                            systemImage: "plus.circle",
+                            isAction: true,
+                            isSelected: false
+                        )
                     }
+                    .buttonStyle(.plain)
                     if model.state.groups.isEmpty {
                         Text("No groups yet")
                             .foregroundStyle(.secondary)
+                            .font(.caption)
+                            .padding(.vertical, 6)
                     }
                     ForEach(model.state.groups) { group in
-                        HStack {
-                            Label(group.title, systemImage: "person.3.fill")
-                            Spacer()
-                            if unreadCount(for: group) > 0 {
-                                UnreadBadge(count: unreadCount(for: group))
-                            }
-                        }
+                        MacSidebarRow(
+                            title: group.title,
+                            subtitle: model.state.group(for: group.id)?.messages.last?.body,
+                            systemImage: "person.3.fill",
+                            unreadCount: unreadCount(for: group),
+                            isSelected: selection == .group(group.id)
+                        )
                         .tag(SidebarItem.group(group.id))
                         .accessibilityIdentifier("group-\(group.id.uuidString)")
                     }
@@ -487,15 +498,15 @@ struct ContentView: View {
             }
 
             Section("Tools") {
-                Label("Contact Book", systemImage: "book.closed")
+                MacSidebarRow(title: "Contact Book", systemImage: "book.closed", isSelected: selection == .contactBook)
                     .tag(SidebarItem.contactBook)
-                Label("My Code", systemImage: "qrcode")
+                MacSidebarRow(title: "My Code", systemImage: "qrcode", isSelected: selection == .myCode)
                     .tag(SidebarItem.myCode)
-                Label("Relays", systemImage: "antenna.radiowaves.left.and.right")
+                MacSidebarRow(title: "Relays", systemImage: "antenna.radiowaves.left.and.right", isSelected: selection == .relays)
                     .tag(SidebarItem.relays)
-                Label("Identity Management", systemImage: "person.badge.shield.checkmark")
+                MacSidebarRow(title: "Identity Management", systemImage: "person.badge.shield.checkmark", isSelected: selection == .identityManagement)
                     .tag(SidebarItem.identityManagement)
-                Label("Settings", systemImage: "gearshape")
+                MacSidebarRow(title: "Settings", systemImage: "gearshape", isSelected: selection == .settings)
                     .tag(SidebarItem.settings)
                     .accessibilityIdentifier("sidebar-settings")
             }
@@ -634,6 +645,76 @@ private struct SidebarHeader: View {
         .padding(.vertical, 6)
     }
 }
+
+#if os(macOS)
+private struct MacSidebarRow: View {
+    let title: String
+    var subtitle: String? = nil
+    let systemImage: String
+    var unreadCount: Int = 0
+    var isAction: Bool = false
+    let isSelected: Bool
+
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var hovering = false
+
+    private var isDark: Bool { colorScheme == .dark }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isSelected || isAction ? theme.accent : .secondary)
+                .frame(width: 20)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13.5, weight: isSelected ? .semibold : .medium, design: .rounded))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                if let subtitle, !subtitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if unreadCount > 0 {
+                UnreadBadge(count: unreadCount)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, subtitle == nil ? 8 : 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .opacity(isSelected ? 1 : (hovering ? 0.54 : 0))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(theme.accent.opacity(isSelected ? (isDark ? 0.18 : 0.12) : (hovering ? 0.08 : 0)))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(
+                            Color.white.opacity(isSelected ? (isDark ? 0.24 : 0.34) : (hovering ? 0.16 : 0)),
+                            lineWidth: 0.8
+                        )
+                )
+        }
+        .shadow(color: theme.accent.opacity(isSelected ? 0.14 : 0), radius: 9, x: 0, y: 4)
+        .animation(.easeOut(duration: 0.16), value: isSelected)
+        .animation(.easeOut(duration: 0.16), value: hovering)
+        .onHover { hovering = $0 }
+    }
+}
+#endif
 
 #if os(iOS)
 private struct IOSBottomBar: View {
@@ -1657,10 +1738,15 @@ private struct ConversationView: View {
     @State private var showingAttachmentImporter = false
     #endif
     @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     #if os(macOS)
     @FocusState private var isComposerFocused: Bool
     #endif
+
+    private var isDark: Bool {
+        colorScheme == .dark
+    }
 
     var body: some View {
         let conversation = model.state.conversation(for: contact.id)
@@ -1694,16 +1780,25 @@ private struct ConversationView: View {
             )
             #else
             HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 3) {
+                ZStack {
+                    Circle()
+                        .fill(theme.accent.opacity(isSensitiveHidden ? 0.12 : 0.18))
+                    Image(systemName: isSensitiveHidden ? "eye.slash.fill" : "lock.shield.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                }
+                .frame(width: 34, height: 34)
+
+                VStack(alignment: .leading, spacing: 2) {
                     if isSensitiveHidden {
                         Text("Secure chat hidden")
-                            .font(.system(size: 20, weight: .semibold, design: .rounded))
+                            .font(.system(size: 18, weight: .semibold, design: .rounded))
                         Text("Screen capture is active")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
                         Text(contact.displayName)
-                            .font(.system(size: 20, weight: .semibold, design: .rounded))
+                            .font(.system(size: 18, weight: .semibold, design: .rounded))
                         Text("Secure chat")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -1721,9 +1816,38 @@ private struct ConversationView: View {
                 .hoverLift()
                 RevealToggleButton(isRevealed: $revealMessages, isDisabled: isSensitiveHidden)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 4)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Color.black.opacity(isDark ? 0.18 : 0.07))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        theme.accent.opacity(isDark ? 0.14 : 0.09),
+                                        theme.glowSecondary.opacity(isDark ? 0.08 : 0.05),
+                                        Color.clear
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.white.opacity(isDark ? 0.22 : 0.34), lineWidth: 0.8)
+                    )
+            )
+            .shadow(color: theme.accent.opacity(isDark ? 0.10 : 0.06), radius: 12, x: 0, y: 5)
+            .padding(.horizontal, 18)
+            .padding(.top, 42)
+            .padding(.bottom, 10)
             #endif
             ScrollViewReader { proxy in
                 ScrollView {
@@ -1814,8 +1938,16 @@ private struct ConversationView: View {
                 TextField("Message", text: $messageText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .submitLabel(.send)
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+                    .padding(.horizontal, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.black.opacity(isDark ? 0.16 : 0.05))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(Color.white.opacity(isDark ? 0.14 : 0.24), lineWidth: 0.7)
+                            )
+                    )
                     .focused($isComposerFocused)
                     .onSubmit {
                         sendMessage()
@@ -1847,6 +1979,14 @@ private struct ConversationView: View {
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color.black.opacity(isDark ? 0.16 : 0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.white.opacity(isDark ? 0.18 : 0.30), lineWidth: 0.8)
+                    )
             )
             #endif
             .padding(.horizontal, 8)
@@ -2133,6 +2273,8 @@ private struct GroupConversationView: View {
     @State private var showingClearChatConfirm = false
     @State private var showingGroupDetails = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -2155,6 +2297,10 @@ private struct GroupConversationView: View {
 
     private var memberCount: Int {
         resolvedGroup?.memberContactIds.count ?? group.memberContactIds.count
+    }
+
+    private var isDark: Bool {
+        colorScheme == .dark
     }
 
     var body: some View {
@@ -2196,16 +2342,25 @@ private struct GroupConversationView: View {
             )
             #else
             HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 3) {
+                ZStack {
+                    Circle()
+                        .fill(theme.accent.opacity(isSensitiveHidden ? 0.12 : 0.18))
+                    Image(systemName: isSensitiveHidden ? "eye.slash.fill" : "person.3.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                }
+                .frame(width: 34, height: 34)
+
+                VStack(alignment: .leading, spacing: 2) {
                     if isSensitiveHidden {
                         Text("Secure group hidden")
-                            .font(.system(size: 20, weight: .semibold, design: .rounded))
+                            .font(.system(size: 18, weight: .semibold, design: .rounded))
                         Text("Screen capture is active")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
                         Text(groupTitle)
-                            .font(.system(size: 20, weight: .semibold, design: .rounded))
+                            .font(.system(size: 18, weight: .semibold, design: .rounded))
                         Text("\(memberCount) members")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -2232,9 +2387,38 @@ private struct GroupConversationView: View {
                 .hoverLift()
                 RevealToggleButton(isRevealed: $revealMessages, isDisabled: isSensitiveHidden)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 12)
-            .padding(.bottom, 4)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Color.black.opacity(isDark ? 0.18 : 0.07))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        theme.accent.opacity(isDark ? 0.14 : 0.09),
+                                        theme.glowSecondary.opacity(isDark ? 0.08 : 0.05),
+                                        Color.clear
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.white.opacity(isDark ? 0.22 : 0.34), lineWidth: 0.8)
+                    )
+            )
+            .shadow(color: theme.accent.opacity(isDark ? 0.10 : 0.06), radius: 12, x: 0, y: 5)
+            .padding(.horizontal, 18)
+            .padding(.top, 42)
+            .padding(.bottom, 10)
             #endif
 
             ScrollViewReader { proxy in
@@ -2277,8 +2461,16 @@ private struct GroupConversationView: View {
                 TextField("Message", text: $messageText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .submitLabel(.send)
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 8)
+                    .padding(.vertical, 7)
+                    .padding(.horizontal, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.black.opacity(isDark ? 0.16 : 0.05))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(Color.white.opacity(isDark ? 0.14 : 0.24), lineWidth: 0.7)
+                            )
+                    )
                     .focused($isComposerFocused)
                     .onSubmit {
                         sendMessage()
@@ -2310,6 +2502,14 @@ private struct GroupConversationView: View {
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color.black.opacity(isDark ? 0.16 : 0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.white.opacity(isDark ? 0.18 : 0.30), lineWidth: 0.8)
+                    )
             )
             #endif
             .padding(.horizontal, 8)
