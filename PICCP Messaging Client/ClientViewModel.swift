@@ -1,5 +1,6 @@
 import Combine
 import CryptoKit
+import Darwin
 import Foundation
 import PICCPCore
 import SwiftUI
@@ -7,6 +8,9 @@ import UniformTypeIdentifiers
 import ImageIO
 #if canImport(LocalAuthentication)
 import LocalAuthentication
+#endif
+#if os(iOS)
+import UIKit
 #endif
 
 enum StorageProtectionMode: String, CaseIterable, Identifiable {
@@ -50,6 +54,13 @@ enum ProfileSyncState: Equatable {
     case error(Date, String)
 }
 
+struct RelayHealthSnapshot: Equatable {
+    var lastCheckedAt: Date
+    var latencyMs: Int?
+    var isReachable: Bool
+    var failureReason: String?
+}
+
 @MainActor
 final class ClientViewModel: ObservableObject {
     @Published var state: ClientState
@@ -60,6 +71,8 @@ final class ClientViewModel: ObservableObject {
     @Published var isSyncing = false
     @Published var profileSyncStatus: [UUID: ProfileSyncState] = [:]
     @Published var activeContactId: UUID?
+    @Published var activeGroupId: UUID?
+    @Published var pendingGroupJoinRequests: [UUID: [RelayGroupJoinRequest]] = [:]
     @Published var insecureAnnouncements: [PairingAnnouncement] = []
     @Published var insecureRequests: [PairingRequest] = []
     @Published var insecureLastAnnounceAt: Date?
@@ -76,9 +89,13 @@ final class ClientViewModel: ObservableObject {
     @Published var requiresStorageChoice = false
     @Published var storageProtectionMode: StorageProtectionMode = .keychain
     @Published var storageProtectionStatus: String?
+    @Published var biometricsAvailable = false
+    @Published var relayHealth: [UUID: RelayHealthSnapshot] = [:]
+    @Published var isBurningIdentity = false
 
     private var store: ClientStateStore
     private var attachmentStore: AttachmentStore
+    private var threadMessageStore: ThreadMessageStore
     private let notifier = NotificationManager()
     private var autoFetchTask: Task<Void, Never>?
     private var sessionResetCooldown = SessionRecovery.Cooldown(interval: 30)
@@ -101,16 +118,38 @@ final class ClientViewModel: ObservableObject {
     private let isUITest: Bool
     private var lastInsecureRefresh: Date?
     private let insecureRefreshInterval: TimeInterval = 20
+    private var lastCoordinatorSyncAt: Date?
+    private let coordinatorSyncInterval: TimeInterval = 45
     private var insecureSelfTestToken: UUID?
+    private var pendingOutboundPairRequestFingerprints: Set<String> = []
     private var lastInactiveAt: Date?
     private let stateFileURL: URL
     private let attachmentDirectory: URL
+    private let threadMessageDirectory: URL
+    private let corruptionKillSwitchURL: URL
+    private var pinFailedAttempts = 0
+    private var pinLockedUntil: Date?
+    private let pinHashMagic = Data("NPIN2".utf8)
+    private let pinHashRounds = 120_000
+    private let pinMinimumRounds = 60_000
+    private let pinMaximumRounds = 300_000
+    private let pinLockoutThreshold = 5
+    private let pinLockoutBaseSeconds = 3
+    private let pinLockoutMaxSeconds = 300
     private var outboundAttachmentQuotaByContact: [UUID: [AttachmentQuotaEvent]] = [:]
     private var inboundAttachmentQuotaByContact: [UUID: [AttachmentQuotaEvent]] = [:]
     private var outboundAttachmentQuotaByRelay: [String: [AttachmentQuotaEvent]] = [:]
     private var inboundAttachmentQuotaByRelay: [String: [AttachmentQuotaEvent]] = [:]
+    private var decryptedAttachmentCache: [String: SecureRAMBuffer] = [:]
+    private var decryptedAttachmentScopes: [String: AttachmentCacheScope] = [:]
     private static let storageModeKey = "lattice.storageProtection.mode.v1"
-    private static let legacyKeychainConsentKey = "lattice.keychainConsent.v1"
+    private static let keychainAuthPreflightKey = "noctyra.keychainAuthPreflight.v1"
+    private static let groupPayloadPrefix = "PICCP-GROUP-V1:"
+    private enum AttachmentCacheScope: Hashable {
+        case contact(UUID)
+        case group(UUID)
+        case transient
+    }
     private struct InsecureSelfTestFailure: LocalizedError {
         let message: String
         var errorDescription: String? { message }
@@ -140,7 +179,7 @@ final class ClientViewModel: ObservableObject {
             case .invalidChecksum:
                 return "Attachment checksum mismatch."
             case .unsupportedType:
-                return "Unsupported image type."
+                return "Unsupported attachment type."
             case .imageProcessingFailed:
                 return "Failed to process image securely."
             case .attachmentTooLarge(let maxBytes):
@@ -176,21 +215,70 @@ final class ClientViewModel: ObservableObject {
         let agreementKey: AgreementKeyPair?
     }
 
+    private struct GroupTransportPayload: Codable {
+        let groupId: UUID
+        let groupTitle: String
+        let memberFingerprints: [String]
+        let body: String
+        let sentAt: Date
+
+        private enum CodingKeys: String, CodingKey {
+            case groupId
+            case groupTitle
+            case memberFingerprints
+            case body
+            case sentAt
+        }
+
+        init(
+            groupId: UUID,
+            groupTitle: String,
+            memberFingerprints: [String],
+            body: String,
+            sentAt: Date
+        ) {
+            self.groupId = groupId
+            self.groupTitle = groupTitle
+            self.memberFingerprints = memberFingerprints
+            self.body = body
+            self.sentAt = sentAt
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            groupId = try container.decode(UUID.self, forKey: .groupId)
+            groupTitle = try container.decode(String.self, forKey: .groupTitle)
+            memberFingerprints = try container.decodeIfPresent([String].self, forKey: .memberFingerprints) ?? []
+            body = try container.decode(String.self, forKey: .body)
+            sentAt = try container.decode(Date.self, forKey: .sentAt)
+        }
+    }
+
     init() {
         let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("PICCPClient", isDirectory: true)
         let fileURL = directory.appendingPathComponent("state.json")
         let attachmentDirectory = directory.appendingPathComponent("attachments", isDirectory: true)
+        let threadMessageDirectory = directory.appendingPathComponent("threads", isDirectory: true)
+        let corruptionKillSwitchURL = directory.appendingPathComponent(".corruption-kill-switch")
+        let isUITest = ProcessInfo.processInfo.arguments.contains("UI_TESTING")
         let resolvedMode = ClientViewModel.loadStorageProtectionMode()
         let useEncryption = resolvedMode?.usesKeychain ?? false
 
         self.stateFileURL = fileURL
         self.attachmentDirectory = attachmentDirectory
-        self.isUITest = ProcessInfo.processInfo.arguments.contains("UI_TESTING")
+        self.threadMessageDirectory = threadMessageDirectory
+        self.corruptionKillSwitchURL = corruptionKillSwitchURL
+        self.isUITest = isUITest
+        if !isUITest {
+            ClientViewModel.enforceCorruptionKillSwitchIfNeeded(at: corruptionKillSwitchURL)
+        }
         self.store = ClientStateStore(fileURL: fileURL, useEncryption: useEncryption)
         self.attachmentStore = AttachmentStore(directory: attachmentDirectory, useEncryption: useEncryption)
+        self.threadMessageStore = ThreadMessageStore(directory: threadMessageDirectory, useEncryption: useEncryption)
         self.storageProtectionMode = resolvedMode ?? .keychain
-        self.requiresStorageChoice = !self.isUITest && resolvedMode == nil
+        self.requiresStorageChoice = !isUITest && resolvedMode == nil
+        self.biometricsAvailable = ClientViewModel.detectBiometricAvailability()
         if isUITest {
             self.state = ClientViewModel.makeUITestState()
             self.isReady = true
@@ -208,7 +296,9 @@ final class ClientViewModel: ObservableObject {
                 inboxId: defaultInbox,
                 relayServers: [defaultServer],
                 selectedRelayId: defaultServer.id,
-                hasCompletedOnboarding: true
+                hasCompletedOnboarding: false,
+                hasAcceptedPrivacyPolicy: false,
+                hasAcceptedTermsOfUse: false
             )
             self.requiresOnboarding = false
 
@@ -226,9 +316,16 @@ final class ClientViewModel: ObservableObject {
         if isUITest {
             return
         }
+        enforceCorruptionKillSwitchIfNeeded()
         do {
             if let stored = try await store.load() {
                 state = stored
+                if shouldForceOnboarding(for: state) {
+                    state.hasCompletedOnboarding = false
+                    state.hasAcceptedPrivacyPolicy = false
+                    state.hasAcceptedTermsOfUse = false
+                    try await persistState()
+                }
             } else {
                 // First boot: don't persist an identity until the user finishes onboarding.
                 state.hasCompletedOnboarding = false
@@ -238,9 +335,14 @@ final class ClientViewModel: ObservableObject {
                 isReady = true
                 return
             }
+            refreshBiometricAvailability()
+            let didSanitizeActionPlans = sanitizeActionPlans()
+            let didSanitizeAppLock = sanitizeAppLockForBiometricAvailability()
             if state.insecurePairing.isEnabled {
                 state.insecurePairing.isEnabled = false
-                try await store.save(state)
+                try await persistState()
+            } else if didSanitizeActionPlans || didSanitizeAppLock {
+                try await persistState()
             }
             requiresOnboarding = !state.hasCompletedOnboarding
                 || !state.hasAcceptedPrivacyPolicy
@@ -252,6 +354,7 @@ final class ClientViewModel: ObservableObject {
             }
             await ensureRelaySelection()
             await ensurePrekeysForActiveProfiles()
+            await syncRelayGroupsForActiveProfiles()
             isReady = true
             await notifier.requestAuthorization()
             startAutoFetch()
@@ -266,6 +369,8 @@ final class ClientViewModel: ObservableObject {
     func completeOnboarding(
         displayName: String,
         relayId: UUID?,
+        privacy: PrivacySettings,
+        appLock: AppLockSettings,
         acceptedPrivacyPolicy: Bool,
         acceptedTermsOfUse: Bool
     ) async {
@@ -285,9 +390,14 @@ final class ClientViewModel: ObservableObject {
             lastError = "Add a relay server first."
             return
         }
+        if requiresPin(mode: appLock.mode) && !appLock.isPinConfigured {
+            lastError = "Set a 6-digit PIN for the selected app lock mode."
+            return
+        }
 
         let identity = Identity(displayName: trimmed)
-        let inboxId = InboxAddress.generate()
+        let inboxAccessKey = SigningKeyPair()
+        let inboxId = InboxAddress.derived(from: inboxAccessKey.publicKeyData)
         let prekeys = (try? PrekeyState.generate(identity: identity, oneTimeCount: prekeyTargetCount)) ?? PrekeyState(
             signedPrekeyId: UUID(),
             signedPrekeyPublicKey: Data(),
@@ -299,6 +409,7 @@ final class ClientViewModel: ObservableObject {
         let profile = IdentityProfile(
             identity: identity,
             inboxId: inboxId,
+            inboxAccessKey: inboxAccessKey,
             relay: relaySelection.endpoint,
             selectedRelayId: relaySelection.id,
             prekeys: prekeys
@@ -307,6 +418,13 @@ final class ClientViewModel: ObservableObject {
         state.activeIdentityId = profile.id
         state.selectedRelayId = relaySelection.id
         state.relay = relaySelection.endpoint
+        state.privacy = privacy
+        var finalAppLock = sanitizeAppLock(appLock)
+        if finalAppLock.mode == .off {
+            finalAppLock.pinHash = nil
+            finalAppLock.pinSalt = nil
+        }
+        state.appLock = finalAppLock
         state.hasCompletedOnboarding = true
         state.hasAcceptedPrivacyPolicy = acceptedPrivacyPolicy
         state.hasAcceptedTermsOfUse = acceptedTermsOfUse
@@ -315,6 +433,7 @@ final class ClientViewModel: ObservableObject {
 
         await ensureRelaySelection()
         await ensurePrekeysForActiveProfiles()
+        await syncRelayGroupsForActiveProfiles()
         await notifier.requestAuthorization()
         startAutoFetch()
         lastInfo = "Setup complete."
@@ -380,12 +499,25 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func publishPrekeys(_ prekeys: PrekeyState, identity: Identity, relay: RelayEndpoint) async {
-        let bundle = prekeys.bundle(identityFingerprint: identity.fingerprint)
-        let request = UploadPrekeyBundleRequest(
-            fingerprint: identity.fingerprint,
-            bundle: bundle
-        )
         do {
+            let bundle = try prekeys.bundle(identity: identity)
+            let unsignedRequest = UploadPrekeyBundleRequest(
+                fingerprint: identity.fingerprint,
+                bundle: bundle
+            )
+            let proof = try makeActorProof(
+                fingerprint: identity.fingerprint,
+                signingKey: identity.signingKey,
+                publicSigningKey: identity.signingKey.publicKeyData,
+                signableDataBuilder: { proof in
+                    try unsignedRequest.signableData(for: proof)
+                }
+            )
+            let request = UploadPrekeyBundleRequest(
+                fingerprint: identity.fingerprint,
+                bundle: bundle,
+                actorProof: proof
+            )
             let client = relayClient(for: relay)
             let response = try await client.send(.uploadPrekeys(request))
             if response.type != .ok {
@@ -397,19 +529,30 @@ final class ClientViewModel: ObservableObject {
     }
 
     func selectStorageProtection(_ mode: StorageProtectionMode) {
-        storageProtectionMode = mode
-        requiresStorageChoice = false
-        persistStorageProtectionMode(mode)
-        configureStores(for: mode)
-        storageProtectionStatus = "Storage protection set to \(mode.displayName)."
-        Task {
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            if storageProtectionStatus == "Storage protection set to \(mode.displayName)." {
+        Task { @MainActor in
+            do {
+                if mode.usesKeychain {
+                    storageProtectionStatus = "Verifying Keychain access..."
+                    try await warmUpKeychainAccess()
+                }
+                storageProtectionMode = mode
+                requiresStorageChoice = false
+                persistStorageProtectionMode(mode)
+                configureStores(for: mode)
+                storageProtectionStatus = "Storage protection set to \(mode.displayName)."
+                Task {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    if storageProtectionStatus == "Storage protection set to \(mode.displayName)." {
+                        storageProtectionStatus = nil
+                    }
+                }
+                await load()
+            } catch {
+                // Keep chooser visible so user can pick device-only mode if keychain access fails.
+                requiresStorageChoice = true
                 storageProtectionStatus = nil
+                lastError = "Unable to access Keychain: \(error.localizedDescription)"
             }
-        }
-        Task {
-            await load()
         }
     }
 
@@ -417,6 +560,7 @@ final class ClientViewModel: ObservableObject {
         guard storageProtectionMode != mode else { return }
         let previousStore = store
         let previousAttachmentStore = attachmentStore
+        let previousThreadMessageStore = threadMessageStore
         let previousMode = storageProtectionMode
 
         storageProtectionMode = mode
@@ -425,8 +569,13 @@ final class ClientViewModel: ObservableObject {
         storageProtectionStatus = "Updating storage protection..."
 
         do {
-            try await store.save(state)
+            if mode.usesKeychain {
+                try await warmUpKeychainAccess()
+            }
+            try migrateThreadMessages(from: previousThreadMessageStore, to: threadMessageStore)
             try migrateAttachments(from: previousAttachmentStore, to: attachmentStore)
+            try await store.save(strippedStateForPersistence(state))
+            evictInactiveThreadMessagesFromRAM()
             storageProtectionStatus = "Storage protection updated."
             Task {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -437,6 +586,7 @@ final class ClientViewModel: ObservableObject {
         } catch {
             store = previousStore
             attachmentStore = previousAttachmentStore
+            threadMessageStore = previousThreadMessageStore
             storageProtectionMode = previousMode
             persistStorageProtectionMode(previousMode)
             lastError = "Failed to update storage protection: \(error.localizedDescription)"
@@ -444,15 +594,62 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
+    private func warmUpKeychainAccess() async throws {
+        await preauthorizeKeychainIfPossible()
+        try await store.warmUpKeychain()
+    }
+
+    private func preauthorizeKeychainIfPossible() async {
+        #if os(macOS)
+        guard !isUITest else { return }
+        if UserDefaults.standard.bool(forKey: ClientViewModel.keychainAuthPreflightKey) {
+            return
+        }
+        let context = LAContext()
+        var canEvaluateError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &canEvaluateError) else {
+            // Some Macs don't support LocalAuthentication password prompts in this flow.
+            // Keychain warmup below remains the source of truth.
+            return
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            context.evaluatePolicy(
+                .deviceOwnerAuthentication,
+                localizedReason: "Authorize secure Keychain storage for Noctyra."
+            ) { success, error in
+                DispatchQueue.main.async {
+                    if success {
+                        UserDefaults.standard.set(true, forKey: ClientViewModel.keychainAuthPreflightKey)
+                    }
+                    _ = error
+                    continuation.resume()
+                }
+            }
+        }
+        #endif
+    }
+
+    private func shouldForceOnboarding(for loadedState: ClientState) -> Bool {
+        let displayName = loadedState.identity.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return displayName.caseInsensitiveCompare("Setup Required") == .orderedSame
+    }
+
     func save() async {
         if isUITest {
             return
         }
         do {
-            try await store.save(state)
+            try await persistState()
         } catch {
             lastError = "Failed to save state: \(error.localizedDescription)"
         }
+    }
+
+    private func persistState() async throws {
+        try persistAllThreadMessagesFromState(state)
+        let sanitized = strippedStateForPersistence(state)
+        try await store.save(sanitized)
+        evictInactiveThreadMessagesFromRAM()
     }
 
     private func recordContinuityEvent(
@@ -516,10 +713,21 @@ final class ClientViewModel: ObservableObject {
         )
     }
 
-    func contactOfferCode() -> String {
+    func contactOfferCode() async -> String {
+        let identity = state.identity
+        let inboxId = state.inboxId
+        let relay = state.relay
+        let inboxAccessPublicKey = state.inboxAccessKey?.publicKeyData
         do {
-            let offer = MessageEngine.makeContactOffer(identity: state.identity, inboxId: state.inboxId, relay: state.relay)
-            return try ContactOfferCode.encode(offer)
+            return try await Task.detached(priority: .userInitiated) {
+                let offer = try MessageEngine.makeContactOffer(
+                    identity: identity,
+                    inboxId: inboxId,
+                    relay: relay,
+                    inboxAccessPublicKey: inboxAccessPublicKey
+                )
+                return try ContactOfferCode.encode(offer)
+            }.value
         } catch {
             lastError = "Failed to encode contact offer: \(error.localizedDescription)"
             return ""
@@ -527,8 +735,13 @@ final class ClientViewModel: ObservableObject {
     }
 
     func contactShareData(password: String) async -> Data? {
-        let offer = MessageEngine.makeContactOffer(identity: state.identity, inboxId: state.inboxId, relay: state.relay)
         do {
+            let offer = try MessageEngine.makeContactOffer(
+                identity: state.identity,
+                inboxId: state.inboxId,
+                relay: state.relay,
+                inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
+            )
             return try await Task.detached {
                 try ContactShare.encode(offer, password: password)
             }.value
@@ -541,15 +754,20 @@ final class ClientViewModel: ObservableObject {
     func addContact(code: String) async {
         do {
             let offer = try ContactOfferCode.decode(code)
-            let contact = MessageEngine.contact(from: offer)
+            let contact = try validatedContact(from: offer)
+            let wasKnown = state.contacts.contains { existing in
+                existing.fingerprint == contact.fingerprint || contactAddressKey(for: existing) == contactAddressKey(for: contact)
+            }
             state.upsert(contact: contact)
-            recordContinuityEvent(
-                kind: .contactAdded,
-                contact: contact,
-                newFingerprint: contact.fingerprint
-            )
-            try await store.save(state)
-            lastInfo = "Added \(contact.displayName)."
+            if !wasKnown {
+                recordContinuityEvent(
+                    kind: .contactAdded,
+                    contact: contact,
+                    newFingerprint: contact.fingerprint
+                )
+            }
+            try await persistState()
+            lastInfo = wasKnown ? "Updated \(contact.displayName)." : "Added \(contact.displayName)."
         } catch {
             lastError = "Failed to add contact: \(error.localizedDescription)"
         }
@@ -560,22 +778,34 @@ final class ClientViewModel: ObservableObject {
             let offer = try await Task.detached {
                 try ContactShare.decode(shareData, password: password)
             }.value
-            let contact = MessageEngine.contact(from: offer)
+            let contact = try validatedContact(from: offer)
+            let wasKnown = state.contacts.contains { existing in
+                existing.fingerprint == contact.fingerprint || contactAddressKey(for: existing) == contactAddressKey(for: contact)
+            }
             state.upsert(contact: contact)
-            recordContinuityEvent(
-                kind: .contactAdded,
-                contact: contact,
-                newFingerprint: contact.fingerprint
-            )
-            try await store.save(state)
-            lastInfo = "Added \(contact.displayName)."
+            if !wasKnown {
+                recordContinuityEvent(
+                    kind: .contactAdded,
+                    contact: contact,
+                    newFingerprint: contact.fingerprint
+                )
+            }
+            try await persistState()
+            lastInfo = wasKnown ? "Updated \(contact.displayName)." : "Added \(contact.displayName)."
         } catch {
             lastError = "Failed to import contact: \(error.localizedDescription)"
         }
     }
 
+    private func validatedContact(from offer: ContactOffer) throws -> Contact {
+        let verifiedOffer = try offer.verified()
+        let contact = try MessageEngine.contact(from: verifiedOffer)
+        return normalizedContact(contact, preferredRelay: state.relay)
+    }
+
     private func fetchPrekeyBundle(for contact: Contact) async -> PrekeyBundle? {
-        let client = relayClient(for: contact.relay)
+        let endpoint = reachableRelayEndpoint(contact.relay, preferredRelay: state.relay)
+        let client = relayClient(for: endpoint)
         do {
             let response = try await client.send(
                 .fetchPrekeyBundle(FetchPrekeyBundleRequest(fingerprint: contact.fingerprint))
@@ -600,6 +830,9 @@ final class ClientViewModel: ObservableObject {
             return nil
         }
         if let oneTime = bundle.oneTimePrekeys.first {
+            guard oneTime.verify(using: contact.signingPublicKey) else {
+                return nil
+            }
             return PrekeySelection(
                 reference: PrekeyReference(kind: .oneTime, id: oneTime.id),
                 publicKey: oneTime.publicKey
@@ -612,8 +845,11 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func prepareOutboundSession(for contact: Contact, forceNew: Bool = false) async throws -> OutboundSessionContext {
+        let contact = normalizedContact(contact, preferredRelay: state.relay)
         if !forceNew, let existing = state.conversation(for: contact.id) {
-            return OutboundSessionContext(conversation: existing, kemCiphertext: nil, prekey: nil)
+            loadConversationMessagesIntoRAM(contactId: contact.id)
+            let hydrated = state.conversation(for: contact.id) ?? existing
+            return OutboundSessionContext(conversation: hydrated, kemCiphertext: nil, prekey: nil)
         }
         if let selection = await selectPrekey(for: contact) {
             let session = try MessageEngine.createOutboundSession(
@@ -671,8 +907,9 @@ final class ClientViewModel: ObservableObject {
             lastError = "Contact not found."
             return
         }
+        loadConversationMessagesIntoRAM(contactId: contactId)
         do {
-            let contact = state.contacts[contactIndex]
+            let contact = normalizedContact(state.contacts[contactIndex], preferredRelay: state.relay)
             let session = try await prepareOutboundSession(for: contact)
             var conversation = session.conversation
             let rootRatchet = prepareRootRatchetIfNeeded(conversation: conversation, contact: contact)
@@ -695,7 +932,7 @@ final class ClientViewModel: ObservableObject {
             conversation.markMessageProcessed()
             applyRootRatchetIfNeeded(rootRatchet, contact: contact, conversation: &conversation)
             state.upsert(conversation: conversation)
-            try await store.save(state)
+            try await persistState()
             try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
             lastInfo = "Sent message to \(contact.displayName)."
         } catch {
@@ -708,6 +945,7 @@ final class ClientViewModel: ObservableObject {
             lastError = "Contact not found."
             return
         }
+        loadConversationMessagesIntoRAM(contactId: contactId)
         guard !data.isEmpty else {
             lastError = "Attachment is empty."
             return
@@ -717,7 +955,7 @@ final class ClientViewModel: ObservableObject {
             guard preparedPayload.data.count <= maxAttachmentBytes else {
                 throw AttachmentTransferError.attachmentTooLarge(maxBytes: maxAttachmentBytes)
             }
-            let contact = state.contacts[contactIndex]
+            let contact = normalizedContact(state.contacts[contactIndex], preferredRelay: state.relay)
             try validateAttachmentQuota(
                 bytes: preparedPayload.data.count,
                 contactId: contact.id,
@@ -744,7 +982,7 @@ final class ClientViewModel: ObservableObject {
                 chunkSize: chunkSize
             )
             let sessionId = conversation.sessionId
-            let relayClient = relayClient(for: contact.relay)
+            let relayClient = relayClient(for: reachableRelayEndpoint(contact.relay, preferredRelay: state.relay))
             for chunkIndex in 0..<chunkCount {
                 let start = chunkIndex * chunkSize
                 let end = min(start + chunkSize, preparedPayload.data.count)
@@ -788,7 +1026,7 @@ final class ClientViewModel: ObservableObject {
                 rootRatchet: rootRatchet?.ratchet
             )
             let localFileName = try attachmentStore.saveAttachment(preparedPayload.data, descriptor: descriptor)
-            let title = descriptor.fileName?.isEmpty == false ? descriptor.fileName! : "Image"
+            let title = attachmentDisplayTitle(descriptor, fallback: "Attachment")
             let message = Message(
                 direction: .sent,
                 body: title,
@@ -800,7 +1038,7 @@ final class ClientViewModel: ObservableObject {
             conversation.markMessageProcessed()
             applyRootRatchetIfNeeded(rootRatchet, contact: contact, conversation: &conversation)
             state.upsert(conversation: conversation)
-            try await store.save(state)
+            try await persistState()
             try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
             recordAttachmentQuotaUsage(
                 bytes: preparedPayload.data.count,
@@ -823,6 +1061,7 @@ final class ClientViewModel: ObservableObject {
 
         let profiles = state.identityProfiles.filter { !$0.isArchived }
         for profile in profiles {
+            await syncRelayGroups(for: profile.id)
             await fetchMessages(for: profile.id)
         }
     }
@@ -833,9 +1072,76 @@ final class ClientViewModel: ObservableObject {
         }
         profileSyncStatus[profileId] = .syncing
         do {
+            var didUpdateMailbox = false
+            if profile.inboxAccessKey == nil {
+                profile.inboxAccessKey = SigningKeyPair()
+                didUpdateMailbox = true
+            }
+            if let accessKey = profile.inboxAccessKey,
+               !InboxAddress.isBound(profile.inboxId, to: accessKey.publicKeyData) {
+                profile.inboxId = InboxAddress.derived(from: accessKey.publicKeyData)
+                didUpdateMailbox = true
+            }
+            if didUpdateMailbox {
+                state.updateIdentityProfile(profile)
+                try await persistState()
+            }
+            guard let inboxAccessKey = profile.inboxAccessKey,
+                  !inboxAccessKey.publicKeyData.isEmpty,
+                  !inboxAccessKey.privateKeyData.isEmpty else {
+                throw CryptoError.operationFailed
+            }
             let client = relayClient(for: profile.relay)
+            let contactOffer = try MessageEngine.makeContactOffer(
+                identity: profile.identity,
+                inboxId: profile.inboxId,
+                relay: profile.relay,
+                inboxAccessPublicKey: inboxAccessKey.publicKeyData
+            )
+            var registration = RegisterInboxRequest(
+                inboxId: profile.inboxId,
+                accessPublicKey: inboxAccessKey.publicKeyData,
+                contactOffer: contactOffer
+            )
+            let registrationProof = try makeActorProof(
+                fingerprint: CryptoBox.fingerprint(for: inboxAccessKey.publicKeyData),
+                signingKey: inboxAccessKey,
+                publicSigningKey: inboxAccessKey.publicKeyData,
+                signableDataBuilder: { proof in
+                    try registration.signableData(for: proof)
+                }
+            )
+            registration = RegisterInboxRequest(
+                inboxId: profile.inboxId,
+                accessPublicKey: inboxAccessKey.publicKeyData,
+                contactOffer: contactOffer,
+                accessProof: registrationProof
+            )
+            let registrationResponse = try await client.send(.registerInbox(registration))
+            guard registrationResponse.type == .ok else {
+                throw RelayMailboxError.rejected(
+                    registrationResponse.error ?? "Inbox registration failed."
+                )
+            }
+            var fetchRequest = FetchRequest(
+                inboxId: profile.inboxId,
+                routingToken: profile.inboxId
+            )
+            let fetchProof = try makeActorProof(
+                fingerprint: CryptoBox.fingerprint(for: inboxAccessKey.publicKeyData),
+                signingKey: inboxAccessKey,
+                publicSigningKey: inboxAccessKey.publicKeyData,
+                signableDataBuilder: { proof in
+                    try fetchRequest.signableData(for: proof)
+                }
+            )
+            fetchRequest = FetchRequest(
+                inboxId: profile.inboxId,
+                routingToken: profile.inboxId,
+                accessProof: fetchProof
+            )
             let response = try await client.send(
-                .fetch(FetchRequest(inboxId: profile.inboxId, routingToken: profile.inboxId))
+                .fetch(fetchRequest)
             )
             guard response.type == .messages else {
                 if let error = response.error {
@@ -853,9 +1159,10 @@ final class ClientViewModel: ObservableObject {
                     continue
                 }
                 var signatureValid = false
-                var fallbackConversation: Conversation?
+                var recoveryConversation: Conversation?
                 do {
                     var contact = profile.contacts[contactIndex]
+                    contact = normalizedContact(contact, preferredRelay: profile.relay)
                     var baseConversation: Conversation
                     var existingConversation: Conversation?
                     var usedPrekeyForSession = false
@@ -865,8 +1172,15 @@ final class ClientViewModel: ObservableObject {
                         continue
                     }
                     if let existing = conversation(for: contact.id, in: profile), existing.id == envelope.conversationId {
-                        existingConversation = existing
-                        baseConversation = existing
+                        var hydratedExisting = existing
+                        if hydratedExisting.messages.isEmpty {
+                            hydratedExisting.messages = storedDirectMessages(
+                                profileId: profile.id,
+                                contactId: contact.id
+                            )
+                        }
+                        existingConversation = hydratedExisting
+                        baseConversation = hydratedExisting
                     } else if envelope.kemCiphertext != nil {
                         let inbound = try createInboundSession(
                             for: envelope,
@@ -880,7 +1194,7 @@ final class ClientViewModel: ObservableObject {
                     } else {
                         continue
                     }
-                    fallbackConversation = existingConversation ?? baseConversation
+                    recoveryConversation = existingConversation ?? baseConversation
                     if isSessionMismatch(envelope: envelope, conversation: baseConversation) {
                         if envelope.kemCiphertext != nil {
                             let inbound = try createInboundSession(
@@ -896,28 +1210,16 @@ final class ClientViewModel: ObservableObject {
                                 baseConversation.messages = existing.messages
                                 baseConversation.unreadCount = existing.unreadCount
                             }
-                            fallbackConversation = existingConversation ?? baseConversation
+                            recoveryConversation = existingConversation ?? baseConversation
                         } else {
-                            let fallback = existingConversation ?? baseConversation
+                            let recovery = existingConversation ?? baseConversation
                             if let rebuilt = await attemptSilentSessionReset(
                                 contact: contact,
-                                existingConversation: fallback,
+                                existingConversation: recovery,
                                 identity: profile.identity,
                                 preferredRelay: profile.relay
                             ) {
                                 upsertConversation(rebuilt, in: &profile)
-                            } else {
-                                var mismatchConversation = fallback
-                                let notice = Message(
-                                    direction: .received,
-                                    body: "Message could not be decrypted (session mismatch). Tap to retry.",
-                                    timestamp: envelope.sentAt,
-                                    counter: envelope.messageCounter,
-                                    isMismatch: true
-                                )
-                                mismatchConversation.messages.append(notice)
-                                mismatchConversation.unreadCount += 1
-                                upsertConversation(mismatchConversation, in: &profile)
                             }
                             continue
                         }
@@ -942,20 +1244,57 @@ final class ClientViewModel: ObservableObject {
                             )
                             inboundContext = inbound
                             usedPrekeyForSession = inbound.usedPrekey
-                            var fallback = try rebuildInboundConversation(
+                            var recoveredConversation = try rebuildInboundConversation(
                                 from: originalConversation,
                                 inbound: inbound
                             )
-                            let result = try MessageEngine.decryptWithKey(envelope: envelope, contact: contact, conversation: &fallback)
+                            let result = try MessageEngine.decryptWithKey(envelope: envelope, contact: contact, conversation: &recoveredConversation)
                             body = result.body
                             messageKey = result.messageKey
-                            conversation = fallback
+                            conversation = recoveredConversation
                         } else {
                             throw error
                         }
                     }
                     let appendedMessage: Message?
-                    if case .attachment(let descriptor) = body {
+                    if case .text(let text) = body,
+                       let groupPayload = decodeGroupPayload(from: text) {
+                        var group = group(for: groupPayload.groupId, in: profile)
+                            ?? GroupConversation(
+                                id: groupPayload.groupId,
+                                title: groupPayload.groupTitle,
+                                memberContactIds: [contact.id]
+                            )
+                        if group.messages.isEmpty {
+                            group.messages = storedGroupMessages(profileId: profile.id, groupId: group.id)
+                        }
+                        if !groupPayload.groupTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            group.title = groupPayload.groupTitle
+                        }
+                        var memberIds = Set(group.memberContactIds)
+                        memberIds.insert(contact.id)
+                        for fingerprint in groupPayload.memberFingerprints {
+                            if let knownContact = profile.contacts.first(where: { $0.fingerprint == fingerprint }) {
+                                memberIds.insert(knownContact.id)
+                            }
+                        }
+                        group.memberContactIds = Array(memberIds)
+                        let message = Message(
+                            direction: .received,
+                            senderDisplayName: contact.displayName,
+                            body: groupPayload.body,
+                            timestamp: envelope.sentAt,
+                            counter: envelope.messageCounter
+                        )
+                        group.messages.append(message)
+                        if activeGroupId != group.id {
+                            group.unreadCount += 1
+                            notifier.notify(title: group.title, body: "\(contact.displayName): \(groupPayload.body)")
+                        }
+                        upsertGroup(group, in: &profile)
+                        lastInfo = "Received group message from \(contact.displayName)."
+                        appendedMessage = nil
+                    } else if case .attachment(let descriptor) = body {
                         let sessionId = envelope.sessionId ?? conversation.sessionId
                         let localFileName: String?
                         do {
@@ -986,7 +1325,7 @@ final class ClientViewModel: ObservableObject {
                             localFileName = nil
                             lastError = "Attachment download failed: \(error.localizedDescription)"
                         }
-                        let title = descriptor.fileName?.isEmpty == false ? descriptor.fileName! : "Image"
+                        let title = attachmentDisplayTitle(descriptor, fallback: "Attachment received")
                         let message = Message(
                             direction: .received,
                             body: title,
@@ -1011,7 +1350,7 @@ final class ClientViewModel: ObservableObject {
                             if case .text(let text) = body {
                                 notifier.notify(title: contact.displayName, body: text)
                             } else if case .attachment(let descriptor) = body {
-                                let label = descriptor.fileName?.isEmpty == false ? descriptor.fileName! : "Attachment received"
+                                let label = attachmentDisplayTitle(descriptor, fallback: "Attachment received")
                                 notifier.notify(title: contact.displayName, body: label)
                             }
                         }
@@ -1030,17 +1369,6 @@ final class ClientViewModel: ObservableObject {
                                     newFingerprint: contact.fingerprint
                                 )
                             )
-                            if let kemCiphertext = envelope.kemCiphertext {
-                                let newConversation = try MessageEngine.createInboundSession(
-                                    identity: profile.identity,
-                                    contact: contact,
-                                    kemCiphertext: kemCiphertext,
-                                    agreementKey: inboundContext?.agreementKey
-                                )
-                                var rebuilt = newConversation
-                                rebuilt.messages = conversation.messages
-                                conversation = rebuilt
-                            }
                         }
                     case .identityReset(let reset):
                         let previousFingerprint = contact.fingerprint
@@ -1080,7 +1408,6 @@ final class ClientViewModel: ObservableObject {
                             conversation = rebuilt
                         }
                     case .resendRequest(let request):
-                        markRecentSentMessagesAsMismatch(conversation: &conversation, count: request.count)
                         let current = pendingResends[contact.id] ?? 0
                         pendingResends[contact.id] = max(current, request.count)
                     default:
@@ -1105,10 +1432,11 @@ final class ClientViewModel: ObservableObject {
                             lastError = "Failed to apply root ratchet: \(error.localizedDescription)"
                         }
                     }
+                    contact = normalizedContact(contact, preferredRelay: profile.relay)
                     upsertConversation(conversation, in: &profile)
                     updateContact(contact, in: &profile)
                 } catch {
-                    if signatureValid, let ratchet = envelope.rootRatchet, var conversation = fallbackConversation {
+                    if signatureValid, let ratchet = envelope.rootRatchet, var conversation = recoveryConversation {
                         do {
                             let sharedSecret = try profile.identity.agreementKey.decapsulate(ciphertext: ratchet.kemCiphertext)
                             MessageEngine.applyRootRatchet(
@@ -1118,15 +1446,6 @@ final class ClientViewModel: ObservableObject {
                                 contact: profile.contacts[contactIndex],
                                 conversation: &conversation
                             )
-                            let notice = Message(
-                                direction: .received,
-                                body: "Message could not be decrypted (ratchet applied).",
-                                timestamp: envelope.sentAt,
-                                counter: envelope.messageCounter,
-                                isMismatch: true
-                            )
-                            conversation.messages.append(notice)
-                            conversation.unreadCount += 1
                             upsertConversation(conversation, in: &profile)
                             updateContact(profile.contacts[contactIndex], in: &profile)
                             continue
@@ -1135,6 +1454,15 @@ final class ClientViewModel: ObservableObject {
                         }
                     }
                     if shouldSkipEnvelope(error) {
+                        if shouldAttemptSilentReset(for: error),
+                           let recovery = recoveryConversation {
+                            _ = await attemptSilentSessionReset(
+                                contact: profile.contacts[contactIndex],
+                                existingConversation: recovery,
+                                identity: profile.identity,
+                                preferredRelay: profile.relay
+                            )
+                        }
                         continue
                     }
                     lastError = "Failed to process envelope: \(error.localizedDescription)"
@@ -1144,7 +1472,34 @@ final class ClientViewModel: ObservableObject {
                 await resendRecentMessages(contactId: contactId, count: count, profile: &profile)
             }
             state.updateIdentityProfile(profile)
-            try await store.save(state)
+            try await persistState()
+            if !envelopes.isEmpty {
+                var acknowledgement = AcknowledgeMessagesRequest(
+                    inboxId: profile.inboxId,
+                    messageIds: envelopes.map(\.id)
+                )
+                let acknowledgementProof = try makeActorProof(
+                    fingerprint: CryptoBox.fingerprint(for: inboxAccessKey.publicKeyData),
+                    signingKey: inboxAccessKey,
+                    publicSigningKey: inboxAccessKey.publicKeyData,
+                    signableDataBuilder: { proof in
+                        try acknowledgement.signableData(for: proof)
+                    }
+                )
+                acknowledgement = AcknowledgeMessagesRequest(
+                    inboxId: profile.inboxId,
+                    messageIds: envelopes.map(\.id),
+                    accessProof: acknowledgementProof
+                )
+                let acknowledgementResponse = try await client.send(
+                    .acknowledgeMessages(acknowledgement)
+                )
+                guard acknowledgementResponse.type == .ok else {
+                    throw RelayMailboxError.rejected(
+                        acknowledgementResponse.error ?? "Message acknowledgement failed."
+                    )
+                }
+            }
             if profile.prekeys.oneTimePrekeys.count < prekeyMinimumCount {
                 await ensurePrekeys(for: profileId)
             }
@@ -1157,8 +1512,11 @@ final class ClientViewModel: ObservableObject {
 
     func rotateIdentity() async {
         do {
+            var previousIdentity = state.identity
             let rotationContext = try state.identity.rotateKeys()
             let oldSigningKey = rotationContext.oldSigningKey
+            previousIdentity.signingKey = oldSigningKey
+            previousIdentity.agreementKey = rotationContext.oldAgreementKey
             let oldFingerprint = rotationContext.oldFingerprint
             recordContinuityEvent(
                 kind: .identityRotated,
@@ -1170,42 +1528,116 @@ final class ClientViewModel: ObservableObject {
                 await publishPrekeys(regenerated, identity: state.identity, relay: state.relay)
             }
 
-            var rebuiltConversations: [Conversation] = []
-            for contact in state.contacts {
-                guard var conversation = state.conversation(for: contact.id) else {
-                    continue
-                }
-                let session = try await prepareOutboundSession(for: contact, forceNew: true)
-                let envelope = try MessageEngine.encrypt(
-                    body: .identityRotation(rotationContext.rotation),
-                    senderSigningKey: oldSigningKey,
-                    senderFingerprint: oldFingerprint,
-                    conversation: &conversation,
-                    kemCiphertext: session.kemCiphertext,
-                    prekey: session.prekey
-                )
-                conversation.markMessageProcessed()
-                try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
+            var rebuiltByContact: [UUID: Conversation] = [:]
+            var failedContacts: [String] = []
+            for rawContact in state.contacts {
+                let contact = normalizedContact(rawContact, preferredRelay: state.relay)
+                loadConversationMessagesIntoRAM(contactId: contact.id)
+                let existingConversation = state.conversation(for: contact.id)
+                do {
+                    let bootstrapSession = try MessageEngine.createOutboundSession(identity: previousIdentity, contact: contact)
+                    var bootstrapConversation = bootstrapSession.conversation
+                    let envelope = try MessageEngine.encrypt(
+                        body: .identityRotation(rotationContext.rotation),
+                        senderSigningKey: oldSigningKey,
+                        senderFingerprint: oldFingerprint,
+                        conversation: &bootstrapConversation,
+                        kemCiphertext: bootstrapSession.kemCiphertext,
+                        prekey: nil
+                    )
+                    bootstrapConversation.markMessageProcessed()
+                    try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
 
-                var merged = session.conversation
-                merged.messages = conversation.messages
-                rebuiltConversations.append(merged)
+                    if let existingConversation {
+                        var migrated = bootstrapConversation
+                        migrated.messages = existingConversation.messages
+                        migrated.unreadCount = existingConversation.unreadCount
+                        rebuiltByContact[contact.id] = migrated
+                    } else {
+                        rebuiltByContact[contact.id] = bootstrapConversation
+                    }
+                } catch {
+                    if let existingConversation {
+                        rebuiltByContact[contact.id] = existingConversation
+                    }
+                    failedContacts.append(contact.displayName)
+                }
             }
-            state.conversations = rebuiltConversations
-            try await store.save(state)
-            lastInfo = "Rotated keys and notified contacts."
+            state.conversations = state.contacts.compactMap { rebuiltByContact[$0.id] }
+            await migrateRelayBackedGroupsAfterRotation(
+                oldFingerprint: oldFingerprint,
+                oldSigningKey: oldSigningKey
+            )
+            try await persistState()
+            if failedContacts.isEmpty {
+                lastInfo = "Rotated keys and notified contacts."
+            } else {
+                lastError = "Rotated keys, but delivery failed for: \(failedContacts.joined(separator: ", "))."
+            }
         } catch {
             lastError = "Failed to rotate keys: \(error.localizedDescription)"
         }
     }
 
+    private func migrateRelayBackedGroupsAfterRotation(
+        oldFingerprint: String,
+        oldSigningKey: SigningKeyPair
+    ) async {
+        let relayBackedGroups = state.groups.filter { $0.relayInboxId != nil }
+        guard !relayBackedGroups.isEmpty else {
+            return
+        }
+        let updatedProfile = relayGroupMemberProfileForActiveIdentity()
+
+        for group in relayBackedGroups {
+            do {
+                if group.createdByFingerprint == oldFingerprint {
+                    let descriptor = try await updateRelayGroupRegistry(
+                        groupId: group.id,
+                        actorFingerprint: oldFingerprint,
+                        actorSigningKey: oldSigningKey,
+                        title: nil,
+                        addMemberFingerprints: [state.identity.fingerprint],
+                        addMemberProfiles: [updatedProfile],
+                        removeMemberFingerprints: [oldFingerprint],
+                        relay: state.relay
+                    )
+                    var merged = group
+                    merged.title = descriptor.title
+                    merged.memberContactIds = contactIds(for: descriptor.members.map { $0.fingerprint })
+                    merged.relayInboxId = descriptor.inboxId
+                    merged.relayEpoch = descriptor.epoch
+                    merged.createdByFingerprint = descriptor.createdByFingerprint
+                    state.upsert(group: merged)
+                } else {
+                    _ = try await requestRelayGroupJoin(
+                        groupId: group.id,
+                        requesterProfile: updatedProfile,
+                        relay: state.relay
+                    )
+                }
+            } catch {
+                continue
+            }
+        }
+        await syncRelayGroups(for: state.activeIdentityId)
+    }
+
     func burnIdentity() async {
+        guard !isBurningIdentity else {
+            return
+        }
+        isBurningIdentity = true
+        defer { isBurningIdentity = false }
+
         let oldIdentity = state.identity
         let oldSigningKey = oldIdentity.signingKey
         let oldFingerprint = oldIdentity.fingerprint
 
         state.identity = Identity(displayName: oldIdentity.displayName)
-        state.inboxId = InboxAddress.generate()
+        let newInboxAccessKey = SigningKeyPair()
+        state.inboxAccessKey = newInboxAccessKey
+        state.inboxId = InboxAddress.derived(from: newInboxAccessKey.publicKeyData)
         recordContinuityEvent(
             kind: .identityBurned,
             oldFingerprint: oldFingerprint,
@@ -1224,13 +1656,15 @@ final class ClientViewModel: ObservableObject {
                 continue
             }
             do {
+                loadConversationMessagesIntoRAM(contactId: contact.id)
                 guard var conversation = state.conversation(for: contact.id) else {
                     continue
                 }
-                let newOffer = MessageEngine.makeContactOffer(
+                let newOffer = try MessageEngine.makeContactOffer(
                     identity: state.identity,
                     inboxId: state.inboxId,
-                    relay: state.relay
+                    relay: state.relay,
+                    inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
                 )
                 let reset = try IdentityReset.create(newOffer: newOffer, signingKey: oldSigningKey)
                 let session = try await prepareOutboundSession(for: contact, forceNew: true)
@@ -1275,7 +1709,8 @@ final class ClientViewModel: ObservableObject {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedName = trimmed.isEmpty ? "New Identity" : trimmed
         let identity = Identity(displayName: resolvedName)
-        let inboxId = InboxAddress.generate()
+        let inboxAccessKey = SigningKeyPair()
+        let inboxId = InboxAddress.derived(from: inboxAccessKey.publicKeyData)
         let relaySelection = relayId.flatMap { id in
             state.relayServers.first(where: { $0.id == id })
         } ?? state.relayServers.first
@@ -1292,6 +1727,7 @@ final class ClientViewModel: ObservableObject {
         let profile = IdentityProfile(
             identity: identity,
             inboxId: inboxId,
+            inboxAccessKey: inboxAccessKey,
             relay: relay,
             selectedRelayId: selectedRelayId,
             prekeys: prekeys
@@ -1314,6 +1750,8 @@ final class ClientViewModel: ObservableObject {
             lastError = "Restore the identity before activating it."
             return
         }
+        try? persistAllThreadMessagesFromState(state)
+        evictAllThreadMessagesFromRAM()
         state.activeIdentityId = profileId
         await ensureRelaySelection()
         await ensurePrekeys()
@@ -1385,12 +1823,18 @@ final class ClientViewModel: ObservableObject {
             return
         }
         for conversation in profile.conversations {
-            for message in conversation.messages {
-                if let fileName = message.attachment?.localFileName {
-                    try? attachmentStore.deleteAttachment(fileName: fileName)
-                }
-            }
+            let messages = conversation.messages.isEmpty
+                ? storedDirectMessages(profileId: profile.id, contactId: conversation.contactId)
+                : conversation.messages
+            removeAttachmentFiles(from: messages)
         }
+        for group in profile.groups {
+            let messages = group.messages.isEmpty
+                ? storedGroupMessages(profileId: profile.id, groupId: group.id)
+                : group.messages
+            removeAttachmentFiles(from: messages)
+        }
+        try? threadMessageStore.deleteAllMessages(profileId: profile.id)
         state.identityProfiles.removeAll { $0.id == profileId }
         if profileId == state.activeIdentityId {
             await switchToNextActiveIdentity(excluding: profileId)
@@ -1399,11 +1843,14 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func switchToNextActiveIdentity(excluding profileId: UUID) async {
+        try? persistAllThreadMessagesFromState(state)
+        evictAllThreadMessagesFromRAM()
         if let next = state.identityProfiles.first(where: { !$0.isArchived && $0.id != profileId }) {
             state.activeIdentityId = next.id
         } else {
             let identity = Identity(displayName: "New Identity")
-            let inboxId = InboxAddress.generate()
+            let inboxAccessKey = SigningKeyPair()
+            let inboxId = InboxAddress.derived(from: inboxAccessKey.publicKeyData)
             let relaySelection = state.relayServers.first
             let relay = relaySelection?.endpoint ?? state.relay
             let selectedRelayId = relaySelection?.id
@@ -1418,6 +1865,7 @@ final class ClientViewModel: ObservableObject {
             let profile = IdentityProfile(
                 identity: identity,
                 inboxId: inboxId,
+                inboxAccessKey: inboxAccessKey,
                 relay: relay,
                 selectedRelayId: selectedRelayId,
                 prekeys: prekeys
@@ -1491,16 +1939,18 @@ final class ClientViewModel: ObservableObject {
         lastInfo = "Revoked trust for \(contact.displayName)."
     }
 
-    func updateAppLock(_ settings: AppLockSettings) async {
-        var updated = settings
+    func updateAppLock(_ settings: AppLockSettings, lockAfterUpdate: Bool = true) async {
+        refreshBiometricAvailability()
+        var updated = sanitizeAppLock(settings)
         if updated.mode == .off {
             updated.pinHash = nil
             updated.pinSalt = nil
             isLocked = false
+            clearPinAttemptState()
         }
         state.appLock = updated
         await save()
-        if shouldLockImmediately(settings: updated) {
+        if lockAfterUpdate && shouldLockImmediately(settings: updated) {
             isLocked = true
         }
     }
@@ -1524,77 +1974,143 @@ final class ClientViewModel: ObservableObject {
     }
 
     func verifyAppLockPin(_ pin: String) -> Bool {
+        let normalized = normalizedPin(pin)
+        guard normalized.count == 6 else {
+            return false
+        }
+        if appLockPinLockoutRemainingSeconds() > 0 {
+            return false
+        }
         guard let salt = state.appLock.pinSalt, let hash = state.appLock.pinHash else {
             return false
         }
-        return pinHash(pin: normalizedPin(pin), salt: salt) == hash
+        guard pinMatches(normalized, salt: salt, hash: hash) else {
+            recordFailedPinAttempt()
+            return false
+        }
+        clearPinAttemptState()
+        return true
     }
 
-    func setActionPin(_ pin: String, action: AppLockPinAction) async -> Bool {
+    func appLockPinLockoutRemainingSeconds() -> Int {
+        guard let pinLockedUntil else {
+            return 0
+        }
+        let remaining = Int(ceil(pinLockedUntil.timeIntervalSinceNow))
+        if remaining <= 0 {
+            self.pinLockedUntil = nil
+            return 0
+        }
+        return remaining
+    }
+
+    func setActionPlanPin(
+        pin: String,
+        planId: UUID?,
+        label: String,
+        operations: [AppLockActionOperation]
+    ) async -> Bool {
         let normalized = normalizedPin(pin)
+        let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
         guard normalized.count == 6 else {
             lastError = "PIN must be 6 digits."
             return false
         }
-        if verifyAppLockPin(normalized) {
+        guard !trimmedLabel.isEmpty else {
+            lastError = "Choose a label for this action pin."
+            return false
+        }
+        guard !operations.isEmpty else {
+            lastError = "Choose at least one action."
+            return false
+        }
+        if unlockPinMatches(normalized) {
             lastError = "Action PIN cannot match the unlock PIN."
             return false
         }
-        if pinMatchesOtherActionPin(normalized, action: action) {
+        if pinMatchesAnyActionPlan(normalized, excluding: planId) {
             lastError = "Action PIN must be unique."
             return false
         }
         let salt = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
         let hash = pinHash(pin: normalized, salt: salt)
-        switch action {
-        case .burnIdentity:
-            state.appLock.burnPinSalt = salt
-            state.appLock.burnPinHash = hash
-        case .clearChats:
-            state.appLock.clearChatsPinSalt = salt
-            state.appLock.clearChatsPinHash = hash
+        let normalizedOperations = normalizeActionOperations(operations)
+        guard !normalizedOperations.isEmpty else {
+            lastError = "Selected actions are no longer supported."
+            return false
+        }
+        if let planId, let index = state.appLock.actionPlans.firstIndex(where: { $0.id == planId }) {
+            state.appLock.actionPlans[index].label = trimmedLabel
+            state.appLock.actionPlans[index].pinSalt = salt
+            state.appLock.actionPlans[index].pinHash = hash
+            state.appLock.actionPlans[index].operations = normalizedOperations
+        } else {
+            state.appLock.actionPlans.append(
+                AppLockActionPlan(
+                    label: trimmedLabel,
+                    pinSalt: salt,
+                    pinHash: hash,
+                    operations: normalizedOperations
+                )
+            )
         }
         await save()
         return true
     }
 
-    func clearActionPin(_ action: AppLockPinAction) async {
+    func removeActionPlan(planId: UUID) async {
+        state.appLock.actionPlans.removeAll { $0.id == planId }
+        await save()
+    }
+
+    func setActionPin(_ pin: String, action: AppLockPinAction) async -> Bool {
+        let operation: AppLockActionOperation
+        let label: String
         switch action {
         case .burnIdentity:
-            state.appLock.burnPinSalt = nil
-            state.appLock.burnPinHash = nil
+            operation = AppLockActionOperation(kind: .burnIdentities, identityIds: [state.activeIdentityId])
+            label = "Burn Identity"
         case .clearChats:
-            state.appLock.clearChatsPinSalt = nil
-            state.appLock.clearChatsPinHash = nil
+            operation = AppLockActionOperation(
+                kind: .deleteChats,
+                groupIds: state.groups.map(\.id),
+                chatContactIds: state.conversations.map(\.contactId)
+            )
+            label = "Clear Chats"
+        }
+        return await setActionPlanPin(pin: pin, planId: nil, label: label, operations: [operation])
+    }
+
+    func clearActionPin(_ action: AppLockPinAction) async {
+        let matchingKind: AppLockActionKind = action == .burnIdentity ? .burnIdentities : .deleteChats
+        state.appLock.actionPlans.removeAll { plan in
+            plan.operations.count == 1 && plan.operations[0].kind == matchingKind
         }
         await save()
     }
 
-    func performActionPinIfNeeded(_ pin: String) async -> AppLockPinAction? {
+    func performActionPinIfNeeded(_ pin: String) async -> String? {
         let normalized = normalizedPin(pin)
-        if pinMatches(normalized, salt: state.appLock.burnPinSalt, hash: state.appLock.burnPinHash) {
-            await burnIdentity()
-            await clearActionPin(.burnIdentity)
-            return .burnIdentity
-        }
-        if pinMatches(normalized, salt: state.appLock.clearChatsPinSalt, hash: state.appLock.clearChatsPinHash) {
-            await clearAllChats()
-            await clearActionPin(.clearChats)
-            return .clearChats
+        if let plan = state.appLock.actionPlans.first(where: { pinMatches(normalized, salt: $0.pinSalt, hash: $0.pinHash) }) {
+            await executeActionPlan(plan, pin: normalized)
+            clearPinAttemptState()
+            return plan.label
         }
         return nil
     }
 
-    func performBiometricUnlock() async -> Bool {
+    func performBiometricUnlock(reason: String = "Unlock app") async -> Bool {
         #if canImport(LocalAuthentication)
         let context = LAContext()
         context.localizedFallbackTitle = ""
         var error: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
+            biometricsAvailable = false
             return false
         }
+        biometricsAvailable = true
         return await withCheckedContinuation { continuation in
-            context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: "Unlock app") { success, _ in
+            context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason) { success, _ in
                 continuation.resume(returning: success)
             }
         }
@@ -1606,20 +2122,63 @@ final class ClientViewModel: ObservableObject {
     func completeUnlock() {
         isLocked = false
         lastInactiveAt = nil
+        startAutoFetchIfEligible()
     }
 
     func handleScenePhaseChange(_ phase: ScenePhase) {
-        guard state.appLock.mode != .off else { return }
+        if phase == .active {
+            refreshBiometricAvailability()
+            if sanitizeAppLockForBiometricAvailability() {
+                Task { await save() }
+            }
+        }
+        if phase == .inactive || phase == .background {
+            stopAutoFetch()
+        }
+        if phase == .background {
+            lastInactiveAt = Date()
+            try? persistAllThreadMessagesFromState(state)
+            evictAllThreadMessagesFromRAM()
+            purgeAllAttachmentDecryptionMemory()
+            Task { await save() }
+        }
+        guard state.appLock.mode != .off else {
+            if phase == .active {
+                startAutoFetchIfEligible()
+            }
+            return
+        }
         switch phase {
         case .active:
             if shouldLockForTimeout() {
                 isLocked = true
             }
+            if !isLocked {
+                startAutoFetchIfEligible()
+            }
         case .inactive, .background:
-            lastInactiveAt = Date()
+            break
         @unknown default:
             break
         }
+    }
+
+    func openConversation(contactId: UUID) async {
+        loadConversationMessagesIntoRAM(contactId: contactId)
+    }
+
+    func closeConversation(contactId: UUID) async {
+        persistAndEvictConversationMessages(contactId: contactId)
+        purgeAttachmentDecryptionMemory(contactId: contactId)
+    }
+
+    func openGroupConversation(groupId: UUID) async {
+        loadGroupMessagesIntoRAM(groupId: groupId)
+    }
+
+    func closeGroupConversation(groupId: UUID) async {
+        persistAndEvictGroupMessages(groupId: groupId)
+        purgeAttachmentDecryptionMemory(groupId: groupId)
     }
 
     func markConversationRead(contactId: UUID) async {
@@ -1634,8 +2193,419 @@ final class ClientViewModel: ObservableObject {
         await save()
     }
 
+    func markGroupRead(groupId: UUID) async {
+        guard var group = state.group(for: groupId) else {
+            return
+        }
+        guard group.unreadCount > 0 else {
+            return
+        }
+        group.unreadCount = 0
+        state.upsert(group: group)
+        await save()
+    }
+
+    func createGroup(title: String, memberContactIds: [UUID]) async {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else {
+            lastError = "Choose a group name."
+            return
+        }
+        let members = Array(Set(memberContactIds))
+        guard members.count >= 2 else {
+            lastError = "Select at least 2 contacts."
+            return
+        }
+        let knownContacts = Set(state.contacts.map(\.id))
+        let validMembers = members.filter { knownContacts.contains($0) }
+        guard validMembers.count >= 2 else {
+            lastError = "Selected contacts are no longer available."
+            return
+        }
+        if let selectedRelay = state.relayServers.first(where: { $0.id == state.selectedRelayId }),
+           selectedRelay.advertisedInfo?.groupCreationMode == .disabled {
+            lastError = "Group creation is disabled on the selected relay."
+            return
+        }
+        let memberFingerprints = validMembers.compactMap { memberId in
+            state.contacts.first(where: { $0.id == memberId })?.fingerprint
+        }
+        guard memberFingerprints.count >= 2 else {
+            lastError = "Selected members are missing relay fingerprints."
+            return
+        }
+        let memberProfiles: [RelayGroupMemberProfile] = validMembers.compactMap { memberId -> RelayGroupMemberProfile? in
+            guard let contact = state.contacts.first(where: { $0.id == memberId }) else {
+                return nil
+            }
+            return relayGroupMemberProfile(for: contact)
+        }
+        let relayGroup: RelayGroupDescriptor
+        do {
+            relayGroup = try await createRelayGroupRegistry(
+                title: trimmedTitle,
+                memberFingerprints: memberFingerprints,
+                memberProfiles: memberProfiles
+            )
+        } catch {
+            lastError = "Failed to create relay group: \(error.localizedDescription)"
+            return
+        }
+
+        let group = GroupConversation(
+            id: relayGroup.id,
+            title: relayGroup.title,
+            memberContactIds: validMembers,
+            relayInboxId: relayGroup.inboxId,
+            relayEpoch: relayGroup.epoch,
+            createdByFingerprint: relayGroup.createdByFingerprint
+        )
+        state.upsert(group: group)
+        await save()
+        lastInfo = "Created relay-backed group \(group.title)."
+    }
+
+    func removeGroup(id: UUID) async {
+        guard let group = state.group(for: id) else { return }
+        loadGroupMessagesIntoRAM(groupId: id)
+        let messages = state.group(for: id)?.messages ?? []
+        removeAttachmentFiles(from: messages)
+        try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: id)
+        state.groups.removeAll { $0.id == id }
+        if activeGroupId == id {
+            activeGroupId = nil
+        }
+        await save()
+        lastInfo = "Removed group \(group.title)."
+    }
+
+    func updateGroup(id: UUID, title: String, memberContactIds: [UUID]) async {
+        guard var group = state.group(for: id) else {
+            lastError = "Group not found."
+            return
+        }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else {
+            lastError = "Choose a group name."
+            return
+        }
+        let normalizedMembers = Array(Set(memberContactIds))
+        guard normalizedMembers.count >= 2 else {
+            lastError = "Select at least 2 contacts."
+            return
+        }
+        let knownContacts = Set(state.contacts.map(\.id))
+        let validMembers = normalizedMembers.filter { knownContacts.contains($0) }
+        guard validMembers.count >= 2 else {
+            lastError = "Selected contacts are no longer available."
+            return
+        }
+        let newMemberFingerprints = Set(validMembers.compactMap { memberId in
+            state.contacts.first(where: { $0.id == memberId })?.fingerprint
+        })
+        guard newMemberFingerprints.count >= 2 else {
+            lastError = "Selected members are missing relay fingerprints."
+            return
+        }
+
+        if group.relayInboxId != nil {
+            let currentFingerprints = Set(group.memberContactIds.compactMap { memberId in
+                state.contacts.first(where: { $0.id == memberId })?.fingerprint
+            })
+            let addMembers = Array(newMemberFingerprints.subtracting(currentFingerprints)).sorted()
+            let removeMembers = Array(currentFingerprints.subtracting(newMemberFingerprints)).sorted()
+            let memberProfilesForRelay: [RelayGroupMemberProfile] = validMembers.compactMap { memberId -> RelayGroupMemberProfile? in
+                guard let contact = state.contacts.first(where: { $0.id == memberId }) else {
+                    return nil
+                }
+                return relayGroupMemberProfile(for: contact)
+            }
+            do {
+                let descriptor = try await updateRelayGroupRegistry(
+                    groupId: id,
+                    title: trimmedTitle == group.title ? nil : trimmedTitle,
+                    addMemberFingerprints: addMembers,
+                    addMemberProfiles: memberProfilesForRelay,
+                    removeMemberFingerprints: removeMembers
+                )
+                group.title = descriptor.title
+                group.memberContactIds = contactIds(for: descriptor.members.map(\.fingerprint))
+                group.relayInboxId = descriptor.inboxId
+                group.relayEpoch = descriptor.epoch
+                group.createdByFingerprint = descriptor.createdByFingerprint
+                state.upsert(group: group)
+                await save()
+                lastInfo = "Updated relay-backed group \(group.title)."
+                return
+            } catch {
+                lastError = "Failed to update relay group: \(error.localizedDescription)"
+                return
+            }
+        }
+
+        group.title = trimmedTitle
+        group.memberContactIds = validMembers
+        state.upsert(group: group)
+        await save()
+        lastInfo = "Updated group \(trimmedTitle)."
+    }
+
+    func isRelayGroupCreator(_ group: GroupConversation) -> Bool {
+        guard group.relayInboxId != nil,
+              let creator = group.createdByFingerprint else {
+            return false
+        }
+        return Set(activeIdentityLineageFingerprints()).contains(creator)
+    }
+
+    func canEditRelayGroup(_ group: GroupConversation) -> Bool {
+        group.relayInboxId == nil || isRelayGroupCreator(group)
+    }
+
+    func leaveGroup(id: UUID) async {
+        guard let group = state.group(for: id) else { return }
+        if group.relayInboxId != nil {
+            let relay = state.relay
+            let identityFingerprints = activeIdentityLineageFingerprints()
+            let identitySet = Set(identityFingerprints)
+            let descriptor: RelayGroupDescriptor?
+            do {
+                descriptor = try await fetchRelayGroup(groupId: id, relay: relay)
+            } catch {
+                lastError = "Failed to leave relay-backed group: \(error.localizedDescription)"
+                return
+            }
+
+            if let descriptor, identitySet.contains(descriptor.createdByFingerprint) {
+                let creatorFingerprint = descriptor.createdByFingerprint
+                do {
+                    try await deleteRelayGroupRegistry(
+                        groupId: id,
+                        actorFingerprint: creatorFingerprint,
+                        relay: relay
+                    )
+                } catch {
+                    lastError = "Failed to extinguish relay-backed group: \(error.localizedDescription)"
+                    return
+                }
+            } else if let descriptor {
+                let memberFingerprints = Set(descriptor.members.map(\.fingerprint))
+                let selfMemberships = identityFingerprints.filter { memberFingerprints.contains($0) }
+                if selfMemberships.isEmpty {
+                    loadGroupMessagesIntoRAM(groupId: id)
+                    let messages = state.group(for: id)?.messages ?? []
+                    removeAttachmentFiles(from: messages)
+                    try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: id)
+                    state.groups.removeAll { $0.id == id }
+                    if activeGroupId == id {
+                        activeGroupId = nil
+                    }
+                    await save()
+                    await syncRelayGroups(for: state.activeIdentityId)
+                    lastInfo = "Removed stale group \(group.title)."
+                    return
+                }
+
+                var removedAnyMembership = false
+                var lastMembershipError: String?
+                for membershipFingerprint in selfMemberships {
+                    do {
+                        _ = try await updateRelayGroupRegistry(
+                            groupId: id,
+                            actorFingerprint: membershipFingerprint,
+                            title: nil,
+                            addMemberFingerprints: [],
+                            addMemberProfiles: [],
+                            removeMemberFingerprints: [membershipFingerprint],
+                            relay: relay
+                        )
+                        removedAnyMembership = true
+                    } catch {
+                        lastMembershipError = error.localizedDescription
+                    }
+                }
+
+                guard removedAnyMembership else {
+                    lastError = "Failed to leave relay-backed group: \(lastMembershipError ?? "Unknown relay error.")"
+                    return
+                }
+            }
+        }
+        loadGroupMessagesIntoRAM(groupId: id)
+        let messages = state.group(for: id)?.messages ?? []
+        removeAttachmentFiles(from: messages)
+        try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: id)
+        state.groups.removeAll { $0.id == id }
+        if activeGroupId == id {
+            activeGroupId = nil
+        }
+        await save()
+        if group.relayInboxId != nil {
+            await syncRelayGroups(for: state.activeIdentityId)
+        }
+        if isRelayGroupCreator(group) {
+            lastInfo = "Extinguished group \(group.title)."
+        } else {
+            lastInfo = "Left group \(group.title)."
+        }
+    }
+
+    func requestJoin(groupId: UUID) async {
+        do {
+            _ = try await requestRelayGroupJoin(groupId: groupId)
+            lastInfo = "Join request sent."
+        } catch {
+            lastError = "Failed to request join: \(error.localizedDescription)"
+        }
+    }
+
+    func refreshPendingJoinRequests(groupId: UUID) async {
+        do {
+            let requests = try await listRelayGroupJoinRequests(groupId: groupId)
+            pendingGroupJoinRequests[groupId] = requests
+        } catch {
+            lastError = "Failed to fetch join requests: \(error.localizedDescription)"
+        }
+    }
+
+    func approvePendingJoinRequest(groupId: UUID, joinRequestId: UUID) async {
+        do {
+            _ = try await approveRelayGroupJoin(groupId: groupId, joinRequestId: joinRequestId)
+            await syncRelayGroups(for: state.activeIdentityId)
+            let requests = try await listRelayGroupJoinRequests(groupId: groupId)
+            pendingGroupJoinRequests[groupId] = requests
+            lastInfo = "Join request approved."
+        } catch {
+            lastError = "Failed to approve join request: \(error.localizedDescription)"
+        }
+    }
+
+    func rejectPendingJoinRequest(groupId: UUID, joinRequestId: UUID) async {
+        do {
+            try await rejectRelayGroupJoin(groupId: groupId, joinRequestId: joinRequestId)
+            let requests = try await listRelayGroupJoinRequests(groupId: groupId)
+            pendingGroupJoinRequests[groupId] = requests
+            lastInfo = "Join request rejected."
+        } catch {
+            lastError = "Failed to reject join request: \(error.localizedDescription)"
+        }
+    }
+
+    func refreshRelayGroups() async {
+        await syncRelayGroupsForActiveProfiles()
+    }
+
+    func sendGroupMessage(text: String, to groupId: UUID) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        loadGroupMessagesIntoRAM(groupId: groupId)
+        guard var group = state.group(for: groupId) else {
+            lastError = "Group not found."
+            return
+        }
+        let members = group.memberContactIds.compactMap { id in
+            state.contacts.first(where: { $0.id == id })
+        }
+        guard !members.isEmpty else {
+            lastError = "This group has no valid members."
+            return
+        }
+        let encodedBody: String
+        do {
+            let memberFingerprints = members.map(\.fingerprint)
+            encodedBody = try encodeGroupPayload(
+                groupId: group.id,
+                groupTitle: group.title,
+                memberFingerprints: memberFingerprints,
+                body: trimmed
+            )
+        } catch {
+            lastError = "Failed to prepare group message: \(error.localizedDescription)"
+            return
+        }
+
+        var deliveredCount = 0
+        var firstError: String?
+        for contact in members {
+            do {
+                let prepared = try await prepareGroupPayloadEnvelope(encodedBody, to: contact, forceNewSession: false)
+                state.upsert(conversation: prepared.conversation)
+                try await persistState()
+                try await deliverEnvelope(prepared.envelope, to: contact, preferredRelay: state.relay)
+                deliveredCount += 1
+            } catch {
+                loadConversationMessagesIntoRAM(contactId: contact.id)
+                if let existingConversation = state.conversation(for: contact.id) {
+                    _ = await attemptSilentSessionReset(
+                        contact: contact,
+                        existingConversation: existingConversation,
+                        identity: state.identity,
+                        preferredRelay: state.relay
+                    )
+                }
+                do {
+                    let prepared = try await prepareGroupPayloadEnvelope(encodedBody, to: contact, forceNewSession: true)
+                    state.upsert(conversation: prepared.conversation)
+                    try await persistState()
+                    try await deliverEnvelope(prepared.envelope, to: contact, preferredRelay: state.relay)
+                    deliveredCount += 1
+                } catch {
+                    if firstError == nil {
+                        firstError = error.localizedDescription
+                    }
+                }
+            }
+        }
+
+        guard deliveredCount > 0 else {
+            lastError = firstError ?? "Unable to send group message right now."
+            return
+        }
+
+        let nextCounter = (group.messages.last?.counter ?? 0) + 1
+        group.messages.append(
+            Message(
+                direction: .sent,
+                senderDisplayName: state.identity.displayName,
+                body: trimmed,
+                timestamp: Date(),
+                counter: nextCounter
+            )
+        )
+        state.upsert(group: group)
+        await save()
+
+        lastInfo = "Sent group message."
+    }
+
+    private func prepareGroupPayloadEnvelope(
+        _ payload: String,
+        to contact: Contact,
+        forceNewSession: Bool
+    ) async throws -> (conversation: Conversation, envelope: Envelope) {
+        let session = try await prepareOutboundSession(for: contact, forceNew: forceNewSession)
+        var conversation = session.conversation
+        let rootRatchet = prepareRootRatchetIfNeeded(conversation: conversation, contact: contact)
+        let envelope = try MessageEngine.encrypt(
+            body: .text(payload),
+            senderSigningKey: state.identity.signingKey,
+            senderFingerprint: state.identity.fingerprint,
+            conversation: &conversation,
+            kemCiphertext: session.kemCiphertext,
+            prekey: session.prekey,
+            rootRatchet: rootRatchet?.ratchet
+        )
+        conversation.markMessageProcessed()
+        applyRootRatchetIfNeeded(rootRatchet, contact: contact, conversation: &conversation)
+        return (conversation, envelope)
+    }
+
     func removeContact(id: UUID) async {
         if let contact = state.contacts.first(where: { $0.id == id }) {
+            purgeAttachmentDecryptionMemory(contactId: id)
+            try? threadMessageStore.deleteDirectMessages(profileId: state.activeIdentityId, contactId: id)
             recordContinuityEvent(
                 kind: .contactRemoved,
                 contact: contact,
@@ -1643,17 +2613,25 @@ final class ClientViewModel: ObservableObject {
             )
             state.contacts.removeAll { $0.id == id }
             state.conversations.removeAll { $0.contactId == id }
+            for index in state.groups.indices {
+                state.groups[index].memberContactIds.removeAll { $0 == id }
+            }
+            state.groups.removeAll { $0.memberContactIds.count < 2 }
             await save()
             lastInfo = "Removed \(contact.displayName)."
         }
     }
 
     func deleteMessage(contactId: UUID, messageId: UUID) async {
+        loadConversationMessagesIntoRAM(contactId: contactId)
         guard var conversation = state.conversation(for: contactId) else {
             return
         }
         if let message = conversation.messages.first(where: { $0.id == messageId }),
            let fileName = message.attachment?.localFileName {
+            decryptedAttachmentCache[fileName]?.wipe()
+            decryptedAttachmentCache.removeValue(forKey: fileName)
+            decryptedAttachmentScopes.removeValue(forKey: fileName)
             try? attachmentStore.deleteAttachment(fileName: fileName)
         }
         conversation.messages.removeAll { $0.id == messageId }
@@ -1662,9 +2640,11 @@ final class ClientViewModel: ObservableObject {
     }
 
     func clearConversation(contactId: UUID) async {
+        loadConversationMessagesIntoRAM(contactId: contactId)
         guard var conversation = state.conversation(for: contactId) else {
             return
         }
+        purgeAttachmentDecryptionMemory(contactId: contactId)
         for message in conversation.messages {
             if let fileName = message.attachment?.localFileName {
                 try? attachmentStore.deleteAttachment(fileName: fileName)
@@ -1672,33 +2652,88 @@ final class ClientViewModel: ObservableObject {
         }
         conversation.messages.removeAll()
         conversation.unreadCount = 0
+        try? threadMessageStore.deleteDirectMessages(profileId: state.activeIdentityId, contactId: contactId)
         state.upsert(conversation: conversation)
         await save()
     }
 
+    func deleteGroupMessage(groupId: UUID, messageId: UUID) async {
+        loadGroupMessagesIntoRAM(groupId: groupId)
+        guard var group = state.group(for: groupId) else {
+            return
+        }
+        if let message = group.messages.first(where: { $0.id == messageId }),
+           let fileName = message.attachment?.localFileName {
+            decryptedAttachmentCache[fileName]?.wipe()
+            decryptedAttachmentCache.removeValue(forKey: fileName)
+            decryptedAttachmentScopes.removeValue(forKey: fileName)
+            try? attachmentStore.deleteAttachment(fileName: fileName)
+        }
+        group.messages.removeAll { $0.id == messageId }
+        state.upsert(group: group)
+        await save()
+    }
+
+    func clearGroupConversation(groupId: UUID) async {
+        loadGroupMessagesIntoRAM(groupId: groupId)
+        guard var group = state.group(for: groupId) else {
+            return
+        }
+        purgeAttachmentDecryptionMemory(groupId: groupId)
+        group.messages.removeAll()
+        group.unreadCount = 0
+        try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: groupId)
+        state.upsert(group: group)
+        await save()
+    }
+
     func clearAllChats() async {
-        guard !state.conversations.isEmpty else { return }
+        guard !state.conversations.isEmpty || !state.groups.isEmpty else { return }
+        purgeAllAttachmentDecryptionMemory()
         var updated: [Conversation] = []
         updated.reserveCapacity(state.conversations.count)
         for conversation in state.conversations {
             var cleared = conversation
-            for message in cleared.messages {
+            let messagesToDelete = cleared.messages.isEmpty
+                ? storedDirectMessages(profileId: state.activeIdentityId, contactId: cleared.contactId)
+                : cleared.messages
+            for message in messagesToDelete {
                 if let fileName = message.attachment?.localFileName {
                     try? attachmentStore.deleteAttachment(fileName: fileName)
                 }
             }
             cleared.messages.removeAll()
             cleared.unreadCount = 0
+            try? threadMessageStore.deleteDirectMessages(
+                profileId: state.activeIdentityId,
+                contactId: cleared.contactId
+            )
             updated.append(cleared)
         }
         state.conversations = updated
+        for index in state.groups.indices {
+            let groupId = state.groups[index].id
+            let messagesToDelete = state.groups[index].messages.isEmpty
+                ? storedGroupMessages(profileId: state.activeIdentityId, groupId: groupId)
+                : state.groups[index].messages
+            for message in messagesToDelete {
+                if let fileName = message.attachment?.localFileName {
+                    try? attachmentStore.deleteAttachment(fileName: fileName)
+                }
+            }
+            try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: groupId)
+            state.groups[index].messages.removeAll()
+            state.groups[index].unreadCount = 0
+        }
         await save()
         lastInfo = "Cleared all chats."
     }
 
     func updateInsecurePairing(_ settings: InsecurePairingSettings) async {
         var updated = settings
-        if updated.isEnabled, updated.method == nil {
+        if updated.isEnabled {
+            updated.method = .relay
+        } else if updated.method == nil {
             updated.method = .relay
         }
         state.insecurePairing = updated
@@ -1715,6 +2750,7 @@ final class ClientViewModel: ObservableObject {
             insecureLastRelay = nil
             insecureLastSelfTestAt = nil
             insecureLastSelfTestResult = nil
+            pendingOutboundPairRequestFingerprints.removeAll()
         } else {
             await refreshInsecurePairing()
         }
@@ -1730,10 +2766,15 @@ final class ClientViewModel: ObservableObject {
         do {
             insecureLastRelay = relay
             insecureLastError = nil
-            let offer = MessageEngine.makeContactOffer(identity: state.identity, inboxId: state.inboxId, relay: relay)
+            let offer = try MessageEngine.makeContactOffer(
+                identity: state.identity,
+                inboxId: state.inboxId,
+                relay: relay,
+                inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
+            )
             let announceResponse = try await relayClient(for: relay).send(.announce(AnnounceRequest(offer: offer, ttlSeconds: 120)))
             if announceResponse.type == .error, let error = announceResponse.error {
-                let message = "Insecure pairing announce failed: \(error)"
+                let message = "Relay pairing announce failed: \(error)"
                 lastError = message
                 insecureLastError = message
             } else {
@@ -1742,29 +2783,42 @@ final class ClientViewModel: ObservableObject {
             let announcementsResponse = try await relayClient(for: relay).send(.listAnnouncements(ListAnnouncementsRequest(limit: 50)))
             if announcementsResponse.type == .announcements {
                 insecureAnnouncements = (announcementsResponse.announcements ?? [])
-                    .filter { $0.offer.fingerprint != state.identity.fingerprint }
+                    .filter { announcement in
+                        guard announcement.offer.fingerprint != state.identity.fingerprint else {
+                            return false
+                        }
+                        return (try? announcement.offer.verified()) != nil
+                    }
                 insecureLastPeerCount = insecureAnnouncements.count
                 insecureLastListAt = Date()
             } else if announcementsResponse.type == .error, let error = announcementsResponse.error {
-                let message = "Insecure pairing list failed: \(error)"
+                let message = "Relay pairing list failed: \(error)"
                 lastError = message
                 insecureLastError = message
             }
-            if state.insecurePairing.allowInboundRequests {
-                let fetch = FetchPairRequestsRequest(fingerprint: state.identity.fingerprint, maxCount: 50)
+            if state.insecurePairing.allowInboundRequests || !pendingOutboundPairRequestFingerprints.isEmpty {
+                let fetch = try makeFetchPairRequestsRequest(maxCount: 50)
                 let requestsResponse = try await relayClient(for: relay).send(.fetchPairRequests(fetch))
                 if requestsResponse.type == .pairRequests {
-                    insecureRequests = requestsResponse.pairRequests ?? []
+                    let fetchedRequests = (requestsResponse.pairRequests ?? []).filter { request in
+                        (try? request.from.verified()) != nil
+                    }
+                    let remainingRequests = await autoAcceptMatchingPairRequests(fetchedRequests)
+                    if state.insecurePairing.allowInboundRequests {
+                        insecureRequests = remainingRequests
+                    } else {
+                        insecureRequests = []
+                    }
                     insecureLastRequestCount = insecureRequests.count
                     insecureLastRequestFetchAt = Date()
                 } else if requestsResponse.type == .error, let error = requestsResponse.error {
-                    let message = "Insecure pairing fetch failed: \(error)"
+                    let message = "Relay pairing fetch failed: \(error)"
                     lastError = message
                     insecureLastError = message
                 }
             }
         } catch {
-            let message = "Insecure pairing failed: \(error.localizedDescription)"
+            let message = "Relay pairing failed: \(error.localizedDescription)"
             lastError = message
             insecureLastError = message
         }
@@ -1776,17 +2830,22 @@ final class ClientViewModel: ObservableObject {
         do {
             insecureLastRelay = relay
             insecureLastError = nil
-            let offer = MessageEngine.makeContactOffer(identity: state.identity, inboxId: state.inboxId, relay: relay)
+            let offer = try MessageEngine.makeContactOffer(
+                identity: state.identity,
+                inboxId: state.inboxId,
+                relay: relay,
+                inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
+            )
             let response = try await relayClient(for: relay).send(.announce(AnnounceRequest(offer: offer, ttlSeconds: 120)))
             if response.type == .error, let error = response.error {
-                let message = "Insecure pairing announce failed: \(error)"
+                let message = "Relay pairing announce failed: \(error)"
                 lastError = message
                 insecureLastError = message
             } else {
                 insecureLastAnnounceAt = Date()
             }
         } catch {
-            let message = "Insecure pairing announce failed: \(error.localizedDescription)"
+            let message = "Relay pairing announce failed: \(error.localizedDescription)"
             lastError = message
             insecureLastError = message
         }
@@ -1803,7 +2862,7 @@ final class ClientViewModel: ObservableObject {
             await self?.checkSelfTestTimeout(token: token)
         }
         guard state.insecurePairing.isReady else {
-            let message = "Enable insecure pairing first."
+            let message = "Enable pairing via relay first."
             lastError = message
             insecureLastError = message
             insecureLastSelfTestResult = message
@@ -1812,7 +2871,7 @@ final class ClientViewModel: ObservableObject {
             return
         }
         guard let relay = relayForInsecurePairing() else {
-            let message = "Relay unavailable for insecure pairing."
+            let message = "Relay unavailable for pairing via relay."
             lastError = message
             insecureLastError = message
             insecureLastSelfTestResult = message
@@ -1824,7 +2883,12 @@ final class ClientViewModel: ObservableObject {
             insecureLastRelay = relay
             insecureLastError = nil
             insecureSelfTestStep = "Announce"
-            let offer = MessageEngine.makeContactOffer(identity: state.identity, inboxId: state.inboxId, relay: relay)
+            let offer = try MessageEngine.makeContactOffer(
+                identity: state.identity,
+                inboxId: state.inboxId,
+                relay: relay,
+                inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
+            )
             let announceResponse = try await relayClient(for: relay)
                 .send(.announce(AnnounceRequest(offer: offer, ttlSeconds: 120)))
             if announceResponse.type == .error, let error = announceResponse.error {
@@ -1846,7 +2910,7 @@ final class ClientViewModel: ObservableObject {
             guard listResponse.type == .announcements else {
                 throw InsecureSelfTestFailure(message: "List failed with \(listResponse.type).")
             }
-            let listed = listResponse.announcements ?? []
+            let listed = (listResponse.announcements ?? []).filter { (try? $0.offer.verified()) != nil }
             let hasSelf = listed.contains(where: { $0.offer.fingerprint == state.identity.fingerprint })
             guard hasSelf else {
                 throw InsecureSelfTestFailure(message: "List did not include this device.")
@@ -1856,7 +2920,10 @@ final class ClientViewModel: ObservableObject {
 
             insecureSelfTestStep = "Pair request"
             let pairResponse = try await relayClient(for: relay)
-                .send(.sendPairRequest(SendPairRequest(targetFingerprint: state.identity.fingerprint, offer: offer)))
+                .send(.sendPairRequest(try makeSendPairRequest(
+                    targetFingerprint: state.identity.fingerprint,
+                    offer: offer
+                )))
             if pairResponse.type == .error, let error = pairResponse.error {
                 throw InsecureSelfTestFailure(message: "Pair request error: \(error)")
             }
@@ -1865,15 +2932,16 @@ final class ClientViewModel: ObservableObject {
             }
 
             insecureSelfTestStep = "Fetch requests"
+            let fetchRequest = try makeFetchPairRequestsRequest(maxCount: 5)
             let fetchResponse = try await relayClient(for: relay)
-                .send(.fetchPairRequests(FetchPairRequestsRequest(fingerprint: state.identity.fingerprint, maxCount: 5)))
+                .send(.fetchPairRequests(fetchRequest))
             if fetchResponse.type == .error, let error = fetchResponse.error {
                 throw InsecureSelfTestFailure(message: "Fetch error: \(error)")
             }
             guard fetchResponse.type == .pairRequests else {
                 throw InsecureSelfTestFailure(message: "Fetch failed with \(fetchResponse.type).")
             }
-            let requests = fetchResponse.pairRequests ?? []
+            let requests = (fetchResponse.pairRequests ?? []).filter { (try? $0.from.verified()) != nil }
             guard requests.contains(where: { $0.from.fingerprint == state.identity.fingerprint }) else {
                 throw InsecureSelfTestFailure(message: "Fetch did not return the test request.")
             }
@@ -1882,7 +2950,7 @@ final class ClientViewModel: ObservableObject {
 
             insecureLastSelfTestAt = Date()
             insecureLastSelfTestResult = "OK"
-            lastInfo = "Insecure pairing self-test passed."
+            lastInfo = "Relay pairing self-test passed."
             insecureSelfTestStep = nil
             insecureSelfTestToken = nil
         } catch {
@@ -1910,13 +2978,33 @@ final class ClientViewModel: ObservableObject {
 
     func sendPairRequest(to announcement: PairingAnnouncement) async {
         guard let relay = relayForInsecurePairing() else {
-            lastError = "Relay unavailable for insecure pairing."
+            lastError = "Relay unavailable for pairing via relay."
             return
         }
         do {
-            let offer = MessageEngine.makeContactOffer(identity: state.identity, inboxId: state.inboxId, relay: relay)
-            let request = SendPairRequest(targetFingerprint: announcement.offer.fingerprint, offer: offer)
-            _ = try await relayClient(for: relay).send(.sendPairRequest(request))
+            _ = try announcement.offer.verified()
+            let offer = try MessageEngine.makeContactOffer(
+                identity: state.identity,
+                inboxId: state.inboxId,
+                relay: relay,
+                inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
+            )
+            let request = try makeSendPairRequest(
+                targetFingerprint: announcement.offer.fingerprint,
+                offer: offer
+            )
+            let response = try await relayClient(for: relay).send(.sendPairRequest(request))
+            if response.type == .error, let error = response.error {
+                throw NSError(domain: "Noctyra.InsecurePairing", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
+            }
+            guard response.type == .ok else {
+                throw NSError(
+                    domain: "Noctyra.InsecurePairing",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Relay rejected pair request (\(response.type))."]
+                )
+            }
+            pendingOutboundPairRequestFingerprints.insert(announcement.offer.fingerprint)
             lastInfo = "Pairing request sent to \(announcement.offer.displayName)."
         } catch {
             lastError = "Failed to send pairing request: \(error.localizedDescription)"
@@ -1924,26 +3012,99 @@ final class ClientViewModel: ObservableObject {
     }
 
     func acceptPairRequest(_ request: PairingRequest) async {
-        let contact = MessageEngine.contact(from: request.from)
-        state.upsert(contact: contact)
-        recordContinuityEvent(
-            kind: .contactAdded,
-            contact: contact,
-            newFingerprint: contact.fingerprint
-        )
-        insecureRequests.removeAll { $0.id == request.id }
-        await save()
-        lastInfo = "Added \(contact.displayName)."
+        await acceptPairRequest(request, sendReciprocalRequest: true, automatic: false)
     }
 
     func dismissPairRequest(_ request: PairingRequest) {
         insecureRequests.removeAll { $0.id == request.id }
     }
 
+    private func autoAcceptMatchingPairRequests(_ requests: [PairingRequest]) async -> [PairingRequest] {
+        var remaining: [PairingRequest] = []
+        var autoAcceptedNames: [String] = []
+        for request in requests {
+            if pendingOutboundPairRequestFingerprints.contains(request.from.fingerprint) {
+                await acceptPairRequest(request, sendReciprocalRequest: false, automatic: true)
+                autoAcceptedNames.append(request.from.displayName)
+            } else {
+                remaining.append(request)
+            }
+        }
+        if !autoAcceptedNames.isEmpty {
+            lastInfo = "Pairing completed with \(autoAcceptedNames.joined(separator: ", "))."
+        }
+        return remaining
+    }
+
+    private func acceptPairRequest(
+        _ request: PairingRequest,
+        sendReciprocalRequest: Bool,
+        automatic: Bool
+    ) async {
+        let contact: Contact
+        do {
+            contact = try validatedContact(from: request.from)
+        } catch {
+            insecureRequests.removeAll { $0.id == request.id }
+            lastError = "Rejected pairing request: \(error.localizedDescription)"
+            insecureLastError = lastError
+            return
+        }
+        let wasKnown = state.contacts.contains { existing in
+            existing.fingerprint == contact.fingerprint || contactAddressKey(for: existing) == contactAddressKey(for: contact)
+        }
+        state.upsert(contact: contact)
+        if !wasKnown {
+            recordContinuityEvent(
+                kind: .contactAdded,
+                contact: contact,
+                newFingerprint: contact.fingerprint
+            )
+        }
+        insecureRequests.removeAll { $0.id == request.id }
+        pendingOutboundPairRequestFingerprints.remove(request.from.fingerprint)
+
+        var reciprocalError: String?
+        if sendReciprocalRequest {
+            if let relay = relayForInsecurePairing() {
+                do {
+                    let offer = try MessageEngine.makeContactOffer(
+                        identity: state.identity,
+                        inboxId: state.inboxId,
+                        relay: relay,
+                        inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
+                    )
+                    let requestPayload = try makeSendPairRequest(
+                        targetFingerprint: request.from.fingerprint,
+                        offer: offer
+                    )
+                    let response = try await relayClient(for: relay).send(.sendPairRequest(requestPayload))
+                    if response.type == .error {
+                        reciprocalError = response.error ?? "Relay rejected reciprocal pairing request."
+                    } else if response.type != .ok {
+                        reciprocalError = "Relay rejected reciprocal pairing request (\(response.type))."
+                    }
+                } catch {
+                    reciprocalError = error.localizedDescription
+                }
+            } else {
+                reciprocalError = "Relay unavailable to send pairing acceptance."
+            }
+        }
+
+        await save()
+        if let reciprocalError {
+            lastError = "Accepted \(contact.displayName), but failed to notify requester: \(reciprocalError)"
+        } else if !automatic {
+            lastInfo = "Added \(contact.displayName). Pairing completed."
+        }
+    }
+
     func retryMismatch(contactId: UUID) async {
         guard let contact = state.contacts.first(where: { $0.id == contactId }) else {
             return
         }
+        loadConversationMessagesIntoRAM(contactId: contactId)
         guard let conversation = state.conversation(for: contactId) else {
             return
         }
@@ -1965,11 +3126,66 @@ final class ClientViewModel: ObservableObject {
     }
 
     func loadAttachmentData(fileName: String) async -> Data? {
+        if let cached = decryptedAttachmentCache[fileName] {
+            return cached.snapshot()
+        }
         do {
-            return try attachmentStore.loadAttachment(fileName: fileName)
+            var encrypted = try attachmentStore.loadEncryptedAttachment(fileName: fileName)
+            var decrypted = try attachmentStore.decryptAttachmentPayload(encrypted)
+            encrypted.secureWipe()
+            let buffer = SecureRAMBuffer(copying: decrypted)
+            decrypted.secureWipe()
+            cacheAttachmentBuffer(buffer, for: fileName, scope: currentAttachmentCacheScope())
+            return buffer.snapshot()
         } catch {
             print("[client] Failed to load attachment: \(error)")
             return nil
+        }
+    }
+
+    func purgeAttachmentDecryptionMemory(contactId: UUID) {
+        purgeAttachmentDecryptionMemory(scopes: [.contact(contactId)])
+    }
+
+    func purgeAttachmentDecryptionMemory(groupId: UUID) {
+        purgeAttachmentDecryptionMemory(scopes: [.group(groupId)])
+    }
+
+    func purgeAllAttachmentDecryptionMemory() {
+        for buffer in decryptedAttachmentCache.values {
+            buffer.wipe()
+        }
+        decryptedAttachmentCache.removeAll()
+        decryptedAttachmentScopes.removeAll()
+    }
+
+    private func cacheAttachmentBuffer(_ buffer: SecureRAMBuffer, for fileName: String, scope: AttachmentCacheScope) {
+        if let existing = decryptedAttachmentCache[fileName] {
+            existing.wipe()
+        }
+        decryptedAttachmentCache[fileName] = buffer
+        decryptedAttachmentScopes[fileName] = scope
+    }
+
+    private func currentAttachmentCacheScope() -> AttachmentCacheScope {
+        if let activeContactId {
+            return .contact(activeContactId)
+        }
+        if let activeGroupId {
+            return .group(activeGroupId)
+        }
+        return .transient
+    }
+
+    private func purgeAttachmentDecryptionMemory(scopes: Set<AttachmentCacheScope>) {
+        guard !scopes.isEmpty else { return }
+        let fileNamesToPurge = decryptedAttachmentScopes.compactMap { fileName, scope in
+            scopes.contains(scope) ? fileName : nil
+        }
+        for fileName in fileNamesToPurge {
+            decryptedAttachmentCache[fileName]?.wipe()
+            decryptedAttachmentCache.removeValue(forKey: fileName)
+            decryptedAttachmentScopes.removeValue(forKey: fileName)
         }
     }
 
@@ -2031,15 +3247,12 @@ final class ClientViewModel: ObservableObject {
 
     func addRelayServer(
         name: String,
-        host: String,
-        port: UInt16,
-        useTLS: Bool = false,
+        endpoint: RelayEndpoint,
         note: String? = nil,
         relayPassword: String? = nil,
         origin: RelayServerOrigin = .manual,
         sourceId: UUID? = nil
     ) async {
-        let endpoint = RelayEndpoint(host: host, port: port, useTLS: useTLS)
         if let index = state.relayServers.firstIndex(where: { $0.endpoint == endpoint }) {
             state.relayServers[index].name = name
             state.relayServers[index].note = note
@@ -2068,13 +3281,10 @@ final class ClientViewModel: ObservableObject {
     func updateRelayServer(
         id: UUID,
         name: String,
-        host: String,
-        port: UInt16,
-        useTLS: Bool,
+        endpoint: RelayEndpoint,
         note: String?,
         relayPassword: String?
     ) async {
-        let endpoint = RelayEndpoint(host: host, port: port, useTLS: useTLS)
         if state.relayServers.contains(where: { $0.id != id && $0.endpoint == endpoint }) {
             lastError = "That relay already exists."
             return
@@ -2091,6 +3301,7 @@ final class ClientViewModel: ObservableObject {
         if oldEndpoint != endpoint {
             state.relayServers[index].advertisedInfo = nil
             state.relayServers[index].lastInfoFetchedAt = nil
+            relayHealth[id] = nil
         }
         if state.relayServers[index].origin == .master {
             state.relayServers[index].origin = .manual
@@ -2104,6 +3315,7 @@ final class ClientViewModel: ObservableObject {
 
     func removeRelayServer(id: UUID) async {
         state.relayServers.removeAll { $0.id == id }
+        relayHealth[id] = nil
         if state.selectedRelayId == id {
             if let first = state.relayServers.first {
                 state.selectedRelayId = first.id
@@ -2123,6 +3335,10 @@ final class ClientViewModel: ObservableObject {
         let endpoint = state.relayServers[index].endpoint
         do {
             let info = try await loadRelayInfo(endpoint: endpoint)
+            if info.kind == .coordinator {
+                lastError = "Coordinator nodes cannot be selected as a home relay."
+                return
+            }
             if let policy = state.federationPolicy,
                !isFederationCompatible(policy: policy, info: info.federation) {
                 lastError = federationMismatchMessage(policy: policy, info: info.federation)
@@ -2136,6 +3352,8 @@ final class ClientViewModel: ObservableObject {
             state.selectedRelayId = state.relayServers[index].id
             state.relay = endpoint
             await save()
+            await refreshCoordinatorDirectoryIfNeeded(force: true)
+            await syncRelayGroups(for: state.activeIdentityId)
         } catch {
             lastError = "Relay info fetch failed: \(error.localizedDescription)"
         }
@@ -2143,20 +3361,26 @@ final class ClientViewModel: ObservableObject {
 
     func testSelectedRelay() async {
         let endpoint = state.relay
+        let start = DispatchTime.now()
         do {
             let client = relayClient(for: endpoint)
             let response = try await client.send(.health())
             if response.type == .ok {
+                recordRelayHealth(endpoint: endpoint, latencyMs: elapsedMilliseconds(since: start), isReachable: true, failureReason: nil)
                 lastInfo = "Relay \(endpoint.host):\(endpoint.port) is reachable."
                 if let selected = state.selectedRelayId {
                     await fetchRelayInfo(id: selected)
                 }
+                await refreshCoordinatorDirectoryIfNeeded(force: true)
             } else if let error = response.error {
+                recordRelayHealth(endpoint: endpoint, latencyMs: elapsedMilliseconds(since: start), isReachable: false, failureReason: error)
                 lastError = "Relay error: \(error)"
             } else {
+                recordRelayHealth(endpoint: endpoint, latencyMs: elapsedMilliseconds(since: start), isReachable: false, failureReason: "Unexpected response type")
                 lastError = "Relay returned unexpected response."
             }
         } catch {
+            recordRelayHealth(endpoint: endpoint, latencyMs: elapsedMilliseconds(since: start), isReachable: false, failureReason: error.localizedDescription)
             lastError = "Relay connection failed: \(error.localizedDescription)"
         }
     }
@@ -2179,13 +3403,20 @@ final class ClientViewModel: ObservableObject {
                 state.federationPolicy = info.federation
             }
             await save()
+            await refreshCoordinatorDirectoryIfNeeded(force: true)
         } catch {
             lastError = "Relay info fetch failed: \(error.localizedDescription)"
         }
     }
 
     func addMasterSource(name: String, url: String) async {
-        state.masterServerSources.append(MasterServerSource(name: name, url: url))
+        guard let parsedURL = URL(string: url),
+              parsedURL.scheme?.lowercased() == "https",
+              parsedURL.host?.isEmpty == false else {
+            lastError = "Master sources must use a valid HTTPS URL."
+            return
+        }
+        state.masterServerSources.append(MasterServerSource(name: name, url: parsedURL.absoluteString))
         await save()
     }
 
@@ -2209,12 +3440,24 @@ final class ClientViewModel: ObservableObject {
     }
 
     func fetchMasterSource(_ source: MasterServerSource) async {
-        guard let url = URL(string: source.url) else {
-            lastError = "Invalid master source URL."
+        guard let url = URL(string: source.url),
+              url.scheme?.lowercased() == "https",
+              url.host?.isEmpty == false else {
+            lastError = "Master sources must use a valid HTTPS URL."
             return
         }
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 15
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode) else {
+                throw MasterSourceError.invalidHTTPResponse
+            }
+            guard data.count <= 1_000_000 else {
+                throw MasterSourceError.responseTooLarge
+            }
             let records = try parseMasterServerData(data, sourceId: source.id)
             mergeMasterServers(records)
             if let index = state.masterServerSources.firstIndex(where: { $0.id == source.id }) {
@@ -2227,12 +3470,26 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
+    private enum MasterSourceError: LocalizedError {
+        case invalidHTTPResponse
+        case responseTooLarge
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidHTTPResponse:
+                return "Master source returned an invalid HTTP response."
+            case .responseTooLarge:
+                return "Master source exceeds the 1 MB limit."
+            }
+        }
+    }
+
     private func ensureRelaySelection() async {
         var didChange = false
         if state.relayServers.isEmpty {
-            let fallback = RelayServerRecord(name: "Current Relay", endpoint: state.relay)
-            state.relayServers = [fallback]
-            state.selectedRelayId = fallback.id
+            let defaultServer = RelayServerRecord(name: "Current Relay", endpoint: state.relay)
+            state.relayServers = [defaultServer]
+            state.selectedRelayId = defaultServer.id
             didChange = true
         }
 
@@ -2271,7 +3528,7 @@ final class ClientViewModel: ObservableObject {
             for line in lines {
                 let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
-                let parts = trimmed.split(separator: ",", maxSplits: 14, omittingEmptySubsequences: false)
+                let parts = trimmed.split(separator: ",", maxSplits: 19, omittingEmptySubsequences: false)
                 let hostPort = String(parts[0]).trimmingCharacters(in: .whitespaces)
                 let name = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : nil
                 let region = parts.count > 2 ? String(parts[2]).trimmingCharacters(in: .whitespaces) : nil
@@ -2285,8 +3542,13 @@ final class ClientViewModel: ObservableObject {
                 let temporalBucketSeconds = parts.count > 10 ? parseBucketSeconds(String(parts[10])) : nil
                 let operatorNote = parts.count > 11 ? String(parts[11]).trimmingCharacters(in: .whitespaces) : nil
                 let softwareVersion = parts.count > 12 ? String(parts[12]).trimmingCharacters(in: .whitespaces) : nil
-                let requiresPassword = parts.count > 13 ? parseBool(String(parts[13])) : nil
-                let tlsFlag = parts.count > 14 ? parseBool(String(parts[14])) : nil
+                let groupCreationMode = parts.count > 13 ? parseGroupCreationMode(String(parts[13])) : nil
+                let requiresPassword = parts.count > 14 ? parseBool(String(parts[14])) : nil
+                let tlsFlag = parts.count > 15 ? parseBool(String(parts[15])) : nil
+                let curatedStrictPolicyEnabled = parts.count > 16 ? parseBool(String(parts[16])) : nil
+                let curatedCoordinatorQuorum = parts.count > 17 ? parsePositiveInt(String(parts[17])) : nil
+                let curatedRequireSignedDirectory = parts.count > 18 ? parseBool(String(parts[18])) : nil
+                let transport = parts.count > 19 ? parseRelayTransport(String(parts[19])) : nil
                 guard let parsedEndpoint = parseHostPort(hostPort) else { continue }
                 let entry = MasterServerEntry(
                     name: name?.isEmpty == true ? nil : name,
@@ -2303,8 +3565,13 @@ final class ClientViewModel: ObservableObject {
                     temporalBucketSeconds: temporalBucketSeconds,
                     operatorNote: operatorNote?.isEmpty == true ? nil : operatorNote,
                     softwareVersion: softwareVersion?.isEmpty == true ? nil : softwareVersion,
+                    groupCreationMode: groupCreationMode,
                     requiresPassword: requiresPassword,
-                    useTLS: tlsFlag ?? parsedEndpoint.useTLS
+                    useTLS: tlsFlag ?? parsedEndpoint.useTLS,
+                    transport: transport ?? parsedEndpoint.transport,
+                    curatedStrictPolicyEnabled: curatedStrictPolicyEnabled,
+                    curatedCoordinatorQuorum: curatedCoordinatorQuorum,
+                    curatedRequireSignedDirectory: curatedRequireSignedDirectory
                 )
                 records.append(RelayServerRecord(entry: entry, sourceId: sourceId))
             }
@@ -2316,14 +3583,67 @@ final class ClientViewModel: ObservableObject {
         throw CryptoError.invalidPayload
     }
 
+    private func encodeGroupPayload(
+        groupId: UUID,
+        groupTitle: String,
+        memberFingerprints: [String],
+        body: String
+    ) throws -> String {
+        let payload = GroupTransportPayload(
+            groupId: groupId,
+            groupTitle: groupTitle,
+            memberFingerprints: memberFingerprints,
+            body: body,
+            sentAt: Date()
+        )
+        let data = try PICCPCoder.encode(payload)
+        return Self.groupPayloadPrefix + data.base64EncodedString()
+    }
+
+    private func decodeGroupPayload(from text: String) -> GroupTransportPayload? {
+        guard text.hasPrefix(Self.groupPayloadPrefix) else {
+            return nil
+        }
+        let encoded = String(text.dropFirst(Self.groupPayloadPrefix.count))
+        guard let data = Data(base64Encoded: encoded),
+              let payload = try? PICCPCoder.decode(GroupTransportPayload.self, from: data) else {
+            return nil
+        }
+        return payload
+    }
+
     private func parseHostPort(_ value: String) -> RelayEndpoint? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if let components = URLComponents(string: trimmed), let scheme = components.scheme, !scheme.isEmpty {
             guard let host = components.host else { return nil }
-            guard let port = UInt16(exactly: components.port ?? 9339) else { return nil }
-            let useTLS = scheme.lowercased() == "https"
-            return RelayEndpoint(host: host, port: port, useTLS: useTLS)
+            let loweredScheme = scheme.lowercased()
+            let defaultPort: Int
+            switch loweredScheme {
+            case "https", "wss":
+                defaultPort = 443
+            case "http", "ws":
+                defaultPort = 80
+            default:
+                defaultPort = 9339
+            }
+            guard let port = UInt16(exactly: components.port ?? defaultPort) else { return nil }
+            switch loweredScheme {
+            case "https":
+                return RelayEndpoint(host: host, port: port, useTLS: true, transport: .http)
+            case "http":
+                return RelayEndpoint(host: host, port: port, useTLS: false, transport: .http)
+            case "wss":
+                return RelayEndpoint(host: host, port: port, useTLS: true, transport: .websocket)
+            case "ws":
+                return RelayEndpoint(host: host, port: port, useTLS: false, transport: .websocket)
+            case "tls":
+                return RelayEndpoint(host: host, port: port, useTLS: true, transport: .tcp)
+            case "tcp":
+                return RelayEndpoint(host: host, port: port, useTLS: false, transport: .tcp)
+            default:
+                return RelayEndpoint(host: host, port: port, useTLS: false, transport: .tcp)
+            }
         }
         if trimmed.hasPrefix("["), let close = trimmed.firstIndex(of: "]") {
             let host = String(trimmed[trimmed.index(after: trimmed.startIndex)..<close])
@@ -2332,14 +3652,14 @@ final class ClientViewModel: ObservableObject {
                   let port = UInt16(remainder.dropFirst()) else {
                 return nil
             }
-            return RelayEndpoint(host: host, port: port, useTLS: false)
+            return RelayEndpoint(host: host, port: port, useTLS: false, transport: .tcp)
         }
         let parts = trimmed.split(separator: ":", maxSplits: 1)
         guard parts.count == 2, let port = UInt16(parts[1]) else {
             return nil
         }
         let host = String(parts[0])
-        return host.isEmpty ? nil : RelayEndpoint(host: host, port: port, useTLS: false)
+        return host.isEmpty ? nil : RelayEndpoint(host: host, port: port, useTLS: false, transport: .tcp)
     }
 
     private func parseTags(_ value: String) -> [String]? {
@@ -2356,7 +3676,25 @@ final class ClientViewModel: ObservableObject {
         if trimmed == "private" || trimmed == "priv" {
             return .privateRelay
         }
+        if trimmed == "coord" {
+            return .coordinator
+        }
         return RelayKind(rawValue: trimmed)
+    }
+
+    private func parseRelayTransport(_ value: String) -> RelayEndpointTransport? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return nil }
+        switch trimmed {
+        case "tcp", "raw":
+            return .tcp
+        case "http", "https":
+            return .http
+        case "ws", "wss", "websocket":
+            return .websocket
+        default:
+            return RelayEndpointTransport(rawValue: trimmed)
+        }
     }
 
     private func parseFederationMode(_ value: String) -> FederationMode? {
@@ -2381,12 +3719,31 @@ final class ClientViewModel: ObservableObject {
         return Int(trimmed)
     }
 
+    private func parsePositiveInt(_ value: String) -> Int? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsed = Int(trimmed), parsed > 0 else {
+            return nil
+        }
+        return parsed
+    }
+
     private func parseBool(_ value: String) -> Bool? {
         switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case "1", "true", "yes", "y":
             return true
         case "0", "false", "no", "n":
             return false
+        default:
+            return nil
+        }
+    }
+
+    private func parseGroupCreationMode(_ value: String) -> GroupCreationMode? {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "allowed", "on", "enabled", "true", "1":
+            return .allowed
+        case "disabled", "off", "false", "0":
+            return .disabled
         default:
             return nil
         }
@@ -2477,12 +3834,765 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func loadRelayInfo(endpoint: RelayEndpoint) async throws -> RelayInfo {
+        let startedAt = DispatchTime.now()
         let client = relayClient(for: endpoint)
-        let response = try await client.send(.info())
-        guard response.type == .info, let info = response.relayInfo else {
-            throw RelayInfoError.missing
+        do {
+            let response = try await client.send(.info())
+            let latencyMs = elapsedMilliseconds(since: startedAt)
+            guard response.type == .info, let info = response.relayInfo else {
+                recordRelayHealth(
+                    endpoint: endpoint,
+                    latencyMs: latencyMs,
+                    isReachable: false,
+                    failureReason: RelayInfoError.missing.localizedDescription
+                )
+                throw RelayInfoError.missing
+            }
+            recordRelayHealth(endpoint: endpoint, latencyMs: latencyMs, isReachable: true, failureReason: nil)
+            return info
+        } catch {
+            if case RelayInfoError.missing = error {
+                throw error
+            }
+            recordRelayHealth(
+                endpoint: endpoint,
+                latencyMs: elapsedMilliseconds(since: startedAt),
+                isReachable: false,
+                failureReason: error.localizedDescription
+            )
+            throw error
         }
-        return info
+    }
+
+    private func elapsedMilliseconds(since start: DispatchTime) -> Int {
+        let end = DispatchTime.now().uptimeNanoseconds
+        let begin = start.uptimeNanoseconds
+        guard end >= begin else { return 0 }
+        return Int((end - begin) / 1_000_000)
+    }
+
+    private func recordRelayHealth(endpoint: RelayEndpoint, latencyMs: Int?, isReachable: Bool, failureReason: String?) {
+        guard let relayId = state.relayServers.first(where: { $0.endpoint == endpoint })?.id else {
+            return
+        }
+        relayHealth[relayId] = RelayHealthSnapshot(
+            lastCheckedAt: Date(),
+            latencyMs: latencyMs,
+            isReachable: isReachable,
+            failureReason: failureReason
+        )
+    }
+
+    private func makeActorProof(
+        fingerprint: String,
+        signingKey: SigningKeyPair,
+        publicSigningKey: Data,
+        signableDataBuilder: (RelayActorProof) throws -> Data
+    ) throws -> RelayActorProof {
+        let signedAt = Date()
+        let nonce = UUID()
+        let placeholder = RelayActorProof(
+            fingerprint: fingerprint,
+            publicSigningKey: publicSigningKey,
+            signedAt: signedAt,
+            nonce: nonce,
+            signature: Data()
+        )
+        let signableData = try signableDataBuilder(placeholder)
+        let signature = try signingKey.sign(signableData)
+        return RelayActorProof(
+            fingerprint: fingerprint,
+            publicSigningKey: publicSigningKey,
+            signedAt: signedAt,
+            nonce: nonce,
+            signature: signature
+        )
+    }
+
+    private func makeActiveIdentityActorProof(
+        signableDataBuilder: (RelayActorProof) throws -> Data
+    ) throws -> RelayActorProof {
+        try makeActorProof(
+            fingerprint: state.identity.fingerprint,
+            signingKey: state.identity.signingKey,
+            publicSigningKey: state.identity.signingKey.publicKeyData,
+            signableDataBuilder: signableDataBuilder
+        )
+    }
+
+    private func makeFetchPairRequestsRequest(maxCount: Int?) throws -> FetchPairRequestsRequest {
+        var request = FetchPairRequestsRequest(
+            fingerprint: state.identity.fingerprint,
+            maxCount: maxCount
+        )
+        let proof = try makeActiveIdentityActorProof { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = FetchPairRequestsRequest(
+            fingerprint: state.identity.fingerprint,
+            maxCount: maxCount,
+            actorProof: proof
+        )
+        return request
+    }
+
+    private func makeSendPairRequest(
+        targetFingerprint: String,
+        offer: ContactOffer
+    ) throws -> SendPairRequest {
+        var request = SendPairRequest(
+            targetFingerprint: targetFingerprint,
+            offer: offer
+        )
+        let proof = try makeActiveIdentityActorProof { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = SendPairRequest(
+            targetFingerprint: targetFingerprint,
+            offer: offer,
+            actorProof: proof
+        )
+        return request
+    }
+
+    private func createRelayGroupRegistry(
+        title: String,
+        memberFingerprints: [String],
+        memberProfiles: [RelayGroupMemberProfile]
+    ) async throws -> RelayGroupDescriptor {
+        let client = relayClient(for: state.relay)
+        var request = CreateGroupRequest(
+            title: title,
+            creatorFingerprint: state.identity.fingerprint,
+            memberFingerprints: memberFingerprints,
+            creatorProfile: relayGroupMemberProfileForActiveIdentity(),
+            memberProfiles: memberProfiles
+        )
+        let proof = try makeActiveIdentityActorProof { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = CreateGroupRequest(
+            title: request.title,
+            creatorFingerprint: request.creatorFingerprint,
+            memberFingerprints: request.memberFingerprints,
+            creatorProfile: request.creatorProfile,
+            memberProfiles: request.memberProfiles,
+            creatorProof: proof
+        )
+        let response = try await client.send(
+            .createGroup(request)
+        )
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected group request.")
+        }
+        guard response.type == .group,
+              let group = response.group else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+        return group
+    }
+
+    private func fetchRelayGroup(groupId: UUID, relay: RelayEndpoint) async throws -> RelayGroupDescriptor? {
+        let client = relayClient(for: relay)
+        var request = GetGroupRequest(
+            groupId: groupId,
+            memberFingerprint: state.identity.fingerprint
+        )
+        let proof = try makeActiveIdentityActorProof { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = GetGroupRequest(
+            groupId: groupId,
+            memberFingerprint: state.identity.fingerprint,
+            memberProof: proof
+        )
+        let response = try await client.send(.getGroup(request))
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected group lookup.")
+        }
+        guard response.type == .group else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+        return response.group
+    }
+
+    private func updateRelayGroupRegistry(
+        groupId: UUID,
+        actorFingerprint: String? = nil,
+        actorSigningKey: SigningKeyPair? = nil,
+        title: String?,
+        addMemberFingerprints: [String],
+        addMemberProfiles: [RelayGroupMemberProfile],
+        removeMemberFingerprints: [String],
+        relay: RelayEndpoint? = nil
+    ) async throws -> RelayGroupDescriptor {
+        let targetRelay = relay ?? state.relay
+        let actor = actorFingerprint ?? state.identity.fingerprint
+        let signerKey = actorSigningKey ?? state.identity.signingKey
+        let signerPublicKey = actorSigningKey?.publicKeyData ?? state.identity.signingKey.publicKeyData
+        let client = relayClient(for: targetRelay)
+        var request = UpdateGroupRequest(
+            groupId: groupId,
+            actorFingerprint: actor,
+            title: title,
+            addMemberFingerprints: Array(Set(addMemberFingerprints)),
+            addMemberProfiles: addMemberProfiles,
+            removeMemberFingerprints: Array(Set(removeMemberFingerprints))
+        )
+        let proof = try makeActorProof(
+            fingerprint: actor,
+            signingKey: signerKey,
+            publicSigningKey: signerPublicKey
+        ) { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = UpdateGroupRequest(
+            groupId: request.groupId,
+            actorFingerprint: request.actorFingerprint,
+            title: request.title,
+            addMemberFingerprints: request.addMemberFingerprints,
+            addMemberProfiles: request.addMemberProfiles,
+            removeMemberFingerprints: request.removeMemberFingerprints,
+            actorProof: proof
+        )
+        let response = try await client.send(
+            .updateGroup(request)
+        )
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected group update.")
+        }
+        guard response.type == .group,
+              let group = response.group else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+        return group
+    }
+
+    private func deleteRelayGroupRegistry(
+        groupId: UUID,
+        actorFingerprint: String,
+        relay: RelayEndpoint,
+        actorSigningKey: SigningKeyPair? = nil
+    ) async throws {
+        let actor = actorFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !actor.isEmpty else {
+            throw RelayGroupRegistryError.rejected("Invalid group creator fingerprint.")
+        }
+        let signerKey = actorSigningKey ?? state.identity.signingKey
+        let signerPublicKey = actorSigningKey?.publicKeyData ?? state.identity.signingKey.publicKeyData
+        let client = relayClient(for: relay)
+        var request = DeleteGroupRequest(
+            groupId: groupId,
+            actorFingerprint: actor
+        )
+        let proof = try makeActorProof(
+            fingerprint: actor,
+            signingKey: signerKey,
+            publicSigningKey: signerPublicKey
+        ) { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = DeleteGroupRequest(
+            groupId: request.groupId,
+            actorFingerprint: request.actorFingerprint,
+            actorProof: proof
+        )
+        let response = try await client.send(
+            .deleteGroup(request)
+        )
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected group delete request.")
+        }
+        guard response.type == .ok else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+    }
+
+    private func listRelayGroups(
+        memberFingerprint: String,
+        signerIdentity: Identity,
+        relay: RelayEndpoint
+    ) async throws -> [RelayGroupDescriptor] {
+        let client = relayClient(for: relay)
+        var request = ListGroupsRequest(memberFingerprint: memberFingerprint, limit: 256)
+        let proof = try makeActorProof(
+            fingerprint: signerIdentity.fingerprint,
+            signingKey: signerIdentity.signingKey,
+            publicSigningKey: signerIdentity.signingKey.publicKeyData
+        ) { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = ListGroupsRequest(
+            memberFingerprint: request.memberFingerprint,
+            limit: request.limit,
+            memberProof: proof
+        )
+        let response = try await client.send(
+            .listGroups(request)
+        )
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected group list request.")
+        }
+        guard response.type == .groups else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+        return response.groups ?? []
+    }
+
+    private func requestRelayGroupJoin(
+        groupId: UUID,
+        requesterProfile: RelayGroupMemberProfile? = nil,
+        relay: RelayEndpoint? = nil
+    ) async throws -> RelayGroupJoinRequest {
+        let targetRelay = relay ?? state.relay
+        let client = relayClient(for: targetRelay)
+        var request = RequestGroupJoinRequest(
+            groupId: groupId,
+            requesterProfile: requesterProfile ?? relayGroupMemberProfileForActiveIdentity()
+        )
+        let proof = try makeActiveIdentityActorProof { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = RequestGroupJoinRequest(
+            groupId: request.groupId,
+            requesterProfile: request.requesterProfile,
+            requesterProof: proof
+        )
+        let response = try await client.send(
+            .requestGroupJoin(request)
+        )
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected join request.")
+        }
+        guard response.type == .groupJoinRequests,
+              let request = response.groupJoinRequests?.first else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+        return request
+    }
+
+    private func listRelayGroupJoinRequests(groupId: UUID) async throws -> [RelayGroupJoinRequest] {
+        let client = relayClient(for: state.relay)
+        var request = ListGroupJoinRequestsRequest(
+            groupId: groupId,
+            actorFingerprint: state.identity.fingerprint,
+            limit: 256
+        )
+        let proof = try makeActiveIdentityActorProof { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = ListGroupJoinRequestsRequest(
+            groupId: request.groupId,
+            actorFingerprint: request.actorFingerprint,
+            limit: request.limit,
+            actorProof: proof
+        )
+        let response = try await client.send(
+            .listGroupJoinRequests(request)
+        )
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected join request listing.")
+        }
+        guard response.type == .groupJoinRequests else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+        return response.groupJoinRequests ?? []
+    }
+
+    private func approveRelayGroupJoin(groupId: UUID, joinRequestId: UUID) async throws -> RelayGroupDescriptor {
+        let client = relayClient(for: state.relay)
+        var request = ApproveGroupJoinRequest(
+            groupId: groupId,
+            actorFingerprint: state.identity.fingerprint,
+            joinRequestId: joinRequestId
+        )
+        let proof = try makeActiveIdentityActorProof { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = ApproveGroupJoinRequest(
+            groupId: request.groupId,
+            actorFingerprint: request.actorFingerprint,
+            joinRequestId: request.joinRequestId,
+            actorProof: proof
+        )
+        let response = try await client.send(
+            .approveGroupJoin(request)
+        )
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected join approval.")
+        }
+        guard response.type == .group, let group = response.group else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+        return group
+    }
+
+    private func rejectRelayGroupJoin(groupId: UUID, joinRequestId: UUID) async throws {
+        let client = relayClient(for: state.relay)
+        var request = RejectGroupJoinRequest(
+            groupId: groupId,
+            actorFingerprint: state.identity.fingerprint,
+            joinRequestId: joinRequestId
+        )
+        let proof = try makeActiveIdentityActorProof { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = RejectGroupJoinRequest(
+            groupId: request.groupId,
+            actorFingerprint: request.actorFingerprint,
+            joinRequestId: request.joinRequestId,
+            actorProof: proof
+        )
+        let response = try await client.send(
+            .rejectGroupJoin(request)
+        )
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected join rejection.")
+        }
+        guard response.type == .ok else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+    }
+
+    private func syncRelayGroupsForActiveProfiles() async {
+        let profileIds = state.identityProfiles.filter { !$0.isArchived }.map(\.id)
+        for profileId in profileIds {
+            await syncRelayGroups(for: profileId)
+        }
+    }
+
+    private func syncRelayGroups(for profileId: UUID) async {
+        guard var profile = state.identityProfile(id: profileId) else {
+            return
+        }
+        let descriptors: [RelayGroupDescriptor]
+        do {
+            descriptors = try await listRelayGroups(
+                memberFingerprint: profile.identity.fingerprint,
+                signerIdentity: profile.identity,
+                relay: profile.relay
+            )
+        } catch {
+            return
+        }
+
+        let didMaterializeContacts = materializeGroupDirectoryContacts(from: descriptors, profile: &profile)
+
+        let localOnlyGroups = profile.groups.filter { $0.relayInboxId == nil }
+        let existingById = Dictionary(uniqueKeysWithValues: profile.groups.map { ($0.id, $0) })
+        let descriptorIds = Set(descriptors.map(\.id))
+        let preservedRelayGroups = profile.groups.filter { group in
+            group.relayInboxId != nil && !descriptorIds.contains(group.id)
+        }
+        let relayBackedGroups = descriptors.map { descriptor -> GroupConversation in
+            let memberFingerprints = normalizedRelayMemberFingerprints(
+                from: descriptor.members,
+                preferredRelay: profile.relay
+            )
+            var merged = existingById[descriptor.id] ?? GroupConversation(
+                id: descriptor.id,
+                title: descriptor.title,
+                memberContactIds: contactIds(for: memberFingerprints, contacts: profile.contacts),
+                relayInboxId: descriptor.inboxId,
+                relayEpoch: descriptor.epoch,
+                createdByFingerprint: descriptor.createdByFingerprint,
+                createdAt: descriptor.createdAt
+            )
+            merged.title = descriptor.title
+            merged.memberContactIds = contactIds(for: memberFingerprints, contacts: profile.contacts)
+            merged.relayInboxId = descriptor.inboxId
+            merged.relayEpoch = descriptor.epoch
+            merged.createdByFingerprint = descriptor.createdByFingerprint
+            return merged
+        }
+
+        var mergedById: [UUID: GroupConversation] = [:]
+        for group in localOnlyGroups {
+            mergedById[group.id] = group
+        }
+        for group in preservedRelayGroups {
+            mergedById[group.id] = group
+        }
+        for group in relayBackedGroups {
+            mergedById[group.id] = group
+        }
+
+        let mergedGroups = mergedById.values.sorted { lhs, rhs in
+            let leftDate = lhs.messages.last?.timestamp ?? lhs.createdAt
+            let rightDate = rhs.messages.last?.timestamp ?? rhs.createdAt
+            if leftDate != rightDate {
+                return leftDate > rightDate
+            }
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        }
+
+        if mergedGroups != profile.groups || didMaterializeContacts {
+            profile.groups = mergedGroups
+            state.updateIdentityProfile(profile)
+            if profileId == state.activeIdentityId,
+               let activeGroupId,
+               !mergedGroups.contains(where: { $0.id == activeGroupId }) {
+                self.activeGroupId = nil
+            }
+            await save()
+        }
+    }
+
+    @discardableResult
+    private func materializeGroupDirectoryContacts(
+        from descriptors: [RelayGroupDescriptor],
+        profile: inout IdentityProfile
+    ) -> Bool {
+        var changed = false
+        for descriptor in descriptors {
+            let members = normalizedRelayMembers(descriptor.members, preferredRelay: profile.relay)
+            for member in members {
+                let fingerprint = member.fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !fingerprint.isEmpty, fingerprint != profile.identity.fingerprint else {
+                    continue
+                }
+                guard let inboxId = member.inboxId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !inboxId.isEmpty,
+                      let relay = member.relay,
+                      let signingPublicKey = member.signingPublicKey,
+                      !signingPublicKey.isEmpty,
+                      let agreementPublicKey = member.agreementPublicKey,
+                      !agreementPublicKey.isEmpty else {
+                    continue
+                }
+                let reachableRelay = reachableRelayEndpoint(relay, preferredRelay: profile.relay)
+                let displayName = member.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let resolvedName = (displayName?.isEmpty == false ? displayName! : "Group Member \(abbreviatedFingerprint(fingerprint))")
+                if let index = profile.contacts.firstIndex(where: { $0.fingerprint == fingerprint }) {
+                    var existing = profile.contacts[index]
+                    var didUpdate = false
+                    if existing.displayName != resolvedName {
+                        existing.displayName = resolvedName
+                        didUpdate = true
+                    }
+                    if existing.inboxId != inboxId {
+                        existing.inboxId = inboxId
+                        didUpdate = true
+                    }
+                    if existing.relay != reachableRelay {
+                        existing.relay = reachableRelay
+                        didUpdate = true
+                    }
+                    if existing.signingPublicKey != signingPublicKey {
+                        existing.signingPublicKey = signingPublicKey
+                        didUpdate = true
+                    }
+                    if existing.agreementPublicKey != agreementPublicKey {
+                        existing.agreementPublicKey = agreementPublicKey
+                        didUpdate = true
+                    }
+                    if didUpdate {
+                        profile.contacts[index] = existing
+                        changed = true
+                    }
+                } else if let index = profile.contacts.firstIndex(where: { existing in
+                    existing.inboxId == inboxId && existing.relay == reachableRelay
+                }) {
+                    var existing = profile.contacts[index]
+                    var didUpdate = false
+                    if existing.fingerprint != fingerprint {
+                        existing.signingPublicKey = signingPublicKey
+                        existing.agreementPublicKey = agreementPublicKey
+                        didUpdate = true
+                    }
+                    if existing.displayName != resolvedName {
+                        existing.displayName = resolvedName
+                        didUpdate = true
+                    }
+                    if existing.signingPublicKey != signingPublicKey {
+                        existing.signingPublicKey = signingPublicKey
+                        didUpdate = true
+                    }
+                    if existing.agreementPublicKey != agreementPublicKey {
+                        existing.agreementPublicKey = agreementPublicKey
+                        didUpdate = true
+                    }
+                    if didUpdate {
+                        profile.contacts[index] = existing
+                        changed = true
+                    }
+                } else {
+                    let contact = Contact(
+                        displayName: resolvedName,
+                        inboxId: inboxId,
+                        relay: reachableRelay,
+                        signingPublicKey: signingPublicKey,
+                        agreementPublicKey: agreementPublicKey
+                    )
+                    profile.contacts.append(contact)
+                    changed = true
+                }
+            }
+        }
+        return changed
+    }
+
+    private func activeIdentityLineageFingerprints() -> [String] {
+        guard let profile = state.identityProfile(id: state.activeIdentityId) else {
+            return [state.identity.fingerprint]
+        }
+        var ordered: [String] = [profile.identity.fingerprint]
+        let continuityEvents = profile.continuityEvents.sorted { $0.timestamp > $1.timestamp }
+        for event in continuityEvents {
+            if let newFingerprint = event.newFingerprint?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !newFingerprint.isEmpty {
+                ordered.append(newFingerprint)
+            }
+            if let oldFingerprint = event.oldFingerprint?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !oldFingerprint.isEmpty {
+                ordered.append(oldFingerprint)
+            }
+        }
+        var seen = Set<String>()
+        return ordered.filter { fingerprint in
+            guard !seen.contains(fingerprint) else {
+                return false
+            }
+            seen.insert(fingerprint)
+            return true
+        }
+    }
+
+    private func relayGroupMemberProfileForActiveIdentity() -> RelayGroupMemberProfile {
+        RelayGroupMemberProfile(
+            fingerprint: state.identity.fingerprint,
+            displayName: state.identity.displayName,
+            inboxId: state.inboxId,
+            relay: state.relay,
+            signingPublicKey: state.identity.signingKey.publicKeyData,
+            agreementPublicKey: state.identity.agreementKey.publicKeyData
+        )
+    }
+
+    private func relayGroupMemberProfile(for contact: Contact) -> RelayGroupMemberProfile {
+        RelayGroupMemberProfile(
+            fingerprint: contact.fingerprint,
+            displayName: contact.displayName,
+            inboxId: contact.inboxId,
+            relay: contact.relay,
+            signingPublicKey: contact.signingPublicKey,
+            agreementPublicKey: contact.agreementPublicKey
+        )
+    }
+
+    private func contactIds(for memberFingerprints: [String], contacts: [Contact]? = nil) -> [UUID] {
+        let availableContacts = contacts ?? state.contacts
+        let uniqueFingerprints = Set(memberFingerprints)
+        let ids = availableContacts
+            .filter { uniqueFingerprints.contains($0.fingerprint) }
+            .map(\.id)
+        return Array(Set(ids)).sorted { lhs, rhs in
+            lhs.uuidString < rhs.uuidString
+        }
+    }
+
+    private func normalizedContact(_ contact: Contact, preferredRelay: RelayEndpoint) -> Contact {
+        var updated = contact
+        updated.relay = reachableRelayEndpoint(contact.relay, preferredRelay: preferredRelay)
+        return updated
+    }
+
+    private func normalizedRelayMembers(_ members: [RelayGroupMember], preferredRelay: RelayEndpoint) -> [RelayGroupMember] {
+        var keyedMembers: [String: RelayGroupMember] = [:]
+        var fingerprintOnly: [String: RelayGroupMember] = [:]
+
+        for member in members {
+            guard let key = relayMemberEndpointKey(member, preferredRelay: preferredRelay) else {
+                let fingerprint = member.fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !fingerprint.isEmpty else { continue }
+                if let existing = fingerprintOnly[fingerprint] {
+                    if member.joinedAt > existing.joinedAt {
+                        fingerprintOnly[fingerprint] = member
+                    }
+                } else {
+                    fingerprintOnly[fingerprint] = member
+                }
+                continue
+            }
+
+            if let existing = keyedMembers[key] {
+                if member.joinedAt > existing.joinedAt {
+                    keyedMembers[key] = member
+                }
+            } else {
+                keyedMembers[key] = member
+            }
+        }
+
+        let combined = Array(keyedMembers.values) + Array(fingerprintOnly.values)
+        return combined.sorted { lhs, rhs in
+            if lhs.joinedAt != rhs.joinedAt {
+                return lhs.joinedAt > rhs.joinedAt
+            }
+            return lhs.fingerprint < rhs.fingerprint
+        }
+    }
+
+    private func normalizedRelayMemberFingerprints(
+        from members: [RelayGroupMember],
+        preferredRelay: RelayEndpoint
+    ) -> [String] {
+        let normalizedMembers = normalizedRelayMembers(members, preferredRelay: preferredRelay)
+        return normalizedMembers.map { $0.fingerprint }
+    }
+
+    private func relayMemberEndpointKey(_ member: RelayGroupMember, preferredRelay: RelayEndpoint) -> String? {
+        guard let inboxId = member.inboxId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !inboxId.isEmpty,
+              let relay = member.relay else {
+            return nil
+        }
+        let endpoint = reachableRelayEndpoint(relay, preferredRelay: preferredRelay)
+        return "\(endpoint.host.lowercased()):\(endpoint.port):\(endpoint.useTLS ? 1 : 0):\(endpoint.transport.rawValue):\(inboxId)"
+    }
+
+    private func reachableRelayEndpoint(_ endpoint: RelayEndpoint, preferredRelay: RelayEndpoint) -> RelayEndpoint {
+        guard endpoint.port == preferredRelay.port else {
+            return endpoint
+        }
+        guard isLoopbackOrWildcardHost(endpoint.host), !isLoopbackOrWildcardHost(preferredRelay.host) else {
+            return endpoint
+        }
+        return RelayEndpoint(
+            host: preferredRelay.host,
+            port: preferredRelay.port,
+            useTLS: preferredRelay.useTLS,
+            transport: preferredRelay.transport,
+            tlsCertificateFingerprintSHA256: preferredRelay.tlsCertificateFingerprintSHA256,
+            directorySigningPublicKey: preferredRelay.directorySigningPublicKey
+        )
+    }
+
+    private func isLoopbackOrWildcardHost(_ host: String) -> Bool {
+        let normalized = host
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
+        if normalized == "localhost" || normalized == "::1" || normalized == "0.0.0.0" || normalized == "::" {
+            return true
+        }
+        return normalized.hasPrefix("127.")
+    }
+
+    private func groupMemberFingerprints(for group: GroupConversation, profile: IdentityProfile) -> [String] {
+        let mapped = group.memberContactIds.compactMap { memberId in
+            profile.contacts.first(where: { $0.id == memberId })?.fingerprint
+        }
+        return Array(Set(mapped)).sorted()
+    }
+
+    private func abbreviatedFingerprint(_ fingerprint: String) -> String {
+        if fingerprint.count <= 12 {
+            return fingerprint
+        }
+        let prefix = fingerprint.prefix(6)
+        let suffix = fingerprint.suffix(4)
+        return "\(prefix)…\(suffix)"
     }
 
     private enum RelayInfoError: LocalizedError {
@@ -2496,6 +4606,31 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
+    private enum RelayMailboxError: LocalizedError {
+        case rejected(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .rejected(let message):
+                return message
+            }
+        }
+    }
+
+    private enum RelayGroupRegistryError: LocalizedError {
+        case rejected(String)
+        case invalidResponse
+
+        var errorDescription: String? {
+            switch self {
+            case .rejected(let message):
+                return message
+            case .invalidResponse:
+                return "Relay group registry response was invalid."
+            }
+        }
+    }
+
     private func startAutoFetch() {
         autoFetchTask?.cancel()
         autoFetchTask = Task { [weak self] in
@@ -2504,7 +4639,201 @@ final class ClientViewModel: ObservableObject {
                 try? await Task.sleep(for: .seconds(8))
                 await self.fetchMessages()
                 await self.refreshInsecurePairingIfNeeded()
+                await self.refreshCoordinatorDirectoryIfNeeded()
             }
+        }
+    }
+
+    private func startAutoFetchIfEligible() {
+        guard isReady,
+              !requiresOnboarding,
+              !isLocked,
+              state.hasCompletedOnboarding,
+              state.hasAcceptedPrivacyPolicy,
+              state.hasAcceptedTermsOfUse else {
+            return
+        }
+        startAutoFetch()
+    }
+
+    private func refreshCoordinatorDirectoryIfNeeded(force: Bool = false) async {
+        guard let selectedId = state.selectedRelayId,
+              let relay = state.relayServers.first(where: { $0.id == selectedId }),
+              let info = relay.advertisedInfo else {
+            return
+        }
+        let coordinators = info.federationCoordinatorEndpoints ?? []
+        guard !coordinators.isEmpty else {
+            return
+        }
+        let now = Date()
+        if !force,
+           let last = lastCoordinatorSyncAt,
+           now.timeIntervalSince(last) < coordinatorSyncInterval {
+            return
+        }
+        lastCoordinatorSyncAt = now
+        do {
+            let nodes = try await loadCoordinatorNodes(coordinators: coordinators, federation: info.federation)
+            mergeCoordinatorDiscoveredRelays(nodes)
+            await save()
+        } catch {
+            // Keep this silent; coordinator availability should not interrupt active messaging.
+        }
+    }
+
+    private func loadCoordinatorNodes(
+        coordinators: [RelayEndpoint],
+        federation: FederationDescriptor
+    ) async throws -> [FederationNodeRecord] {
+        var merged: [String: FederationNodeRecord] = [:]
+        var firstError: Error?
+        let effectiveRequest = ListFederationNodesRequest(
+            mode: federation.mode,
+            federationName: federation.name,
+            onlyHealthy: true,
+            maxStalenessSeconds: 300,
+            requireSignedSnapshot: true
+        )
+        for coordinator in coordinators {
+            do {
+                let client = relayClient(for: coordinator)
+                let infoResponse = try await client.send(.info())
+                guard infoResponse.type == .info else { continue }
+                let advertisedPublicKey = infoResponse.relayInfo?.federationDirectoryPublicKey
+                let trustedPublicKey = coordinator.directorySigningPublicKey
+                if let trustedPublicKey, let advertisedPublicKey, trustedPublicKey != advertisedPublicKey {
+                    throw RelayInfoError.missing
+                }
+                let response = try await client.send(
+                    .listFederationNodes(effectiveRequest)
+                )
+                guard response.type == .federationNodes else { continue }
+                let nodes = try validatedCoordinatorNodes(
+                    response: response,
+                    request: effectiveRequest,
+                    trustedPublicKey: trustedPublicKey
+                )
+                for node in nodes {
+                    // Directory should expose actual message relays, not other coordinator-only endpoints.
+                    guard node.relayInfo.kind != .coordinator else { continue }
+                    let key = "\(node.endpoint.host.lowercased()):\(node.endpoint.port):\(node.endpoint.useTLS ? 1 : 0):\(node.endpoint.transport.rawValue)"
+                    if let existing = merged[key] {
+                        if node.lastHeartbeatAt > existing.lastHeartbeatAt {
+                            merged[key] = node
+                        }
+                    } else {
+                        merged[key] = node
+                    }
+                }
+            } catch {
+                if firstError == nil {
+                    firstError = error
+                }
+            }
+        }
+        if merged.isEmpty, let firstError {
+            throw firstError
+        }
+        return merged.values.sorted { lhs, rhs in
+            if lhs.lastHeartbeatAt != rhs.lastHeartbeatAt {
+                return lhs.lastHeartbeatAt > rhs.lastHeartbeatAt
+            }
+            return lhs.endpoint.host < rhs.endpoint.host
+        }
+    }
+
+    private func validatedCoordinatorNodes(
+        response: RelayResponse,
+        request: ListFederationNodesRequest,
+        trustedPublicKey: Data?
+    ) throws -> [FederationNodeRecord] {
+        if let snapshot = response.federationSnapshot {
+            if let mode = request.mode, snapshot.mode != mode {
+                throw RelayInfoError.missing
+            }
+            if let expectedName = request.federationName?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !expectedName.isEmpty,
+               snapshot.federationName != expectedName {
+                throw RelayInfoError.missing
+            }
+            guard snapshot.validUntil > Date() else {
+                throw RelayInfoError.missing
+            }
+            if request.requireSignedSnapshot == true {
+                guard let trustedPublicKey,
+                      FederationDirectorySignature.verify(snapshot: snapshot, trustedPublicKey: trustedPublicKey) else {
+                    throw RelayInfoError.missing
+                }
+            } else if let trustedPublicKey, snapshot.signature != nil {
+                guard FederationDirectorySignature.verify(snapshot: snapshot, trustedPublicKey: trustedPublicKey) else {
+                    throw RelayInfoError.missing
+                }
+            }
+            return applyFreshnessPolicy(nodes: snapshot.nodes, request: request)
+        }
+        if request.requireSignedSnapshot == true {
+            throw RelayInfoError.missing
+        }
+        return applyFreshnessPolicy(nodes: response.federationNodes ?? [], request: request)
+    }
+
+    private func applyFreshnessPolicy(
+        nodes: [FederationNodeRecord],
+        request: ListFederationNodesRequest
+    ) -> [FederationNodeRecord] {
+        let now = Date()
+        var filtered = nodes
+        if request.onlyHealthy == true {
+            filtered = filtered.filter { $0.expiresAt > now }
+        }
+        if let maxStaleness = request.maxStalenessSeconds, maxStaleness > 0 {
+            let cutoff = now.addingTimeInterval(-TimeInterval(maxStaleness))
+            filtered = filtered.filter { $0.lastHeartbeatAt >= cutoff }
+        }
+        return filtered
+    }
+
+    private func mergeCoordinatorDiscoveredRelays(_ nodes: [FederationNodeRecord]) {
+        var peerHints: [RelayEndpoint] = []
+        for node in nodes {
+            let endpoint = node.endpoint
+            let defaultName = node.relayInfo.relayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedName = (defaultName?.isEmpty == false ? defaultName! : "\(endpoint.host):\(endpoint.port)")
+            if let index = state.relayServers.firstIndex(where: { $0.endpoint == endpoint }) {
+                // Preserve operator-entered names/notes for manual entries.
+                state.relayServers[index].advertisedInfo = node.relayInfo
+                state.relayServers[index].lastInfoFetchedAt = node.lastHeartbeatAt
+            } else {
+                state.relayServers.append(
+                    RelayServerRecord(
+                        name: resolvedName,
+                        endpoint: endpoint,
+                        note: "Discovered via federation coordinator.",
+                        advertisedInfo: node.relayInfo,
+                        lastInfoFetchedAt: node.lastHeartbeatAt,
+                        origin: .master,
+                        sourceId: nil
+                    )
+                )
+            }
+            peerHints.append(contentsOf: node.relayInfo.knownOpenPeers ?? [])
+        }
+        for endpoint in peerHints {
+            if state.relayServers.contains(where: { $0.endpoint == endpoint }) {
+                continue
+            }
+            state.relayServers.append(
+                RelayServerRecord(
+                    name: "\(endpoint.host):\(endpoint.port)",
+                    endpoint: endpoint,
+                    note: "Discovered via relay peer exchange.",
+                    advertisedInfo: nil,
+                    lastInfoFetchedAt: nil,
+                    origin: .master,
+                    sourceId: nil
+                )
+            )
         }
     }
 
@@ -2519,14 +4848,7 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func relayForInsecurePairing() -> RelayEndpoint? {
-        switch state.insecurePairing.method ?? .relay {
-        case .relay:
-            return state.relay
-        case .localNetwork:
-            return state.relay
-        case .bluetooth:
-            return nil
-        }
+        state.relay
     }
 
     private func isSessionMismatch(envelope: Envelope, conversation: Conversation) -> Bool {
@@ -2549,6 +4871,7 @@ final class ClientViewModel: ObservableObject {
         guard shouldAttemptSessionReset(contactId: contact.id) else {
             return nil
         }
+        let contact = normalizedContact(contact, preferredRelay: preferredRelay)
         do {
             return try await SessionRecovery.sendSessionResetAndResendRequest(
                 identity: identity,
@@ -2578,6 +4901,23 @@ final class ClientViewModel: ObservableObject {
             }
         }
         return false
+    }
+
+    private func shouldAttemptSilentReset(for error: Error) -> Bool {
+        if error is CryptoKitError {
+            return true
+        }
+        guard let coreError = error as? CryptoError else {
+            return false
+        }
+        switch coreError {
+        case .invalidPayload:
+            return true
+        case .counterOutOfOrder, .counterReplay, .counterWindowExceeded, .invalidSignature:
+            return false
+        default:
+            return false
+        }
     }
 
     private func createInboundSession(
@@ -2647,6 +4987,10 @@ final class ClientViewModel: ObservableObject {
         })
     }
 
+    private func group(for groupId: UUID, in profile: IdentityProfile) -> GroupConversation? {
+        profile.groups.first(where: { $0.id == groupId })
+    }
+
     private func upsertConversation(_ conversation: Conversation, in profile: inout IdentityProfile) {
         if let index = profile.conversations.firstIndex(where: { $0.contactId == conversation.contactId }) {
             profile.conversations[index] = conversation
@@ -2655,10 +4999,172 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
-    private func updateContact(_ contact: Contact, in profile: inout IdentityProfile) {
-        if let index = profile.contacts.firstIndex(where: { $0.id == contact.id }) {
-            profile.contacts[index] = contact
+    private func upsertGroup(_ group: GroupConversation, in profile: inout IdentityProfile) {
+        if let index = profile.groups.firstIndex(where: { $0.id == group.id }) {
+            profile.groups[index] = group
+        } else {
+            profile.groups.append(group)
         }
+    }
+
+    private func updateContact(_ contact: Contact, in profile: inout IdentityProfile) {
+        let incomingAddressKey = contactAddressKey(for: contact)
+        let primaryIndex: Int?
+        if let index = profile.contacts.firstIndex(where: { $0.id == contact.id }) {
+            primaryIndex = index
+        } else if let index = profile.contacts.firstIndex(where: { $0.fingerprint == contact.fingerprint }) {
+            primaryIndex = index
+        } else if let incomingAddressKey,
+                  let index = profile.contacts.firstIndex(where: { existing in
+                      contactAddressKey(for: existing) == incomingAddressKey
+                  }) {
+            primaryIndex = index
+        } else {
+            primaryIndex = nil
+        }
+
+        guard let primaryIndex else {
+            profile.contacts.append(contact)
+            return
+        }
+
+        let merged = mergeContact(existing: profile.contacts[primaryIndex], incoming: contact)
+        profile.contacts[primaryIndex] = merged
+
+        var duplicateIndices: [Int] = []
+        var duplicateIds: [UUID] = []
+        for (index, existing) in profile.contacts.enumerated() where index != primaryIndex {
+            let sameFingerprint = existing.fingerprint == merged.fingerprint
+            let sameAddress = {
+                guard let mergedAddress = contactAddressKey(for: merged) else {
+                    return false
+                }
+                return contactAddressKey(for: existing) == mergedAddress
+            }()
+            if sameFingerprint || sameAddress {
+                duplicateIndices.append(index)
+                duplicateIds.append(existing.id)
+            }
+        }
+
+        if !duplicateIndices.isEmpty {
+            for index in duplicateIndices.sorted(by: >) {
+                profile.contacts.remove(at: index)
+            }
+            remapProfileContactReferences(from: duplicateIds, to: merged.id, profile: &profile)
+        }
+    }
+
+    private func contactAddressKey(for contact: Contact) -> String? {
+        let inbox = contact.inboxId
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !inbox.isEmpty else {
+            return nil
+        }
+        let relay = contact.relay
+        let host = relay.host
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            .lowercased()
+        return "\(host):\(relay.port):\(relay.useTLS ? 1 : 0):\(relay.transport.rawValue):\(inbox)"
+    }
+
+    private func mergeContact(existing: Contact, incoming: Contact) -> Contact {
+        let trimmedName = incoming.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedName = trimmedName.isEmpty ? existing.displayName : trimmedName
+        let keysChanged = incoming.signingPublicKey != existing.signingPublicKey
+            || incoming.agreementPublicKey != existing.agreementPublicKey
+        let mergedCounter = keysChanged
+            ? incoming.rotationCounter
+            : max(existing.rotationCounter, incoming.rotationCounter)
+        var trustById: [UUID: ContactTrustAssertion] = [:]
+        for assertion in existing.trustAssertions {
+            trustById[assertion.id] = assertion
+        }
+        for assertion in incoming.trustAssertions {
+            trustById[assertion.id] = assertion
+        }
+        let mergedTrust = trustById.values.sorted { lhs, rhs in
+            if lhs.timestamp != rhs.timestamp {
+                return lhs.timestamp < rhs.timestamp
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
+
+        return Contact(
+            id: existing.id,
+            displayName: resolvedName,
+            inboxId: incoming.inboxId,
+            relay: incoming.relay,
+            signingPublicKey: incoming.signingPublicKey,
+            agreementPublicKey: incoming.agreementPublicKey,
+            rotationCounter: mergedCounter,
+            allowIdentityReset: existing.allowIdentityReset || incoming.allowIdentityReset,
+            trustAssertions: mergedTrust
+        )
+    }
+
+    private func remapProfileContactReferences(from oldIds: [UUID], to newId: UUID, profile: inout IdentityProfile) {
+        let staleIds = Set(oldIds.filter { $0 != newId })
+        guard !staleIds.isEmpty else {
+            return
+        }
+
+        var rebuiltConversations: [Conversation] = []
+        for conversation in profile.conversations {
+            let resolvedContactId = staleIds.contains(conversation.contactId) ? newId : conversation.contactId
+            let adjusted = conversationWithContactId(conversation, contactId: resolvedContactId)
+            if let index = rebuiltConversations.firstIndex(where: { $0.contactId == resolvedContactId }) {
+                rebuiltConversations[index] = preferredConversation(
+                    existing: rebuiltConversations[index],
+                    candidate: adjusted
+                )
+            } else {
+                rebuiltConversations.append(adjusted)
+            }
+        }
+        profile.conversations = rebuiltConversations
+
+        for index in profile.groups.indices {
+            let remapped = profile.groups[index].memberContactIds.map { staleIds.contains($0) ? newId : $0 }
+            var seen: Set<UUID> = []
+            profile.groups[index].memberContactIds = remapped.filter { seen.insert($0).inserted }
+        }
+
+        if let activeContactId, staleIds.contains(activeContactId) {
+            self.activeContactId = newId
+        }
+    }
+
+    private func conversationWithContactId(_ conversation: Conversation, contactId: UUID) -> Conversation {
+        guard conversation.contactId != contactId else {
+            return conversation
+        }
+        return Conversation(
+            id: conversation.id,
+            contactId: contactId,
+            sessionId: conversation.sessionId,
+            rootKey: conversation.rootKey,
+            rootCounter: conversation.rootCounter,
+            sendChain: conversation.sendChain,
+            receiveChain: conversation.receiveChain,
+            messages: conversation.messages,
+            unreadCount: conversation.unreadCount,
+            ratchetState: conversation.ratchetState
+        )
+    }
+
+    private func preferredConversation(existing: Conversation, candidate: Conversation) -> Conversation {
+        let existingDate = existing.messages.last?.timestamp ?? Date.distantPast
+        let candidateDate = candidate.messages.last?.timestamp ?? Date.distantPast
+        if existingDate != candidateDate {
+            return candidateDate > existingDate ? candidate : existing
+        }
+        if existing.receiveChain.counter != candidate.receiveChain.counter {
+            return candidate.receiveChain.counter > existing.receiveChain.counter ? candidate : existing
+        }
+        return existing.id <= candidate.id ? existing : candidate
     }
 
     private func resendRecentMessages(contactId: UUID, count: Int, profile: inout IdentityProfile) async {
@@ -2669,13 +5175,78 @@ final class ClientViewModel: ObservableObject {
         guard var conversation = conversation(for: contactId, in: profile) else {
             return
         }
-        let sentMessages = conversation.messages.filter { $0.direction == .sent }
-        guard !sentMessages.isEmpty else { return }
-        let toResend = sentMessages.suffix(count)
-        for message in toResend {
+        if conversation.messages.isEmpty {
+            conversation.messages = storedDirectMessages(profileId: profile.id, contactId: contactId)
+        }
+        var directCandidates: [(timestamp: Date, payload: String)] = []
+        var groupCandidates: [(timestamp: Date, payload: String)] = []
+
+        for message in conversation.messages where message.direction == .sent {
+            guard message.attachment == nil else { continue }
+            directCandidates.append((timestamp: message.timestamp, payload: message.body))
+        }
+
+        let relatedGroups = profile.groups.filter { $0.memberContactIds.contains(contactId) }
+        for var group in relatedGroups {
+            if group.messages.isEmpty {
+                group.messages = storedGroupMessages(profileId: profile.id, groupId: group.id)
+            }
+            let memberFingerprints = groupMemberFingerprints(for: group, profile: profile)
+            guard !memberFingerprints.isEmpty else {
+                continue
+            }
+            for message in group.messages where message.direction == .sent {
+                guard message.attachment == nil else { continue }
+                guard let payload = try? encodeGroupPayload(
+                    groupId: group.id,
+                    groupTitle: group.title,
+                    memberFingerprints: memberFingerprints,
+                    body: message.body
+                ) else {
+                    continue
+                }
+                groupCandidates.append((timestamp: message.timestamp, payload: payload))
+            }
+        }
+
+        let sortedDirect = directCandidates
+            .sorted { lhs, rhs in
+                if lhs.timestamp != rhs.timestamp {
+                    return lhs.timestamp > rhs.timestamp
+                }
+                return lhs.payload < rhs.payload
+            }
+        let sortedGroup = groupCandidates
+            .sorted { lhs, rhs in
+                if lhs.timestamp != rhs.timestamp {
+                    return lhs.timestamp > rhs.timestamp
+                }
+                return lhs.payload < rhs.payload
+            }
+
+        var toResend: [String] = []
+        toResend.reserveCapacity(count)
+        for candidate in sortedDirect {
+            toResend.append(candidate.payload)
+            if toResend.count == count {
+                break
+            }
+        }
+        if toResend.count < count {
+            for candidate in sortedGroup {
+                toResend.append(candidate.payload)
+                if toResend.count == count {
+                    break
+                }
+            }
+        }
+
+        guard !toResend.isEmpty else { return }
+
+        for payload in toResend {
             do {
                 let envelope = try MessageEngine.encrypt(
-                    body: .text(message.body),
+                    body: .text(payload),
                     senderSigningKey: profile.identity.signingKey,
                     senderFingerprint: profile.identity.fingerprint,
                     conversation: &conversation,
@@ -2684,46 +5255,22 @@ final class ClientViewModel: ObservableObject {
                 conversation.markMessageProcessed()
                 try await deliverEnvelope(envelope, to: contact, preferredRelay: profile.relay)
             } catch {
-                lastError = "Resend failed: \(error.localizedDescription)"
-                break
+                continue
             }
         }
         upsertConversation(conversation, in: &profile)
     }
 
     private func deliverEnvelope(_ envelope: Envelope, to contact: Contact, preferredRelay: RelayEndpoint) async throws {
+        let destinationRelay = reachableRelayEndpoint(contact.relay, preferredRelay: preferredRelay)
         try await SessionRecovery.deliver(
             envelope: envelope,
             inboxId: contact.inboxId,
             preferredRelay: preferredRelay,
-            destinationRelay: contact.relay,
+            destinationRelay: destinationRelay,
             preferredRelayAuthToken: relayAuthToken(for: preferredRelay),
-            destinationRelayAuthToken: relayAuthToken(for: contact.relay)
+            destinationRelayAuthToken: relayAuthToken(for: destinationRelay)
         )
-    }
-
-    private func markRecentSentMessagesAsMismatch(conversation: inout Conversation, count: Int) {
-        guard count > 0 else { return }
-        var remaining = count
-        for index in conversation.messages.indices.reversed() {
-            let message = conversation.messages[index]
-            guard message.direction == .sent else { continue }
-            if !message.isMismatch {
-                conversation.messages[index] = Message(
-                    id: message.id,
-                    direction: message.direction,
-                    body: message.body,
-                    timestamp: message.timestamp,
-                    counter: message.counter,
-                    isMismatch: true,
-                    attachment: message.attachment
-                )
-            }
-            remaining -= 1
-            if remaining == 0 {
-                break
-            }
-        }
     }
 
     private enum AttachmentQuotaDirection {
@@ -2739,25 +5286,84 @@ final class ClientViewModel: ObservableObject {
         case avif
     }
 
+    private enum SupportedAudioFormat {
+        case m4a
+        case aac
+        case wav
+        case caf
+        case mp3
+        case ogg
+
+        var mimeType: String {
+            switch self {
+            case .m4a:
+                return "audio/m4a"
+            case .aac:
+                return "audio/aac"
+            case .wav:
+                return "audio/wav"
+            case .caf:
+                return "audio/x-caf"
+            case .mp3:
+                return "audio/mpeg"
+            case .ogg:
+                return "audio/ogg"
+            }
+        }
+
+        var fileExtension: String {
+            switch self {
+            case .m4a:
+                return "m4a"
+            case .aac:
+                return "aac"
+            case .wav:
+                return "wav"
+            case .caf:
+                return "caf"
+            case .mp3:
+                return "mp3"
+            case .ogg:
+                return "ogg"
+            }
+        }
+    }
+
     private func prepareAttachmentPayload(
         data: Data,
         fileName: String?,
         mimeType: String
     ) throws -> (data: Data, fileName: String?, mimeType: String) {
         let normalizedMime = normalizeMimeType(mimeType)
-        guard normalizedMime.hasPrefix("image/"), detectSupportedImageFormat(data) != nil else {
-            throw AttachmentTransferError.unsupportedType
+        if normalizedMime.hasPrefix("image/") {
+            guard detectSupportedImageFormat(data) != nil else {
+                throw AttachmentTransferError.unsupportedType
+            }
+            try validateImageInputDimensions(data)
+            guard let canonicalJPEG = transcodeImageToCanonicalJPEG(data) else {
+                throw AttachmentTransferError.imageProcessingFailed
+            }
+            var updatedName = fileName
+            if let fileName, !fileName.isEmpty {
+                let base = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
+                updatedName = "\(base).jpg"
+            }
+            return (canonicalJPEG, updatedName, "image/jpeg")
         }
-        try validateImageInputDimensions(data)
-        guard let canonicalJPEG = transcodeImageToCanonicalJPEG(data) else {
-            throw AttachmentTransferError.imageProcessingFailed
+
+        guard normalizedMime.hasPrefix("audio/"),
+              let audioFormat = detectSupportedAudioFormat(data, normalizedMimeType: normalizedMime) else {
+            throw AttachmentTransferError.unsupportedType
         }
         var updatedName = fileName
         if let fileName, !fileName.isEmpty {
             let base = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
-            updatedName = "\(base).jpg"
+            updatedName = "\(base).\(audioFormat.fileExtension)"
         }
-        return (canonicalJPEG, updatedName, "image/jpeg")
+        if updatedName == nil || updatedName?.isEmpty == true {
+            updatedName = "voice.\(audioFormat.fileExtension)"
+        }
+        return (data, updatedName, audioFormat.mimeType)
     }
 
     private func validateInboundAttachmentDescriptor(_ descriptor: AttachmentDescriptor) throws {
@@ -2780,8 +5386,80 @@ final class ClientViewModel: ObservableObject {
         guard descriptor.sha256.count == 32 else {
             throw AttachmentTransferError.invalidDescriptor
         }
-        guard normalizeMimeType(descriptor.mimeType).hasPrefix("image/") else {
+        let normalizedMime = normalizeMimeType(descriptor.mimeType)
+        let isImage = normalizedMime.hasPrefix("image/")
+        let isAudio = normalizedMime.hasPrefix("audio/") && isSupportedAudioMimeType(normalizedMime)
+        guard isImage || isAudio else {
             throw AttachmentTransferError.unsupportedType
+        }
+    }
+
+    private func attachmentDisplayTitle(_ descriptor: AttachmentDescriptor, fallback: String) -> String {
+        if let fileName = descriptor.fileName, !fileName.isEmpty {
+            return fileName
+        }
+        let normalizedMime = normalizeMimeType(descriptor.mimeType)
+        if normalizedMime.hasPrefix("audio/") {
+            return "Voice message"
+        }
+        if normalizedMime.hasPrefix("image/") {
+            return "Image"
+        }
+        return fallback
+    }
+
+    private func isSupportedAudioMimeType(_ normalizedMime: String) -> Bool {
+        switch normalizedMime {
+        case "audio/m4a", "audio/mp4", "audio/aac", "audio/wav", "audio/x-wav", "audio/x-caf", "audio/mpeg", "audio/mp3", "audio/ogg":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func detectSupportedAudioFormat(_ data: Data, normalizedMimeType: String) -> SupportedAudioFormat? {
+        let bytes = [UInt8](data.prefix(16))
+        if bytes.count >= 12,
+           bytes[4] == 0x66, bytes[5] == 0x74, bytes[6] == 0x79, bytes[7] == 0x70 {
+            return .m4a
+        }
+        if bytes.count >= 12,
+           bytes[0] == 0x52, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x46,
+           bytes[8] == 0x57, bytes[9] == 0x41, bytes[10] == 0x56, bytes[11] == 0x45 {
+            return .wav
+        }
+        if bytes.count >= 4,
+           bytes[0] == 0x63, bytes[1] == 0x61, bytes[2] == 0x66, bytes[3] == 0x66 {
+            return .caf
+        }
+        if bytes.count >= 3,
+           bytes[0] == 0x49, bytes[1] == 0x44, bytes[2] == 0x33 {
+            return .mp3
+        }
+        if bytes.count >= 2,
+           bytes[0] == 0xFF,
+           (bytes[1] & 0xF0) == 0xF0 {
+            return .aac
+        }
+        if bytes.count >= 4,
+           bytes[0] == 0x4F, bytes[1] == 0x67, bytes[2] == 0x67, bytes[3] == 0x53 {
+            return .ogg
+        }
+        switch normalizedMimeType {
+        case "audio/m4a", "audio/mp4":
+            return .m4a
+        case "audio/wav", "audio/x-wav":
+            return .wav
+        case "audio/x-caf":
+            return .caf
+        case "audio/mpeg", "audio/mp3":
+            return .mp3
+        case "audio/aac":
+            return .aac
+        case "audio/ogg":
+            return .ogg
+        default:
+            return nil
         }
     }
 
@@ -2992,6 +5670,45 @@ final class ClientViewModel: ObservableObject {
         return nil
     }
 
+    private func sanitizeAppLock(_ settings: AppLockSettings) -> AppLockSettings {
+        var updated = settings
+        updated.lockScreenMessage = normalizedLockScreenMessage(updated.lockScreenMessage)
+        if !biometricsAvailable {
+            switch updated.mode {
+            case .biometricsAndPin:
+                updated.mode = updated.isPinConfigured ? .pinOnly : .off
+            case .biometrics:
+                updated.mode = updated.isPinConfigured ? .pinOnly : .off
+            case .pinOnly, .off:
+                break
+            }
+        }
+        return updated
+    }
+
+    private func sanitizeAppLockForBiometricAvailability() -> Bool {
+        let updated = sanitizeAppLock(state.appLock)
+        guard updated != state.appLock else {
+            return false
+        }
+        state.appLock = updated
+        return true
+    }
+
+    func refreshBiometricAvailability() {
+        biometricsAvailable = ClientViewModel.detectBiometricAvailability()
+    }
+
+    private static func detectBiometricAvailability() -> Bool {
+        #if canImport(LocalAuthentication)
+        let context = LAContext()
+        var error: NSError?
+        return context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
+        #else
+        return false
+        #endif
+    }
+
     private func shouldLockForTimeout() -> Bool {
         let minutes = state.appLock.sessionTimeoutMinutes
         if minutes <= 0 {
@@ -3027,22 +5744,795 @@ final class ClientViewModel: ObservableObject {
         String(pin.filter { $0.isNumber }.prefix(6))
     }
 
+    private func normalizedLockScreenMessage(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(trimmed.prefix(140))
+    }
+
+    private func unlockPinMatches(_ pin: String) -> Bool {
+        guard let salt = state.appLock.pinSalt, let hash = state.appLock.pinHash else {
+            return false
+        }
+        return pinMatches(pin, salt: salt, hash: hash)
+    }
+
     private func pinMatches(_ pin: String, salt: Data?, hash: Data?) -> Bool {
         guard let salt, let hash else { return false }
-        return pinHash(pin: pin, salt: salt) == hash
+        let normalized = normalizedPin(pin)
+        guard normalized.count == 6 else {
+            return false
+        }
+        if let parsed = parseStructuredPinHash(hash) {
+            let digest = stretchedPinDigest(pin: normalized, salt: salt, rounds: parsed.rounds)
+            return secureCompare(digest, parsed.digest)
+        }
+        return false
     }
 
     private func pinMatchesActionPin(_ pin: String) -> Bool {
-        pinMatches(pin, salt: state.appLock.burnPinSalt, hash: state.appLock.burnPinHash)
-            || pinMatches(pin, salt: state.appLock.clearChatsPinSalt, hash: state.appLock.clearChatsPinHash)
+        pinMatchesAnyActionPlan(pin, excluding: nil)
     }
 
-    private func pinMatchesOtherActionPin(_ pin: String, action: AppLockPinAction) -> Bool {
-        switch action {
-        case .burnIdentity:
-            return pinMatches(pin, salt: state.appLock.clearChatsPinSalt, hash: state.appLock.clearChatsPinHash)
-        case .clearChats:
-            return pinMatches(pin, salt: state.appLock.burnPinSalt, hash: state.appLock.burnPinHash)
+    private func pinMatchesAnyActionPlan(_ pin: String, excluding planId: UUID?) -> Bool {
+        state.appLock.actionPlans.contains { plan in
+            if let planId, plan.id == planId {
+                return false
+            }
+            return pinMatches(pin, salt: plan.pinSalt, hash: plan.pinHash)
+        }
+    }
+
+    private func recordFailedPinAttempt() {
+        pinFailedAttempts += 1
+        guard pinFailedAttempts >= pinLockoutThreshold else {
+            return
+        }
+        let exponent = min(10, pinFailedAttempts - pinLockoutThreshold)
+        let delay = min(pinLockoutMaxSeconds, pinLockoutBaseSeconds * (1 << exponent))
+        pinLockedUntil = Date().addingTimeInterval(TimeInterval(delay))
+    }
+
+    private func clearPinAttemptState() {
+        pinFailedAttempts = 0
+        pinLockedUntil = nil
+    }
+
+    private func normalizeActionOperations(_ operations: [AppLockActionOperation]) -> [AppLockActionOperation] {
+        operations.map { operation in
+            AppLockActionOperation(
+                id: operation.id,
+                kind: operation.kind,
+                identityIds: Array(Set(operation.identityIds)),
+                groupIds: Array(Set(operation.groupIds)),
+                contactIds: Array(Set(operation.contactIds)),
+                chatContactIds: Array(Set(operation.chatContactIds))
+            )
+        }
+    }
+
+    private func sanitizeActionPlans() -> Bool {
+        var didChange = false
+        var sanitizedPlans: [AppLockActionPlan] = []
+        for plan in state.appLock.actionPlans {
+            let supportedOperations = normalizeActionOperations(plan.operations)
+            if supportedOperations.isEmpty {
+                didChange = true
+                continue
+            }
+            if supportedOperations != plan.operations {
+                didChange = true
+            }
+            sanitizedPlans.append(
+                AppLockActionPlan(
+                    id: plan.id,
+                    label: plan.label,
+                    pinSalt: plan.pinSalt,
+                    pinHash: plan.pinHash,
+                    operations: supportedOperations,
+                    createdAt: plan.createdAt
+                )
+            )
+        }
+        if sanitizedPlans != state.appLock.actionPlans {
+            state.appLock.actionPlans = sanitizedPlans
+            didChange = true
+        }
+        return didChange
+    }
+
+    private func executeActionPlan(_ plan: AppLockActionPlan, pin: String) async {
+        var didRequestCorruption = false
+        for operation in plan.operations {
+            switch operation.kind {
+            case .appReset:
+                await performAppResetOperation()
+            case .burnIdentities:
+                await burnIdentityProfiles(operation.identityIds)
+            case .deleteGroups:
+                await deleteGroups(operation.groupIds)
+            case .deleteIdentities:
+                await deleteIdentityProfiles(operation.identityIds)
+            case .appCorruption:
+                didRequestCorruption = true
+                applyInMemoryCorruption()
+            case .throwAround:
+                await performThrowAroundOperation()
+            case .deleteChats:
+                await deleteChats(contactIds: operation.chatContactIds, groupIds: operation.groupIds)
+            case .deleteContacts:
+                await deleteContacts(operation.contactIds)
+            case .wipePhotos:
+                await wipeAttachments(imageOnly: true)
+            case .wipeDocuments:
+                await wipeAttachments(imageOnly: false)
+                deleteAllLocalDocuments()
+            }
+        }
+        await promoteUsedActionPinToUnlock(pin, consumedPlanId: plan.id)
+        if didRequestCorruption {
+            injectPersistedCorruption()
+            crashNow("Noctyra storage was intentionally corrupted and this install can no longer be reopened.")
+        } else {
+            lastInfo = "Action plan executed."
+        }
+    }
+
+    private func promoteUsedActionPinToUnlock(_ normalizedPin: String, consumedPlanId: UUID? = nil) async {
+        let salt = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
+        state.appLock.pinSalt = salt
+        state.appLock.pinHash = pinHash(pin: normalizedPin, salt: salt)
+        if let consumedPlanId {
+            state.appLock.actionPlans.removeAll { $0.id == consumedPlanId }
+        }
+        await save()
+    }
+
+    private func performAppResetOperation() async {
+        stopAutoFetch()
+        removeAllAttachmentsFromDisk()
+        try? FileManager.default.removeItem(at: stateFileURL)
+        try? FileManager.default.removeItem(at: corruptionKillSwitchURL)
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: ClientViewModel.storageModeKey)
+        storageProtectionMode = .keychain
+        requiresStorageChoice = true
+        isLocked = false
+        lastInactiveAt = nil
+        activeContactId = nil
+        activeGroupId = nil
+        insecureAnnouncements = []
+        insecureRequests = []
+        insecureLastAnnounceAt = nil
+        insecureLastListAt = nil
+        insecureLastRequestFetchAt = nil
+        insecureLastPeerCount = 0
+        insecureLastRequestCount = 0
+        insecureLastError = nil
+        insecureLastRelay = nil
+        insecureLastSelfTestAt = nil
+        insecureLastSelfTestResult = nil
+        insecureSelfTestStep = nil
+        pendingOutboundPairRequestFingerprints.removeAll()
+
+        let identity = Identity(displayName: "Setup Required")
+        let relay = RelayEndpoint(host: "127.0.0.1", port: 9339)
+        let relayRecord = RelayServerRecord(name: "Local Relay", endpoint: relay)
+        let profile = makeIdentityProfile(displayName: identity.displayName, relay: relay, relayId: relayRecord.id)
+        state.identityProfiles = [profile]
+        state.activeIdentityId = profile.id
+        state.relayServers = [relayRecord]
+        state.selectedRelayId = relayRecord.id
+        state.relay = relay
+        state.contacts = []
+        state.conversations = []
+        state.groups = []
+        state.masterServerSources = []
+        state.insecurePairing = InsecurePairingSettings()
+        state.appearance = AppearanceSettings()
+        state.privacy = PrivacySettings()
+        state.hasCompletedOnboarding = false
+        state.hasAcceptedPrivacyPolicy = false
+        state.hasAcceptedTermsOfUse = false
+        requiresOnboarding = true
+    }
+
+    private func burnIdentityProfiles(_ ids: [UUID]) async {
+        let targetIds = ids.isEmpty ? [state.activeIdentityId] : ids
+        for id in targetIds {
+            burnIdentityProfileLocally(id)
+        }
+    }
+
+    private func burnIdentityProfileLocally(_ profileId: UUID) {
+        guard var profile = state.identityProfile(id: profileId) else {
+            return
+        }
+        for conversation in profile.conversations {
+            let messages = conversation.messages.isEmpty
+                ? storedDirectMessages(profileId: profileId, contactId: conversation.contactId)
+                : conversation.messages
+            removeAttachmentFiles(from: messages)
+        }
+        for group in profile.groups {
+            let messages = group.messages.isEmpty
+                ? storedGroupMessages(profileId: profileId, groupId: group.id)
+                : group.messages
+            removeAttachmentFiles(from: messages)
+        }
+        try? threadMessageStore.deleteAllMessages(profileId: profileId)
+        let oldFingerprint = profile.identity.fingerprint
+        let oldDisplayName = profile.identity.displayName
+        let replacement = Identity(displayName: oldDisplayName)
+        let replacementInboxAccessKey = SigningKeyPair()
+        profile.identity = replacement
+        profile.inboxAccessKey = replacementInboxAccessKey
+        profile.inboxId = InboxAddress.derived(from: replacementInboxAccessKey.publicKeyData)
+        profile.contacts.removeAll()
+        profile.conversations.removeAll()
+        profile.groups.removeAll()
+        profile.prekeys = (try? PrekeyState.generate(identity: replacement, oneTimeCount: prekeyTargetCount)) ?? profile.prekeys
+        state.updateIdentityProfile(profile)
+        recordContinuityEvent(
+            kind: .identityBurned,
+            oldFingerprint: oldFingerprint,
+            newFingerprint: replacement.fingerprint,
+            profileId: profileId
+        )
+    }
+
+    private func deleteGroups(_ groupIds: [UUID]) async {
+        let ids = Set(groupIds)
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            purgeAttachmentDecryptionMemory(groupId: id)
+        }
+        for profileIndex in state.identityProfiles.indices {
+            let profileId = state.identityProfiles[profileIndex].id
+            for group in state.identityProfiles[profileIndex].groups where ids.contains(group.id) {
+                let messages = group.messages.isEmpty
+                    ? storedGroupMessages(profileId: profileId, groupId: group.id)
+                    : group.messages
+                removeAttachmentFiles(from: messages)
+                try? threadMessageStore.deleteGroupMessages(profileId: profileId, groupId: group.id)
+            }
+            state.identityProfiles[profileIndex].groups.removeAll { ids.contains($0.id) }
+        }
+        if let activeGroupId, ids.contains(activeGroupId) {
+            self.activeGroupId = nil
+        }
+    }
+
+    private func deleteIdentityProfiles(_ profileIds: [UUID]) async {
+        let ids = Set(profileIds)
+        guard !ids.isEmpty else { return }
+        for profile in state.identityProfiles where ids.contains(profile.id) {
+            for conversation in profile.conversations {
+                let messages = conversation.messages.isEmpty
+                    ? storedDirectMessages(profileId: profile.id, contactId: conversation.contactId)
+                    : conversation.messages
+                removeAttachmentFiles(from: messages)
+            }
+            for group in profile.groups {
+                let messages = group.messages.isEmpty
+                    ? storedGroupMessages(profileId: profile.id, groupId: group.id)
+                    : group.messages
+                removeAttachmentFiles(from: messages)
+            }
+            try? threadMessageStore.deleteAllMessages(profileId: profile.id)
+        }
+        state.identityProfiles.removeAll { ids.contains($0.id) }
+        ensureValidActiveIdentityAfterDestructiveChanges()
+    }
+
+    private func performThrowAroundOperation() async {
+        removeAllAttachmentsFromDisk()
+        let relaySelection = state.relayServers.first
+        let relay = relaySelection?.endpoint ?? RelayEndpoint(host: "127.0.0.1", port: 9339)
+        let relayId = relaySelection?.id
+        let profile = makeIdentityProfile(displayName: "Cover \(Int.random(in: 1000...9999))", relay: relay, relayId: relayId)
+        var mutated = profile
+        for index in 1...3 {
+            let fake = Identity(displayName: "Node \(index)")
+            let contact = Contact(
+                displayName: fake.displayName,
+                inboxId: InboxAddress.generate(),
+                relay: relay,
+                signingPublicKey: fake.signingKey.publicKeyData,
+                agreementPublicKey: fake.agreementKey.publicKeyData
+            )
+            mutated.contacts.append(contact)
+            var conversation: Conversation
+            if let session = try? MessageEngine.createOutboundSession(identity: mutated.identity, contact: contact) {
+                conversation = session.conversation
+            } else {
+                conversation = Conversation(
+                    id: UUID().uuidString,
+                    contactId: contact.id,
+                    sessionId: UUID().uuidString,
+                    sendChain: ChainKeyState(keyData: Data(repeating: 0x23, count: 32)),
+                    receiveChain: ChainKeyState(keyData: Data(repeating: 0x42, count: 32))
+                )
+            }
+            conversation.messages = [
+                Message(
+                    direction: .received,
+                    senderDisplayName: contact.displayName,
+                    body: randomBogusText(),
+                    timestamp: Date(),
+                    counter: 0
+                ),
+                Message(
+                    direction: .sent,
+                    senderDisplayName: mutated.identity.displayName,
+                    body: randomBogusText(),
+                    timestamp: Date(),
+                    counter: 1
+                )
+            ]
+            mutated.conversations.append(conversation)
+        }
+        state.identityProfiles = [mutated]
+        state.activeIdentityId = mutated.id
+        state.hasCompletedOnboarding = true
+        state.hasAcceptedPrivacyPolicy = true
+        state.hasAcceptedTermsOfUse = true
+        requiresOnboarding = false
+    }
+
+    private func deleteChats(contactIds: [UUID], groupIds: [UUID]) async {
+        let directIds = Set(contactIds)
+        let relayGroupIds = Set(groupIds)
+        for profileIndex in state.identityProfiles.indices {
+            let profileId = state.identityProfiles[profileIndex].id
+            for conversationIndex in state.identityProfiles[profileIndex].conversations.indices {
+                if directIds.contains(state.identityProfiles[profileIndex].conversations[conversationIndex].contactId) {
+                    let contactId = state.identityProfiles[profileIndex].conversations[conversationIndex].contactId
+                    let messages = state.identityProfiles[profileIndex].conversations[conversationIndex].messages.isEmpty
+                        ? storedDirectMessages(profileId: profileId, contactId: contactId)
+                        : state.identityProfiles[profileIndex].conversations[conversationIndex].messages
+                    removeAttachmentFiles(from: messages)
+                    state.identityProfiles[profileIndex].conversations[conversationIndex].messages.removeAll()
+                    state.identityProfiles[profileIndex].conversations[conversationIndex].unreadCount = 0
+                    try? threadMessageStore.deleteDirectMessages(profileId: profileId, contactId: contactId)
+                }
+            }
+            for groupIndex in state.identityProfiles[profileIndex].groups.indices {
+                if relayGroupIds.contains(state.identityProfiles[profileIndex].groups[groupIndex].id) {
+                    let groupId = state.identityProfiles[profileIndex].groups[groupIndex].id
+                    let messages = state.identityProfiles[profileIndex].groups[groupIndex].messages.isEmpty
+                        ? storedGroupMessages(profileId: profileId, groupId: groupId)
+                        : state.identityProfiles[profileIndex].groups[groupIndex].messages
+                    removeAttachmentFiles(from: messages)
+                    state.identityProfiles[profileIndex].groups[groupIndex].messages.removeAll()
+                    state.identityProfiles[profileIndex].groups[groupIndex].unreadCount = 0
+                    try? threadMessageStore.deleteGroupMessages(profileId: profileId, groupId: groupId)
+                }
+            }
+        }
+    }
+
+    private func deleteContacts(_ contactIds: [UUID]) async {
+        let ids = Set(contactIds)
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            purgeAttachmentDecryptionMemory(contactId: id)
+        }
+        for profileIndex in state.identityProfiles.indices {
+            let profileId = state.identityProfiles[profileIndex].id
+            for conversation in state.identityProfiles[profileIndex].conversations where ids.contains(conversation.contactId) {
+                let messages = conversation.messages.isEmpty
+                    ? storedDirectMessages(profileId: profileId, contactId: conversation.contactId)
+                    : conversation.messages
+                removeAttachmentFiles(from: messages)
+                try? threadMessageStore.deleteDirectMessages(profileId: profileId, contactId: conversation.contactId)
+            }
+            let removedGroupIds = state.identityProfiles[profileIndex].groups
+                .filter { group in
+                    let remainingMembers = Set(group.memberContactIds).subtracting(ids)
+                    return remainingMembers.count < 2
+                }
+                .map(\.id)
+            state.identityProfiles[profileIndex].contacts.removeAll { ids.contains($0.id) }
+            state.identityProfiles[profileIndex].conversations.removeAll { ids.contains($0.contactId) }
+            for groupIndex in state.identityProfiles[profileIndex].groups.indices {
+                state.identityProfiles[profileIndex].groups[groupIndex].memberContactIds.removeAll { ids.contains($0) }
+            }
+            state.identityProfiles[profileIndex].groups.removeAll { $0.memberContactIds.count < 2 }
+            for groupId in removedGroupIds {
+                let messages = storedGroupMessages(profileId: profileId, groupId: groupId)
+                removeAttachmentFiles(from: messages)
+                try? threadMessageStore.deleteGroupMessages(profileId: profileId, groupId: groupId)
+            }
+        }
+    }
+
+    private func wipeAttachments(imageOnly: Bool) async {
+        for profileIndex in state.identityProfiles.indices {
+            let profileId = state.identityProfiles[profileIndex].id
+            for conversationIndex in state.identityProfiles[profileIndex].conversations.indices {
+                let contactId = state.identityProfiles[profileIndex].conversations[conversationIndex].contactId
+                let inMemoryMessages = state.identityProfiles[profileIndex].conversations[conversationIndex].messages
+                let originalMessages = inMemoryMessages.isEmpty
+                    ? storedDirectMessages(profileId: profileId, contactId: contactId)
+                    : inMemoryMessages
+                let updatedMessages = originalMessages.map { message in
+                    guard let attachment = message.attachment else {
+                        return message
+                    }
+                    let isImage = attachment.descriptor.mimeType.lowercased().hasPrefix("image/")
+                    guard imageOnly ? isImage : !isImage else {
+                        return message
+                    }
+                    if let fileName = attachment.localFileName {
+                        try? attachmentStore.deleteAttachment(fileName: fileName)
+                    }
+                    return Message(
+                        id: message.id,
+                        direction: message.direction,
+                        senderDisplayName: message.senderDisplayName,
+                        body: message.body,
+                        timestamp: message.timestamp,
+                        counter: message.counter,
+                        isMismatch: message.isMismatch,
+                        attachment: nil
+                    )
+                }
+                if inMemoryMessages.isEmpty {
+                    try? threadMessageStore.saveDirectMessages(updatedMessages, profileId: profileId, contactId: contactId)
+                } else {
+                    state.identityProfiles[profileIndex].conversations[conversationIndex].messages = updatedMessages
+                }
+            }
+            for groupIndex in state.identityProfiles[profileIndex].groups.indices {
+                let groupId = state.identityProfiles[profileIndex].groups[groupIndex].id
+                let inMemoryMessages = state.identityProfiles[profileIndex].groups[groupIndex].messages
+                let originalMessages = inMemoryMessages.isEmpty
+                    ? storedGroupMessages(profileId: profileId, groupId: groupId)
+                    : inMemoryMessages
+                let updatedMessages = originalMessages.map { message in
+                    guard let attachment = message.attachment else {
+                        return message
+                    }
+                    let isImage = attachment.descriptor.mimeType.lowercased().hasPrefix("image/")
+                    guard imageOnly ? isImage : !isImage else {
+                        return message
+                    }
+                    if let fileName = attachment.localFileName {
+                        try? attachmentStore.deleteAttachment(fileName: fileName)
+                    }
+                    return Message(
+                        id: message.id,
+                        direction: message.direction,
+                        senderDisplayName: message.senderDisplayName,
+                        body: message.body,
+                        timestamp: message.timestamp,
+                        counter: message.counter,
+                        isMismatch: message.isMismatch,
+                        attachment: nil
+                    )
+                }
+                if inMemoryMessages.isEmpty {
+                    try? threadMessageStore.saveGroupMessages(updatedMessages, profileId: profileId, groupId: groupId)
+                } else {
+                    state.identityProfiles[profileIndex].groups[groupIndex].messages = updatedMessages
+                }
+            }
+        }
+    }
+
+    private func applyInMemoryCorruption() {
+        for profileIndex in state.identityProfiles.indices {
+            state.identityProfiles[profileIndex].identity.displayName = "corrupt-\(Int.random(in: 10000...99999))"
+            for contactIndex in state.identityProfiles[profileIndex].contacts.indices {
+                state.identityProfiles[profileIndex].contacts[contactIndex].displayName = "bogus-\(Int.random(in: 1000...9999))"
+                state.identityProfiles[profileIndex].contacts[contactIndex].inboxId = InboxAddress.generate()
+            }
+            for conversationIndex in state.identityProfiles[profileIndex].conversations.indices {
+                state.identityProfiles[profileIndex].conversations[conversationIndex].messages =
+                    state.identityProfiles[profileIndex].conversations[conversationIndex].messages.map { message in
+                        Message(
+                            id: message.id,
+                            direction: message.direction,
+                            senderDisplayName: message.senderDisplayName,
+                            body: randomBogusText(),
+                            timestamp: message.timestamp,
+                            counter: message.counter,
+                            isMismatch: message.isMismatch,
+                            attachment: message.attachment
+                        )
+                    }
+            }
+            for groupIndex in state.identityProfiles[profileIndex].groups.indices {
+                state.identityProfiles[profileIndex].groups[groupIndex].title = "ghost-\(Int.random(in: 100...999))"
+                state.identityProfiles[profileIndex].groups[groupIndex].messages =
+                    state.identityProfiles[profileIndex].groups[groupIndex].messages.map { message in
+                        Message(
+                            id: message.id,
+                            direction: message.direction,
+                            senderDisplayName: message.senderDisplayName,
+                            body: randomBogusText(),
+                            timestamp: message.timestamp,
+                            counter: message.counter,
+                            isMismatch: message.isMismatch,
+                            attachment: message.attachment
+                        )
+                    }
+            }
+        }
+    }
+
+    private func injectPersistedCorruption() {
+        let fileManager = FileManager.default
+        let supportDirectory = stateFileURL.deletingLastPathComponent()
+        try? fileManager.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+        let marker = "NOCTYRA_CORRUPTED_V1\n\(Date().timeIntervalSince1970)"
+        try? marker.data(using: .utf8)?.write(to: corruptionKillSwitchURL, options: [.atomic])
+        let bogusState = Data((0..<2048).map { _ in UInt8.random(in: 0...255) })
+        try? bogusState.write(to: stateFileURL, options: [.atomic])
+        if let files = try? fileManager.contentsOfDirectory(at: attachmentDirectory, includingPropertiesForKeys: nil) {
+            for file in files {
+                let garbage = Data((0..<1024).map { _ in UInt8.random(in: 0...255) })
+                try? garbage.write(to: file, options: [.atomic])
+            }
+        }
+        let bogusDocument = supportDirectory.appendingPathComponent("bogus-\(UUID().uuidString).bin")
+        let bogusPayload = Data((0..<4096).map { _ in UInt8.random(in: 0...255) })
+        try? bogusPayload.write(to: bogusDocument, options: [.atomic])
+    }
+
+    private func enforceCorruptionKillSwitchIfNeeded() {
+        ClientViewModel.enforceCorruptionKillSwitchIfNeeded(at: corruptionKillSwitchURL)
+    }
+
+    private static func enforceCorruptionKillSwitchIfNeeded(at url: URL) {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return
+        }
+        crashNow("Noctyra storage is intentionally corrupted and cannot be reopened.")
+    }
+
+    @inline(never)
+    private func crashNow(_ message: String) -> Never {
+        ClientViewModel.crashNow(message)
+    }
+
+    @inline(never)
+    private static func crashNow(_ message: String) -> Never {
+        fputs("[Noctyra] \(message)\n", stderr)
+        fflush(stderr)
+        raise(SIGABRT)
+        Darwin.abort()
+    }
+
+    private func randomBogusText() -> String {
+        let source = "abcdefghijklmnopqrstuvwxyz0123456789"
+        let length = Int.random(in: 16...48)
+        return String((0..<length).map { _ in source.randomElement() ?? "x" })
+    }
+
+    private func removeAttachmentFiles(from messages: [Message]) {
+        for message in messages {
+            if let fileName = message.attachment?.localFileName {
+                decryptedAttachmentCache[fileName]?.wipe()
+                decryptedAttachmentCache.removeValue(forKey: fileName)
+                decryptedAttachmentScopes.removeValue(forKey: fileName)
+                try? attachmentStore.deleteAttachment(fileName: fileName)
+            }
+        }
+    }
+
+    private func removeAllAttachmentsFromDisk() {
+        purgeAllAttachmentDecryptionMemory()
+        if FileManager.default.fileExists(atPath: attachmentDirectory.path) {
+            try? FileManager.default.removeItem(at: attachmentDirectory)
+        }
+        if FileManager.default.fileExists(atPath: threadMessageDirectory.path) {
+            try? FileManager.default.removeItem(at: threadMessageDirectory)
+        }
+    }
+
+    private func ensureValidActiveIdentityAfterDestructiveChanges() {
+        if state.identityProfiles.isEmpty {
+            let relaySelection = state.relayServers.first
+            let relay = relaySelection?.endpoint ?? RelayEndpoint(host: "127.0.0.1", port: 9339)
+            let replacement = makeIdentityProfile(
+                displayName: "Recovered Identity",
+                relay: relay,
+                relayId: relaySelection?.id
+            )
+            state.identityProfiles = [replacement]
+            state.activeIdentityId = replacement.id
+            return
+        }
+        if let active = state.identityProfiles.first(where: { $0.id == state.activeIdentityId }), !active.isArchived {
+            return
+        }
+        if let next = state.identityProfiles.first(where: { !$0.isArchived }) {
+            state.activeIdentityId = next.id
+        } else if let first = state.identityProfiles.first {
+            state.activeIdentityId = first.id
+        }
+    }
+
+    private func makeIdentityProfile(displayName: String, relay: RelayEndpoint, relayId: UUID?) -> IdentityProfile {
+        let identity = Identity(displayName: displayName)
+        let inboxAccessKey = SigningKeyPair()
+        let inboxId = InboxAddress.derived(from: inboxAccessKey.publicKeyData)
+        let prekeys = (try? PrekeyState.generate(identity: identity, oneTimeCount: prekeyTargetCount)) ?? PrekeyState(
+            signedPrekeyId: UUID(),
+            signedPrekeyPublicKey: Data(),
+            signedPrekeyPrivateKey: Data(),
+            signedPrekeySignature: Data(),
+            signedPrekeyIssuedAt: Date(),
+            oneTimePrekeys: []
+        )
+        return IdentityProfile(
+            identity: identity,
+            inboxId: inboxId,
+            inboxAccessKey: inboxAccessKey,
+            relay: relay,
+            selectedRelayId: relayId,
+            prekeys: prekeys
+        )
+    }
+
+    private func persistAllThreadMessagesFromState(_ snapshot: ClientState) throws {
+        for profile in snapshot.identityProfiles {
+            for conversation in profile.conversations {
+                // Conversations are frequently evicted from RAM for privacy. Avoid
+                // clobbering persisted thread files with empty arrays during generic saves.
+                guard !conversation.messages.isEmpty else {
+                    continue
+                }
+                try threadMessageStore.saveDirectMessages(
+                    conversation.messages,
+                    profileId: profile.id,
+                    contactId: conversation.contactId
+                )
+            }
+            for group in profile.groups {
+                // Same rule for group threads: only write when RAM currently holds messages.
+                guard !group.messages.isEmpty else {
+                    continue
+                }
+                try threadMessageStore.saveGroupMessages(
+                    group.messages,
+                    profileId: profile.id,
+                    groupId: group.id
+                )
+            }
+        }
+    }
+
+    private func strippedStateForPersistence(_ snapshot: ClientState) -> ClientState {
+        var copy = snapshot
+        for profileIndex in copy.identityProfiles.indices {
+            for conversationIndex in copy.identityProfiles[profileIndex].conversations.indices {
+                copy.identityProfiles[profileIndex].conversations[conversationIndex].messages.removeAll()
+            }
+            for groupIndex in copy.identityProfiles[profileIndex].groups.indices {
+                copy.identityProfiles[profileIndex].groups[groupIndex].messages.removeAll()
+            }
+        }
+        return copy
+    }
+
+    private func loadConversationMessagesIntoRAM(contactId: UUID) {
+        guard var conversation = state.conversation(for: contactId) else {
+            return
+        }
+        guard conversation.messages.isEmpty else {
+            return
+        }
+        let messages = (try? threadMessageStore.loadDirectMessages(
+            profileId: state.activeIdentityId,
+            contactId: contactId
+        )) ?? []
+        if !messages.isEmpty {
+            conversation.messages = messages
+            state.upsert(conversation: conversation)
+        }
+    }
+
+    private func loadGroupMessagesIntoRAM(groupId: UUID) {
+        guard var group = state.group(for: groupId) else {
+            return
+        }
+        guard group.messages.isEmpty else {
+            return
+        }
+        let messages = (try? threadMessageStore.loadGroupMessages(
+            profileId: state.activeIdentityId,
+            groupId: groupId
+        )) ?? []
+        if !messages.isEmpty {
+            group.messages = messages
+            state.upsert(group: group)
+        }
+    }
+
+    private func persistAndEvictConversationMessages(contactId: UUID) {
+        guard var conversation = state.conversation(for: contactId) else {
+            return
+        }
+        // Avoid clobbering persisted history when RAM was already evicted by a transient scene change.
+        if !conversation.messages.isEmpty {
+            try? threadMessageStore.saveDirectMessages(
+                conversation.messages,
+                profileId: state.activeIdentityId,
+                contactId: contactId
+            )
+        }
+        conversation.messages.removeAll()
+        state.upsert(conversation: conversation)
+    }
+
+    private func persistAndEvictGroupMessages(groupId: UUID) {
+        guard var group = state.group(for: groupId) else {
+            return
+        }
+        // Same protection for group threads.
+        if !group.messages.isEmpty {
+            try? threadMessageStore.saveGroupMessages(
+                group.messages,
+                profileId: state.activeIdentityId,
+                groupId: groupId
+            )
+        }
+        group.messages.removeAll()
+        state.upsert(group: group)
+    }
+
+    private func evictInactiveThreadMessagesFromRAM() {
+        for profileIndex in state.identityProfiles.indices {
+            let profileId = state.identityProfiles[profileIndex].id
+            for conversationIndex in state.identityProfiles[profileIndex].conversations.indices {
+                let contactId = state.identityProfiles[profileIndex].conversations[conversationIndex].contactId
+                let isActiveConversation = profileId == state.activeIdentityId && contactId == activeContactId
+                if !isActiveConversation {
+                    state.identityProfiles[profileIndex].conversations[conversationIndex].messages.removeAll()
+                }
+            }
+            for groupIndex in state.identityProfiles[profileIndex].groups.indices {
+                let groupId = state.identityProfiles[profileIndex].groups[groupIndex].id
+                let isActiveGroup = profileId == state.activeIdentityId && groupId == activeGroupId
+                if !isActiveGroup {
+                    state.identityProfiles[profileIndex].groups[groupIndex].messages.removeAll()
+                }
+            }
+        }
+    }
+
+    private func evictAllThreadMessagesFromRAM() {
+        for profileIndex in state.identityProfiles.indices {
+            for conversationIndex in state.identityProfiles[profileIndex].conversations.indices {
+                state.identityProfiles[profileIndex].conversations[conversationIndex].messages.removeAll()
+            }
+            for groupIndex in state.identityProfiles[profileIndex].groups.indices {
+                state.identityProfiles[profileIndex].groups[groupIndex].messages.removeAll()
+            }
+        }
+    }
+
+    private func storedDirectMessages(profileId: UUID, contactId: UUID) -> [Message] {
+        (try? threadMessageStore.loadDirectMessages(profileId: profileId, contactId: contactId)) ?? []
+    }
+
+    private func storedGroupMessages(profileId: UUID, groupId: UUID) -> [Message] {
+        (try? threadMessageStore.loadGroupMessages(profileId: profileId, groupId: groupId)) ?? []
+    }
+
+    private func stopAutoFetch() {
+        autoFetchTask?.cancel()
+        autoFetchTask = nil
+    }
+
+    private func deleteAllLocalDocuments() {
+        let supportDirectory = stateFileURL.deletingLastPathComponent()
+        if let files = try? FileManager.default.contentsOfDirectory(at: supportDirectory, includingPropertiesForKeys: nil) {
+            for file in files where file.pathExtension.lowercased() == "piccp" {
+                try? FileManager.default.removeItem(at: file)
+            }
         }
     }
 
@@ -3051,36 +6541,68 @@ final class ClientViewModel: ObservableObject {
            let mode = StorageProtectionMode(rawValue: raw) {
             return mode
         }
-        if UserDefaults.standard.bool(forKey: legacyKeychainConsentKey) {
-            return .keychain
-        }
         return nil
     }
 
     private func persistStorageProtectionMode(_ mode: StorageProtectionMode) {
         UserDefaults.standard.set(mode.rawValue, forKey: ClientViewModel.storageModeKey)
-        if mode == .keychain {
-            UserDefaults.standard.set(true, forKey: ClientViewModel.legacyKeychainConsentKey)
-        }
     }
 
     private func configureStores(for mode: StorageProtectionMode) {
         store = ClientStateStore(fileURL: stateFileURL, useEncryption: mode.usesKeychain)
         attachmentStore = AttachmentStore(directory: attachmentDirectory, useEncryption: mode.usesKeychain)
+        threadMessageStore = ThreadMessageStore(directory: threadMessageDirectory, useEncryption: mode.usesKeychain)
+    }
+
+    private func migrateThreadMessages(from oldStore: ThreadMessageStore, to newStore: ThreadMessageStore) throws {
+        guard oldStore !== newStore else { return }
+        for profile in state.identityProfiles {
+            for conversation in profile.conversations {
+                let messages = conversation.messages.isEmpty
+                    ? (try oldStore.loadDirectMessages(profileId: profile.id, contactId: conversation.contactId))
+                    : conversation.messages
+                try newStore.saveDirectMessages(messages, profileId: profile.id, contactId: conversation.contactId)
+            }
+            for group in profile.groups {
+                let messages = group.messages.isEmpty
+                    ? (try oldStore.loadGroupMessages(profileId: profile.id, groupId: group.id))
+                    : group.messages
+                try newStore.saveGroupMessages(messages, profileId: profile.id, groupId: group.id)
+            }
+        }
     }
 
     private func migrateAttachments(from oldStore: AttachmentStore, to newStore: AttachmentStore) throws {
         guard oldStore !== newStore else { return }
         var uniqueAttachments: [(String, AttachmentDescriptor)] = []
         var seen = Set<String>()
-        for conversation in state.conversations {
-            for message in conversation.messages {
-                guard let attachment = message.attachment,
-                      let fileName = attachment.localFileName else {
-                    continue
+        for profile in state.identityProfiles {
+            for conversation in profile.conversations {
+                let messages = conversation.messages.isEmpty
+                    ? storedDirectMessages(profileId: profile.id, contactId: conversation.contactId)
+                    : conversation.messages
+                for message in messages {
+                    guard let attachment = message.attachment,
+                          let fileName = attachment.localFileName else {
+                        continue
+                    }
+                    if seen.insert(fileName).inserted {
+                        uniqueAttachments.append((fileName, attachment.descriptor))
+                    }
                 }
-                if seen.insert(fileName).inserted {
-                    uniqueAttachments.append((fileName, attachment.descriptor))
+            }
+            for group in profile.groups {
+                let messages = group.messages.isEmpty
+                    ? storedGroupMessages(profileId: profile.id, groupId: group.id)
+                    : group.messages
+                for message in messages {
+                    guard let attachment = message.attachment,
+                          let fileName = attachment.localFileName else {
+                        continue
+                    }
+                    if seen.insert(fileName).inserted {
+                        uniqueAttachments.append((fileName, attachment.descriptor))
+                    }
                 }
             }
         }
@@ -3091,7 +6613,121 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func pinHash(pin: String, salt: Data) -> Data {
-        let data = salt + Data(pin.utf8)
-        return Data(SHA256.hash(data: data))
+        let normalized = normalizedPin(pin)
+        let boundedRounds = min(pinMaximumRounds, max(pinMinimumRounds, pinHashRounds))
+        let digest = stretchedPinDigest(pin: normalized, salt: salt, rounds: boundedRounds)
+        var encoded = Data()
+        encoded.append(pinHashMagic)
+        var roundsBE = UInt32(boundedRounds).bigEndian
+        withUnsafeBytes(of: &roundsBE) { rawBuffer in
+            encoded.append(contentsOf: rawBuffer)
+        }
+        encoded.append(digest)
+        return encoded
+    }
+
+    private func stretchedPinDigest(pin: String, salt: Data, rounds: Int) -> Data {
+        let boundedRounds = min(pinMaximumRounds, max(pinMinimumRounds, rounds))
+        let key = SymmetricKey(data: Data(pin.utf8))
+        var u = Data(HMAC<SHA256>.authenticationCode(for: salt, using: key))
+        var t = u
+        if boundedRounds > 1 {
+            for _ in 2...boundedRounds {
+                u = Data(HMAC<SHA256>.authenticationCode(for: u, using: key))
+                t.xorInPlace(with: u)
+            }
+        }
+        return t
+    }
+
+    private func parseStructuredPinHash(_ value: Data) -> (rounds: Int, digest: Data)? {
+        let prefixLength = pinHashMagic.count
+        let roundsLength = MemoryLayout<UInt32>.size
+        let digestLength = 32
+        let expectedLength = prefixLength + roundsLength + digestLength
+        guard value.count == expectedLength else {
+            return nil
+        }
+        guard value.prefix(prefixLength) == pinHashMagic else {
+            return nil
+        }
+        let roundsSlice = value[prefixLength..<(prefixLength + roundsLength)]
+        var rounds: UInt32 = 0
+        for byte in roundsSlice {
+            rounds = (rounds << 8) | UInt32(byte)
+        }
+        let boundedRounds = min(pinMaximumRounds, max(pinMinimumRounds, Int(rounds)))
+        let digest = Data(value.suffix(digestLength))
+        return (rounds: boundedRounds, digest: digest)
+    }
+
+    private func secureCompare(_ lhs: Data, _ rhs: Data) -> Bool {
+        guard lhs.count == rhs.count else {
+            return false
+        }
+        var difference: UInt8 = 0
+        for index in lhs.indices {
+            difference |= lhs[index] ^ rhs[index]
+        }
+        return difference == 0
+    }
+}
+
+private extension Data {
+    mutating func xorInPlace(with other: Data) {
+        let count = Swift.min(self.count, other.count)
+        guard count > 0 else { return }
+        for index in 0..<count {
+            self[index] ^= other[index]
+        }
+    }
+
+    mutating func secureWipe() {
+        guard !isEmpty else { return }
+        let byteCount = count
+        withUnsafeMutableBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            _ = memset_s(baseAddress, byteCount, 0, byteCount)
+        }
+        removeAll(keepingCapacity: false)
+    }
+}
+
+private final class SecureRAMBuffer {
+    private var pointer: UnsafeMutableRawPointer?
+    private let byteCount: Int
+    private let lock = NSLock()
+
+    init(copying data: Data) {
+        self.byteCount = data.count
+        guard byteCount > 0 else { return }
+        let allocated = UnsafeMutableRawPointer.allocate(
+            byteCount: byteCount,
+            alignment: MemoryLayout<UInt8>.alignment
+        )
+        data.copyBytes(to: allocated.assumingMemoryBound(to: UInt8.self), count: byteCount)
+        pointer = allocated
+    }
+
+    deinit {
+        wipe()
+    }
+
+    func snapshot() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let pointer, byteCount > 0 else {
+            return Data()
+        }
+        return Data(bytes: pointer, count: byteCount)
+    }
+
+    func wipe() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let pointer else { return }
+        _ = memset_s(pointer, byteCount, 0, byteCount)
+        pointer.deallocate()
+        self.pointer = nil
     }
 }

@@ -2,6 +2,10 @@ import SwiftUI
 import PICCPCore
 import UniformTypeIdentifiers
 import ImageIO
+import Darwin
+import StoreKit
+import Combine
+import AVFoundation
 #if os(iOS)
 import UIKit
 import PhotosUI
@@ -12,6 +16,7 @@ import Carbon.HIToolbox
 
 private enum SidebarItem: Hashable {
     case contact(UUID)
+    case group(UUID)
     case contactBook
     case myCode
     case relays
@@ -20,12 +25,13 @@ private enum SidebarItem: Hashable {
 }
 
 #if os(iOS)
-private enum IOSMainTab: Hashable {
+private enum IOSMainTab: String, Hashable {
     case chats
     case contacts
     case myCode
     case relays
     case identity
+    case settings
 
     static func initialFromLaunchArguments() -> IOSMainTab {
         let args = ProcessInfo.processInfo.arguments
@@ -41,6 +47,8 @@ private enum IOSMainTab: Hashable {
                 return .relays
             case "identity":
                 return .identity
+            case "settings":
+                return .settings
             default:
                 break
             }
@@ -54,9 +62,10 @@ struct ContentView: View {
     @StateObject private var model = ClientViewModel()
     @StateObject private var screenProtection = ScreenProtectionMonitor()
     @State private var selection: SidebarItem?
-    @State private var showingAddContact = false
+    @State private var showingAddContact = ProcessInfo.processInfo.arguments.contains("SHOW_ADD_CONTACT")
+    @State private var showingCreateGroup = ProcessInfo.processInfo.arguments.contains("SHOW_CREATE_GROUP")
 #if os(iOS)
-    @State private var iosTab: IOSMainTab = IOSMainTab.initialFromLaunchArguments()
+    @SceneStorage("noctyra.ios.mainTab") private var iosTabRaw: String = IOSMainTab.initialFromLaunchArguments().rawValue
 #endif
     #if os(macOS)
     @StateObject private var windowController = AppWindowController()
@@ -76,16 +85,20 @@ struct ContentView: View {
             #else
             GlassBackground()
             #endif
-            rootContainer
-            .clearNavigationContainerBackground()
-            .hideWindowToolbarIfNeeded()
-            .secureContainerIfAvailable()
-            #if os(iOS)
-            HostingBackgroundClearer()
-                .frame(width: 0, height: 0)
-            #else
-            EmptyView()
-            #endif
+            if !model.requiresOnboarding {
+                rootContainer
+                    .clearNavigationContainerBackground()
+                    .hideWindowToolbarIfNeeded()
+                    .applyIf(!ProcessInfo.processInfo.arguments.contains("UI_TESTING")) { view in
+                        view.secureContainerIfAvailable()
+                    }
+                #if os(iOS)
+                HostingBackgroundClearer()
+                    .frame(width: 0, height: 0)
+                #else
+                EmptyView()
+                #endif
+            }
             if showIntro {
                 IntroOverlay(opacity: introOpacity, scale: introScale)
                     .allowsHitTesting(false)
@@ -96,7 +109,7 @@ struct ContentView: View {
             if model.isLocked && !model.requiresOnboarding {
                 AppLockView(model: model)
             }
-            if model.requiresStorageChoice {
+            if model.requiresStorageChoice && !model.requiresOnboarding {
                 StorageChoiceView { mode in
                     model.selectStorageProtection(mode)
                 }
@@ -131,6 +144,11 @@ struct ContentView: View {
         #endif
         .sheet(isPresented: $showingAddContact) {
             AddContactView(model: model)
+                .noctyraSheetPresentation()
+        }
+        .sheet(isPresented: $showingCreateGroup) {
+            CreateGroupView(model: model)
+                .noctyraSheetPresentation()
         }
         #if os(macOS)
         .onChange(of: model.state.privacy.hideSensitiveWhenUnfocused) { _, newValue in
@@ -140,10 +158,10 @@ struct ContentView: View {
             windowController.setBlockWindowCapture(newValue)
         }
         .onChange(of: windowController.isAppActive) { _, _ in
-            screenProtection.setAppInFocus(windowController.isActiveForControls)
+            screenProtection.setAppInFocus(windowController.isAppActive)
         }
         .onChange(of: windowController.isWindowKey) { _, _ in
-            screenProtection.setAppInFocus(windowController.isActiveForControls)
+            screenProtection.setAppInFocus(windowController.isAppActive)
         }
         #endif
         .task(id: showIntro) {
@@ -162,7 +180,7 @@ struct ContentView: View {
             screenProtection.refresh()
             #if os(macOS)
             screenProtection.setHideWhenUnfocusedEnabled(model.state.privacy.hideSensitiveWhenUnfocused)
-            screenProtection.setAppInFocus(windowController.isActiveForControls)
+            screenProtection.setAppInFocus(windowController.isAppActive)
             windowController.setBlockWindowCapture(model.state.privacy.macBlockWindowCapture)
             #endif
         }
@@ -192,57 +210,71 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         #else
-        // iPhone portrait was overflowing in the split-view layout. Use a simple, width-safe Tab UI on iOS.
-        TabView(selection: $iosTab) {
+        // Custom iOS bottom bar to avoid TabView's "More" behavior and keep 6 tabs stable.
+        VStack(spacing: 0) {
+            iosMainContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            IOSBottomBar(selectedTab: iosTabSelection) { tab in
+                iosTabSelection.wrappedValue = tab
+            }
+        }
+        #endif
+    }
+
+#if os(iOS)
+    private var iosTabSelection: Binding<IOSMainTab> {
+        Binding(
+            get: { IOSMainTab(rawValue: iosTabRaw) ?? IOSMainTab.initialFromLaunchArguments() },
+            set: { iosTabRaw = $0.rawValue }
+        )
+    }
+
+    @ViewBuilder
+    private var iosMainContent: some View {
+        switch iosTabSelection.wrappedValue {
+        case .chats:
             NavigationStack {
                 ChatsListView(model: model) {
                     showingAddContact = true
+                } onAddGroup: {
+                    showingCreateGroup = true
                 }
             }
-            .tag(IOSMainTab.chats)
-            .tabItem {
-                Label("Chats", systemImage: "message")
-            }
-
+            .adaptiveReadableContent(maxWidth: 880)
+        case .contacts:
             NavigationStack {
                 ContactBookTabView(model: model) {
                     showingAddContact = true
                 }
             }
-            .tag(IOSMainTab.contacts)
-            .tabItem {
-                Label("Contacts", systemImage: "book.closed")
-            }
-
+            .adaptiveReadableContent(maxWidth: 880)
+        case .myCode:
             NavigationStack {
                 MyCodeView(model: model)
             }
-            .toolbar(.hidden, for: .navigationBar)
-            .tag(IOSMainTab.myCode)
-            .tabItem {
-                Label("My Code", systemImage: "qrcode")
-            }
-
+            .hideSheetNavigationBar()
+            .adaptiveReadableContent(maxWidth: 880)
+        case .relays:
             NavigationStack {
                 RelaysView(model: model)
             }
-            .toolbar(.hidden, for: .navigationBar)
-            .tag(IOSMainTab.relays)
-            .tabItem {
-                Label("Relays", systemImage: "antenna.radiowaves.left.and.right")
-            }
-
+            .hideSheetNavigationBar()
+            .adaptiveReadableContent(maxWidth: 880)
+        case .identity:
             NavigationStack {
                 IdentityManagementView(model: model)
             }
-            .toolbar(.hidden, for: .navigationBar)
-            .tag(IOSMainTab.identity)
-            .tabItem {
-                Label("Identity", systemImage: "person.badge.shield.checkmark")
+            .hideSheetNavigationBar()
+            .adaptiveReadableContent(maxWidth: 880)
+        case .settings:
+            NavigationStack {
+                SettingsView(model: model)
             }
+            .toolbar(.hidden, for: .navigationBar)
+            .adaptiveReadableContent(maxWidth: 880)
         }
-        #endif
     }
+#endif
 
     #if os(macOS)
     private var sidebarResizer: some View {
@@ -325,6 +357,40 @@ struct ContentView: View {
                 }
             }
 
+            Section("Groups") {
+                if screenProtection.isSensitiveHidden {
+                    Label("Groups hidden while capture is active", systemImage: "eye.slash")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button {
+                        showingCreateGroup = true
+                    } label: {
+                        Label("Create Group", systemImage: "plus.circle")
+                    }
+                    if model.state.groups.isEmpty {
+                        Text("No groups yet")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(model.state.groups) { group in
+                        NavigationLink(value: SidebarItem.group(group.id)) {
+                            HStack {
+                                Image(systemName: "person.3.fill")
+                                    .foregroundStyle(.secondary)
+                                Text(group.title)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .layoutPriority(1)
+                                Spacer()
+                                if unreadCount(for: group) > 0 {
+                                    UnreadBadge(count: unreadCount(for: group))
+                                }
+                            }
+                        }
+                        .accessibilityIdentifier("group-\(group.id.uuidString)")
+                    }
+                }
+            }
+
             Section("Tools") {
                 NavigationLink(value: SidebarItem.contactBook) {
                     Label("Contact Book", systemImage: "book.closed")
@@ -392,6 +458,34 @@ struct ContentView: View {
                 }
             }
 
+            Section("Groups") {
+                if screenProtection.isSensitiveHidden {
+                    Label("Groups hidden while capture is active", systemImage: "eye.slash")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Button {
+                        showingCreateGroup = true
+                    } label: {
+                        Label("Create Group", systemImage: "plus.circle")
+                    }
+                    if model.state.groups.isEmpty {
+                        Text("No groups yet")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(model.state.groups) { group in
+                        HStack {
+                            Label(group.title, systemImage: "person.3.fill")
+                            Spacer()
+                            if unreadCount(for: group) > 0 {
+                                UnreadBadge(count: unreadCount(for: group))
+                            }
+                        }
+                        .tag(SidebarItem.group(group.id))
+                        .accessibilityIdentifier("group-\(group.id.uuidString)")
+                    }
+                }
+            }
+
             Section("Tools") {
                 Label("Contact Book", systemImage: "book.closed")
                     .tag(SidebarItem.contactBook)
@@ -426,6 +520,12 @@ struct ContentView: View {
             } else {
                 PlaceholderView(title: "Select a contact")
             }
+        case .group(let groupId):
+            if let group = model.state.group(for: groupId) {
+                GroupConversationView(model: model, group: group)
+            } else {
+                PlaceholderView(title: "Select a group")
+            }
         case .myCode:
             MyCodeView(model: model)
         case .settings:
@@ -447,6 +547,10 @@ struct ContentView: View {
 
     private func unreadCount(for contact: Contact) -> Int {
         model.state.conversation(for: contact.id)?.unreadCount ?? 0
+    }
+
+    private func unreadCount(for group: GroupConversation) -> Int {
+        model.state.group(for: group.id)?.unreadCount ?? 0
     }
 
 }
@@ -478,7 +582,7 @@ private struct SidebarHeader: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 26, height: 26)
-                .shadow(color: theme.accent.opacity(0.35), radius: 10, x: 0, y: 6)
+                .shadow(color: theme.accent.opacity(0.25), radius: 8, x: 0, y: 4)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Noctyra")
                     .font(.system(size: 18, weight: .semibold, design: .rounded))
@@ -494,23 +598,21 @@ private struct SidebarHeader: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(.ultraThinMaterial)
-                // Theme-tinted glass backing so the header feels intentional (not "default material").
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.black.opacity(isDark ? 0.20 : 0.08))
+                    .fill(Color.black.opacity(isDark ? 0.16 : 0.05))
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(
                         LinearGradient(
                             colors: [
-                                theme.accent.opacity(isDark ? 0.18 : 0.12),
-                                theme.glowSecondary.opacity(isDark ? 0.10 : 0.06),
-                                Color.white.opacity(isDark ? 0.03 : 0.06)
+                                theme.accent.opacity(isDark ? 0.14 : 0.08),
+                                theme.glowSecondary.opacity(isDark ? 0.08 : 0.04),
+                                Color.clear
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
                     )
-                    .blendMode(.plusLighter)
-                    .opacity(isDark ? 0.75 : 0.55)
+                    .opacity(isDark ? 0.65 : 0.45)
             }
         )
         .overlay(
@@ -518,25 +620,131 @@ private struct SidebarHeader: View {
                 .stroke(
                     LinearGradient(
                         colors: [
-                            Color.white.opacity(isDark ? 0.26 : 0.42),
-                            theme.accent.opacity(isDark ? 0.20 : 0.16),
-                            Color.white.opacity(isDark ? 0.08 : 0.10)
+                            Color.white.opacity(isDark ? 0.20 : 0.32),
+                            theme.accent.opacity(isDark ? 0.14 : 0.12),
+                            Color.white.opacity(isDark ? 0.06 : 0.08)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: 0.9
+                    lineWidth: 0.8
                 )
         )
+        .shadow(color: theme.accent.opacity(isDark ? 0.14 : 0.08), radius: 10, x: 0, y: 4)
         .padding(.vertical, 6)
     }
 }
 
 #if os(iOS)
+private struct IOSBottomBar: View {
+    let selectedTab: Binding<IOSMainTab>
+    let onSelect: (IOSMainTab) -> Void
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var tabs: [(IOSMainTab, String, String)] {
+        [
+            (.chats, "Chats", "message"),
+            (.contacts, "Contacts", "book.closed"),
+            (.myCode, "Code", "qrcode"),
+            (.relays, "Relays", "antenna.radiowaves.left.and.right"),
+            (.identity, "Identity", "person.badge.shield.checkmark"),
+            (.settings, "Settings", "gearshape")
+        ]
+    }
+
+    private var isDark: Bool { colorScheme == .dark }
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(tabs, id: \.0.rawValue) { tab, title, icon in
+                Button {
+                    guard selectedTab.wrappedValue != tab else { return }
+                    onSelect(tab)
+                    FeedbackGenerator.light()
+                } label: {
+                    VStack(spacing: 2) {
+                        Image(systemName: icon)
+                            .font(.system(size: 15, weight: .semibold))
+                            .frame(height: 18)
+                        Text(title)
+                            .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.78)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .foregroundStyle(selectedTab.wrappedValue == tab ? theme.accent : Color.secondary)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(selectedTab.wrappedValue == tab ? theme.accent.opacity(isDark ? 0.16 : 0.11) : Color.clear)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("tab-\(tab.rawValue)")
+            }
+        }
+        .padding(6)
+        .background(
+            Capsule(style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    Capsule(style: .continuous)
+                        .fill(Color.black.opacity(isDark ? 0.20 : 0.055))
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(isDark ? 0.14 : 0.22), lineWidth: 0.7)
+                )
+                .shadow(color: theme.accent.opacity(isDark ? 0.08 : 0.05), radius: 7, x: 0, y: 2)
+        )
+        .padding(.horizontal, 10)
+        .padding(.top, 4)
+        .padding(.bottom, 6)
+    }
+}
+
 private struct ChatsListView: View {
+    private enum ChatSortMode: String, CaseIterable, Identifiable {
+        case unread
+        case recent
+        case name
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .unread:
+                return "Unread First"
+            case .recent:
+                return "Recent First"
+            case .name:
+                return "Name"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .unread:
+                return "bubble.left.and.bubble.right"
+            case .recent:
+                return "clock.arrow.circlepath"
+            case .name:
+                return "textformat.abc"
+            }
+        }
+    }
+
     @ObservedObject var model: ClientViewModel
     let onAddContact: () -> Void
+    let onAddGroup: () -> Void
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
+    @State private var searchText = ""
+    @AppStorage("noctyra.chat.sortMode.v1") private var sortModeRaw = ChatSortMode.unread.rawValue
+    @AppStorage("noctyra.chat.pinnedContacts.v1") private var pinnedContactsRaw = ""
+    @AppStorage("noctyra.chat.pinnedGroups.v1") private var pinnedGroupsRaw = ""
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(spacing: 0) {
@@ -544,62 +752,467 @@ private struct ChatsListView: View {
                 title: "Chats",
                 subtitle: "Post-quantum chat",
                 trailing: AnyView(
-                    Button {
-                        onAddContact()
-                        FeedbackGenerator.light()
-                    } label: {
-                        Image(systemName: "person.badge.plus")
-                            .font(.system(size: 14, weight: .semibold))
+                    HStack(spacing: 8) {
+                        Menu {
+                            Section("Sort") {
+                                ForEach(ChatSortMode.allCases) { mode in
+                                    Button {
+                                        sortModeRaw = mode.rawValue
+                                    } label: {
+                                        if sortMode == mode {
+                                            Label(mode.title, systemImage: "checkmark")
+                                        } else {
+                                            Label(mode.title, systemImage: mode.icon)
+                                        }
+                                    }
+                                }
+                            }
+                            Section {
+                                Button("Clear All Pins", role: .destructive) {
+                                    clearAllPins()
+                                }
+                                .disabled(pinnedContactIds.isEmpty && pinnedGroupIds.isEmpty)
+                            }
+                        } label: {
+                            Image(systemName: "line.3.horizontal.decrease.circle")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .accessibilityLabel("Sort and Pin Options")
+                        .glassCircleButton(diameter: 34)
+                        .hoverLift()
+                        Menu {
+                            Button {
+                                onAddContact()
+                                FeedbackGenerator.light()
+                            } label: {
+                                Label("New Contact", systemImage: "person.badge.plus")
+                            }
+                            Button {
+                                onAddGroup()
+                                FeedbackGenerator.light()
+                            } label: {
+                                Label("New Group", systemImage: "person.3.fill")
+                            }
+                        } label: {
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .accessibilityLabel("New Chat")
+                        .glassCircleButton(prominent: true, diameter: 34)
+                        .hoverLift()
                     }
-                    .accessibilityLabel("Add Contact")
-                    .glassCircleButton(prominent: true, diameter: 34)
-                    .hoverLift()
                 )
             )
+            InlineSearchField(text: $searchText, prompt: "Search chats")
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
+                .adaptiveReadableContent(maxWidth: 860)
 
             if screenProtection.isSensitiveHidden {
                 SensitiveContentPlaceholder(
                     title: "Chats Hidden",
-                    message: "Screen capture or an external display is active. Chat list is hidden to protect your OPSEC."
+                    message: "Screen capture or an external display is active. Chat list is hidden to protect your operational security."
                 )
             } else {
-                List {
-                    if model.state.contacts.isEmpty {
-                        Text("No contacts yet")
-                            .foregroundStyle(.secondary)
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                    }
-                    ForEach(model.state.contacts) { contact in
-                        NavigationLink {
-                            ConversationView(model: model, contact: contact)
-                        } label: {
-                            HStack {
-                                Image(systemName: "person.circle")
-                                    .foregroundStyle(.secondary)
-                                Text(contact.displayName)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                    .layoutPriority(1)
-                                Spacer(minLength: 8)
-                                let unread = model.state.conversation(for: contact.id)?.unreadCount ?? 0
-                                if unread > 0 {
-                                    UnreadBadge(count: unread)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 18) {
+                        chatSectionHeader(
+                            title: "Groups",
+                            symbol: "person.3.fill",
+                            count: filteredGroups.count
+                        )
+                        if filteredGroups.isEmpty {
+                            chatEmptyState(
+                                hasActiveSearch ? "No matching groups" : "No groups yet",
+                                symbol: "person.3"
+                            )
+                        } else {
+                            VStack(spacing: 8) {
+                                ForEach(filteredGroups) { group in
+                                    NavigationLink {
+                                        if let refreshed = model.state.group(for: group.id) {
+                                            GroupConversationView(model: model, group: refreshed)
+                                        } else {
+                                            PlaceholderView(title: "Group not found")
+                                        }
+                                    } label: {
+                                        chatRow(
+                                            symbol: "person.3.fill",
+                                            title: group.title,
+                                            preview: groupPreview(for: group),
+                                            timestamp: lastGroupTimestamp(for: group),
+                                            unreadCount: model.state.group(for: group.id)?.unreadCount ?? 0,
+                                            isPinned: isPinnedGroup(group.id)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("group-chat-\(group.id.uuidString)")
+                                    .contextMenu {
+                                        Button(isPinnedGroup(group.id) ? "Unpin Group" : "Pin Group") {
+                                            togglePinnedGroup(group.id)
+                                        }
+                                    }
                                 }
                             }
                         }
-                        .accessibilityIdentifier("chat-\(contact.id.uuidString)")
+
+                        chatSectionHeader(
+                            title: "Contacts",
+                            symbol: "person.2.fill",
+                            count: filteredContacts.count
+                        )
+                        if filteredContacts.isEmpty {
+                            chatEmptyState(
+                                hasActiveSearch ? "No matching contacts" : "No contacts yet",
+                                symbol: "person.crop.circle.badge.plus"
+                            )
+                        } else {
+                            VStack(spacing: 8) {
+                                ForEach(filteredContacts) { contact in
+                                    NavigationLink {
+                                        ConversationView(model: model, contact: contact)
+                                    } label: {
+                                        chatRow(
+                                            symbol: "person.fill",
+                                            title: contact.displayName,
+                                            preview: contactPreview(for: contact),
+                                            timestamp: lastContactTimestamp(for: contact),
+                                            unreadCount: model.state.conversation(for: contact.id)?.unreadCount ?? 0,
+                                            isPinned: isPinnedContact(contact.id)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("chat-\(contact.id.uuidString)")
+                                    .contextMenu {
+                                        Button(isPinnedContact(contact.id) ? "Unpin Contact" : "Pin Contact") {
+                                            togglePinnedContact(contact.id)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+                    .padding(.bottom, 24)
+                    .adaptiveReadableContent(maxWidth: 860)
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .glassBackgroundIfNeeded()
                 .privacySensitive()
             }
         }
+        .glassBackgroundIfNeeded()
         .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private var hasActiveSearch: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func chatSectionHeader(title: String, symbol: String, count: Int) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.caption.weight(.bold))
+                .textCase(.uppercase)
+                .tracking(0.7)
+            Spacer()
+            Text("\(count)")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(.ultraThinMaterial, in: Capsule())
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 4)
+    }
+
+    private func chatEmptyState(_ title: String, symbol: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 34, height: 34)
+                .background(.ultraThinMaterial, in: Circle())
+            Text(title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .uniformGlassCard(cornerRadius: 16, padding: 12, minHeight: 58)
+    }
+
+    private func chatRow(
+        symbol: String,
+        title: String,
+        preview: String,
+        timestamp: Date?,
+        unreadCount: Int,
+        isPinned: Bool
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(unreadCount > 0 ? Color.accentColor : Color.secondary)
+                .frame(width: 36, height: 36)
+                .background(
+                    Circle()
+                        .fill(unreadCount > 0 ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.08))
+                )
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.body.weight(unreadCount > 0 ? .semibold : .medium))
+                        .lineLimit(1)
+                    if isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(preview)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 6) {
+                if let timestamp {
+                    Text(Self.chatTimeFormatter.string(from: timestamp))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                if unreadCount > 0 {
+                    UnreadBadge(count: unreadCount)
+                } else {
+                    EmptyView()
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(minHeight: 62)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.black.opacity(colorScheme == .dark ? 0.12 : 0.045))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    theme.accent.opacity(unreadCount > 0 ? 0.11 : 0.045),
+                                    Color.clear
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.16), lineWidth: 0.7)
+        )
+    }
+
+    private var normalizedSearchText: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var sortMode: ChatSortMode {
+        ChatSortMode(rawValue: sortModeRaw) ?? .unread
+    }
+
+    private var pinnedContactIds: Set<UUID> {
+        Self.decodePinnedIDs(from: pinnedContactsRaw)
+    }
+
+    private var pinnedGroupIds: Set<UUID> {
+        Self.decodePinnedIDs(from: pinnedGroupsRaw)
+    }
+
+    private var filteredGroups: [GroupConversation] {
+        let filtered = model.state.groups.filter { group in
+            guard hasActiveSearch else { return true }
+            let haystack = "\(group.title) \(groupPreview(for: group))".lowercased()
+            return haystack.contains(normalizedSearchText)
+        }
+        return filtered.sorted(by: compareGroups(_:_:))
+    }
+
+    private var filteredContacts: [Contact] {
+        let filtered = model.state.contacts.filter { contact in
+            guard hasActiveSearch else { return true }
+            let haystack = "\(contact.displayName) \(contactPreview(for: contact))".lowercased()
+            return haystack.contains(normalizedSearchText)
+        }
+        return filtered.sorted(by: compareContacts(_:_:))
+    }
+
+    private func compareGroups(_ lhs: GroupConversation, _ rhs: GroupConversation) -> Bool {
+        let lhsPinned = isPinnedGroup(lhs.id)
+        let rhsPinned = isPinnedGroup(rhs.id)
+        if lhsPinned != rhsPinned {
+            return lhsPinned
+        }
+        let lhsUnread = model.state.group(for: lhs.id)?.unreadCount ?? lhs.unreadCount
+        let rhsUnread = model.state.group(for: rhs.id)?.unreadCount ?? rhs.unreadCount
+        let lhsDate = lastGroupTimestamp(for: lhs) ?? lhs.createdAt
+        let rhsDate = lastGroupTimestamp(for: rhs) ?? rhs.createdAt
+        switch sortMode {
+        case .unread:
+            if lhsUnread != rhsUnread {
+                return lhsUnread > rhsUnread
+            }
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+        case .recent:
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+            if lhsUnread != rhsUnread {
+                return lhsUnread > rhsUnread
+            }
+        case .name:
+            let nameOrder = lhs.title.localizedCaseInsensitiveCompare(rhs.title)
+            if nameOrder != .orderedSame {
+                return nameOrder == .orderedAscending
+            }
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+        }
+        return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+    }
+
+    private func compareContacts(_ lhs: Contact, _ rhs: Contact) -> Bool {
+        let lhsPinned = isPinnedContact(lhs.id)
+        let rhsPinned = isPinnedContact(rhs.id)
+        if lhsPinned != rhsPinned {
+            return lhsPinned
+        }
+        let lhsUnread = model.state.conversation(for: lhs.id)?.unreadCount ?? 0
+        let rhsUnread = model.state.conversation(for: rhs.id)?.unreadCount ?? 0
+        let lhsDate = lastContactTimestamp(for: lhs) ?? .distantPast
+        let rhsDate = lastContactTimestamp(for: rhs) ?? .distantPast
+        switch sortMode {
+        case .unread:
+            if lhsUnread != rhsUnread {
+                return lhsUnread > rhsUnread
+            }
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+        case .recent:
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+            if lhsUnread != rhsUnread {
+                return lhsUnread > rhsUnread
+            }
+        case .name:
+            let nameOrder = lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName)
+            if nameOrder != .orderedSame {
+                return nameOrder == .orderedAscending
+            }
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+        }
+        return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+    }
+
+    private func isPinnedContact(_ id: UUID) -> Bool {
+        pinnedContactIds.contains(id)
+    }
+
+    private func isPinnedGroup(_ id: UUID) -> Bool {
+        pinnedGroupIds.contains(id)
+    }
+
+    private func togglePinnedContact(_ id: UUID) {
+        var ids = pinnedContactIds
+        if ids.contains(id) {
+            ids.remove(id)
+        } else {
+            ids.insert(id)
+        }
+        pinnedContactsRaw = Self.encodePinnedIDs(ids)
+        FeedbackGenerator.light()
+    }
+
+    private func togglePinnedGroup(_ id: UUID) {
+        var ids = pinnedGroupIds
+        if ids.contains(id) {
+            ids.remove(id)
+        } else {
+            ids.insert(id)
+        }
+        pinnedGroupsRaw = Self.encodePinnedIDs(ids)
+        FeedbackGenerator.light()
+    }
+
+    private func clearAllPins() {
+        pinnedContactsRaw = ""
+        pinnedGroupsRaw = ""
+        FeedbackGenerator.light()
+    }
+
+    private func lastGroupTimestamp(for group: GroupConversation) -> Date? {
+        model.state.group(for: group.id)?.messages.last?.timestamp ?? group.messages.last?.timestamp
+    }
+
+    private func lastContactTimestamp(for contact: Contact) -> Date? {
+        model.state.conversation(for: contact.id)?.messages.last?.timestamp
+    }
+
+    private func groupPreview(for group: GroupConversation) -> String {
+        let latest = model.state.group(for: group.id)?.messages.last ?? group.messages.last
+        return previewText(for: latest)
+    }
+
+    private func contactPreview(for contact: Contact) -> String {
+        previewText(for: model.state.conversation(for: contact.id)?.messages.last)
+    }
+
+    private func previewText(for message: PICCPCore.Message?) -> String {
+        guard let message else { return "No messages yet" }
+        if message.isMismatch {
+            return "Mismatch detected"
+        }
+        if message.attachment != nil {
+            return message.direction == .sent ? "You sent an attachment" : "Attachment received"
+        }
+        let trimmed = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "Empty message" }
+        return trimmed
+    }
+
+    private static let chatTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static func decodePinnedIDs(from raw: String) -> Set<UUID> {
+        Set(
+            raw.split(separator: ",")
+                .compactMap { UUID(uuidString: String($0)) }
+        )
+    }
+
+    private static func encodePinnedIDs(_ ids: Set<UUID>) -> String {
+        ids
+            .map(\.uuidString)
+            .sorted()
+            .joined(separator: ",")
     }
 }
 
@@ -676,6 +1289,91 @@ private struct SensitiveContentPlaceholder: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(24)
         .glassBackgroundIfNeeded()
+    }
+}
+
+private struct EmptyConversationState: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 24, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Text(subtitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 220)
+        .padding(.horizontal, 32)
+    }
+}
+
+private struct InlineSearchField: View {
+    @Binding var text: String
+    let prompt: String
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var isDark: Bool { colorScheme == .dark }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField(prompt, text: $text)
+                .searchInputBehavior()
+                .textFieldStyle(.plain)
+                .background(Color.clear)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(
+            Capsule(style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(isDark ? 0.10 : 0.75),
+                            Color.white.opacity(isDark ? 0.05 : 0.58)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    theme.accent.opacity(isDark ? 0.14 : 0.10),
+                                    theme.glowSecondary.opacity(isDark ? 0.07 : 0.04),
+                                    Color.clear
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.white.opacity(isDark ? 0.22 : 0.28), lineWidth: 0.8)
+        )
+        .clipShape(Capsule(style: .continuous))
+        .compositingGroup()
     }
 }
 
@@ -789,6 +1487,7 @@ private struct ConversationView: View {
     @State private var messageText = ""
     @State private var revealMessages = false
     @State private var showingClearChatConfirm = false
+    @State private var showingVoiceRecorder = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     #if os(iOS)
     @State private var selectedPhoto: PhotosPickerItem?
@@ -864,47 +1563,27 @@ private struct ConversationView: View {
             .padding(.bottom, 4)
             #endif
             ScrollViewReader { proxy in
-                List {
-                    if !messages.isEmpty {
-                        ForEach(messages) { message in
-                            MessageRow(model: model, message: message, isRevealed: isRevealed, onRetry: message.isMismatch ? {
-                                Task { await model.retryMismatch(contactId: contact.id) }
-                            } : nil)
-                                .id(message.id)
-                                .contextMenu {
-                                    Button("Delete Message", role: .destructive) {
-                                        Task { await model.deleteMessage(contactId: contact.id, messageId: message.id) }
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        if messages.isEmpty {
+                            EmptyConversationState(title: "No messages yet", subtitle: "Send a message to start this secure chat.")
+                        } else {
+                            ForEach(messages) { message in
+                                MessageRow(model: model, message: message, isRevealed: isRevealed, onRetry: message.isMismatch ? {
+                                    Task { await model.retryMismatch(contactId: contact.id) }
+                                } : nil)
+                                    .id(message.id)
+                                    .contextMenu {
+                                        Button("Delete Message", role: .destructive) {
+                                            Task { await model.deleteMessage(contactId: contact.id, messageId: message.id) }
+                                        }
                                     }
-                                }
-                                #if os(iOS)
-                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                    Button(role: .destructive) {
-                                        Task { await model.deleteMessage(contactId: contact.id, messageId: message.id) }
-                                    } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
-                                }
-                                #else
-                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                    Button(role: .destructive) {
-                                        Task { await model.deleteMessage(contactId: contact.id, messageId: message.id) }
-                                    } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
-                                }
-                                #endif
+                            }
                         }
-                    } else {
-                        Text("No messages yet")
-                            .foregroundStyle(.secondary)
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
                     }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 10)
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
                 .glassBackgroundIfNeeded()
                 .onAppear {
                     scrollToBottom(messages, proxy: proxy, animated: false)
@@ -933,6 +1612,15 @@ private struct ConversationView: View {
                 .accessibilityLabel("Attach Image")
                 .glassCircleButton(diameter: 34)
                 .hoverLift()
+                Button {
+                    showingVoiceRecorder = true
+                } label: {
+                    Image(systemName: "mic")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .accessibilityLabel("Record Voice Message")
+                .glassCircleButton(diameter: 34)
+                .hoverLift()
                 #else
                 Button {
                     showingAttachmentImporter = true
@@ -941,6 +1629,15 @@ private struct ConversationView: View {
                         .font(.system(size: 14, weight: .semibold))
                 }
                 .accessibilityLabel("Attach Image")
+                .glassCircleButton(diameter: 34)
+                .hoverLift()
+                Button {
+                    showingVoiceRecorder = true
+                } label: {
+                    Image(systemName: "mic")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .accessibilityLabel("Record Voice Message")
                 .glassCircleButton(diameter: 34)
                 .hoverLift()
                 #endif
@@ -984,6 +1681,29 @@ private struct ConversationView: View {
         }
         .glassBackgroundIfNeeded()
         .privacySensitive()
+        .sheet(isPresented: $showingVoiceRecorder) {
+            VoiceRecorderSheetView(
+                onRecorded: { data, fileName, mimeType in
+                    Task {
+                        await model.sendAttachment(
+                            data: data,
+                            fileName: fileName,
+                            mimeType: mimeType,
+                            to: contact.id
+                        )
+                    }
+                    showingVoiceRecorder = false
+                },
+                onError: { message in
+                    model.lastError = message
+                    showingVoiceRecorder = false
+                },
+                onCancel: {
+                    showingVoiceRecorder = false
+                }
+            )
+            .noctyraSheetPresentation()
+        }
         #if os(iOS)
         .onChange(of: selectedPhoto) { _, newItem in
             guard let newItem else { return }
@@ -1070,32 +1790,44 @@ private struct ConversationView: View {
         }
         .onAppear {
             model.activeContactId = contact.id
+            model.activeGroupId = nil
             revealMessages = false
             screenProtection.refresh()
             #if os(macOS)
             updateSecureInput()
             #endif
-            Task { await model.markConversationRead(contactId: contact.id) }
+            Task {
+                await model.openConversation(contactId: contact.id)
+                await model.markConversationRead(contactId: contact.id)
+            }
         }
         .onDisappear {
             if model.activeContactId == contact.id {
                 model.activeContactId = nil
             }
+            Task { await model.closeConversation(contactId: contact.id) }
             revealMessages = false
             #if os(macOS)
             SecureEventInputController.shared.setEnabled(false)
             #endif
         }
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase != .active {
+            if newPhase == .background {
+                Task { await model.closeConversation(contactId: contact.id) }
                 revealMessages = false
                 #if os(macOS)
                 SecureEventInputController.shared.setEnabled(false)
                 #endif
+            } else if newPhase == .active {
+                Task {
+                    await model.openConversation(contactId: contact.id)
+                    await model.markConversationRead(contactId: contact.id)
+                }
             }
         }
         .onChange(of: screenProtection.isSensitiveHidden) { _, newValue in
             if newValue {
+                model.purgeAttachmentDecryptionMemory(contactId: contact.id)
                 revealMessages = false
             }
         }
@@ -1173,7 +1905,7 @@ private struct ConversationView: View {
             }
         }
         do {
-            let data = try Data(contentsOf: url)
+            let data = try readBoundedFile(url, maxBytes: 32 * 1024 * 1024)
             let fileName = url.lastPathComponent
             let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "image/jpeg"
             await model.sendAttachment(data: data, fileName: fileName, mimeType: mimeType, to: contact.id)
@@ -1185,7 +1917,7 @@ private struct ConversationView: View {
     }
     #endif
 
-    private func scrollToBottom(_ messages: [Message], proxy: ScrollViewProxy, animated: Bool) {
+    private func scrollToBottom(_ messages: [PICCPCore.Message], proxy: ScrollViewProxy, animated: Bool) {
         guard let last = messages.last else { return }
         DispatchQueue.main.async {
             if animated {
@@ -1199,12 +1931,668 @@ private struct ConversationView: View {
     }
 }
 
+private struct GroupConversationView: View {
+    @ObservedObject var model: ClientViewModel
+    let group: GroupConversation
+    @State private var messageText = ""
+    @State private var revealMessages = false
+    @State private var showingClearChatConfirm = false
+    @State private var showingGroupDetails = false
+    @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
+    @Environment(\.scenePhase) private var scenePhase
+    #if os(macOS)
+    @FocusState private var isComposerFocused: Bool
+    #endif
+
+    private var resolvedGroup: GroupConversation? {
+        model.state.group(for: group.id)
+    }
+
+    private var groupTitle: String {
+        resolvedGroup?.title ?? group.title
+    }
+
+    private var groupMessages: [PICCPCore.Message] {
+        resolvedGroup?.messages ?? group.messages
+    }
+
+    private var memberCount: Int {
+        resolvedGroup?.memberContactIds.count ?? group.memberContactIds.count
+    }
+
+    var body: some View {
+        let isSensitiveHidden = screenProtection.isSensitiveHidden
+        let isRevealed = revealMessages && !isSensitiveHidden
+        VStack(spacing: 0) {
+            #if os(iOS)
+            NoctyraTopBar(
+                title: isSensitiveHidden ? "Secure Group" : groupTitle,
+                subtitle: isSensitiveHidden ? "Screen capture is active" : "\(memberCount) members",
+                trailing: AnyView(
+                    HStack(spacing: 10) {
+                        Button {
+                            showingGroupDetails = true
+                        } label: {
+                            Image(systemName: "slider.horizontal.3")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .accessibilityLabel("Group Settings")
+                        .glassCircleButton(diameter: 32)
+                        .hoverLift()
+                        Button {
+                            showingClearChatConfirm = true
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .accessibilityLabel("Clear Group Chat")
+                        .glassCircleButton(diameter: 32)
+                        .hoverLift()
+                        RevealToggleButton(isRevealed: $revealMessages, isDisabled: isSensitiveHidden)
+                    }
+                )
+            )
+            #else
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 3) {
+                    if isSensitiveHidden {
+                        Text("Secure group hidden")
+                            .font(.system(size: 20, weight: .semibold, design: .rounded))
+                        Text("Screen capture is active")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(groupTitle)
+                            .font(.system(size: 20, weight: .semibold, design: .rounded))
+                        Text("\(memberCount) members")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Button {
+                    showingGroupDetails = true
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .accessibilityLabel("Group Settings")
+                .glassCircleButton(diameter: 30)
+                .hoverLift()
+                Button {
+                    showingClearChatConfirm = true
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .accessibilityLabel("Clear Group Chat")
+                .glassCircleButton(diameter: 30)
+                .hoverLift()
+                RevealToggleButton(isRevealed: $revealMessages, isDisabled: isSensitiveHidden)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+            #endif
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        if groupMessages.isEmpty {
+                            EmptyConversationState(title: "No messages yet", subtitle: "Messages sent here are shared with this group.")
+                        } else {
+                            ForEach(groupMessages) { message in
+                                MessageRow(model: model, message: message, isRevealed: isRevealed, onRetry: nil)
+                                    .id(message.id)
+                                    .contextMenu {
+                                        Button("Delete Message", role: .destructive) {
+                                            Task { await model.deleteGroupMessage(groupId: group.id, messageId: message.id) }
+                                        }
+                                    }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 10)
+                }
+                .glassBackgroundIfNeeded()
+                .onAppear {
+                    scrollToBottom(groupMessages, proxy: proxy, animated: false)
+                }
+                .onChange(of: groupMessages.count) { _, _ in
+                    scrollToBottom(groupMessages, proxy: proxy, animated: true)
+                }
+            }
+
+            HStack(spacing: 8) {
+                #if os(iOS)
+                MessageInputField(text: $messageText, secureTypingEnabled: model.state.privacy.secureTypingEnabled) {
+                    sendMessage()
+                }
+                #else
+                TextField("Message", text: $messageText, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .submitLabel(.send)
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 8)
+                    .focused($isComposerFocused)
+                    .onSubmit {
+                        sendMessage()
+                    }
+                #endif
+                Button {
+                    sendMessage()
+                } label: {
+                    Image(systemName: "paperplane.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                }
+                .accessibilityLabel("Send Group Message")
+                .glassCircleButton(prominent: true, diameter: 34)
+                .hoverLift()
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            #if os(iOS)
+            .background(Color.clear)
+            #else
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.ultraThinMaterial)
+            )
+            #endif
+            .padding(.horizontal, 8)
+            .padding(.bottom, 6)
+        }
+        .glassBackgroundIfNeeded()
+        .privacySensitive()
+        .sheet(isPresented: $showingGroupDetails) {
+            GroupDetailsView(model: model, groupId: group.id)
+                .noctyraSheetPresentation()
+        }
+        .confirmationDialog("Clear group chat?", isPresented: $showingClearChatConfirm) {
+            Button("Clear Chat", role: .destructive) {
+                Task { await model.clearGroupConversation(groupId: group.id) }
+            }
+        } message: {
+            Text("This removes local group messages from this device only.")
+        }
+        .onAppear {
+            model.activeContactId = nil
+            model.activeGroupId = group.id
+            revealMessages = false
+            screenProtection.refresh()
+            Task {
+                await model.openGroupConversation(groupId: group.id)
+                await model.markGroupRead(groupId: group.id)
+            }
+        }
+        .onDisappear {
+            if model.activeGroupId == group.id {
+                model.activeGroupId = nil
+            }
+            Task { await model.closeGroupConversation(groupId: group.id) }
+            revealMessages = false
+        }
+        .onChange(of: screenProtection.isSensitiveHidden) { _, newValue in
+            if newValue {
+                model.purgeAttachmentDecryptionMemory(groupId: group.id)
+                revealMessages = false
+            }
+        }
+        .onChange(of: scenePhase) { _, newValue in
+            if newValue == .background {
+                Task { await model.closeGroupConversation(groupId: group.id) }
+                revealMessages = false
+            } else if newValue == .active {
+                Task {
+                    await model.openGroupConversation(groupId: group.id)
+                    await model.markGroupRead(groupId: group.id)
+                }
+            }
+        }
+    }
+
+    private func sendMessage() {
+        let trimmed = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task { await model.sendGroupMessage(text: trimmed, to: group.id) }
+        messageText = ""
+    }
+
+    private func scrollToBottom(_ messages: [PICCPCore.Message], proxy: ScrollViewProxy, animated: Bool) {
+        guard let last = messages.last else { return }
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            } else {
+                proxy.scrollTo(last.id, anchor: .bottom)
+            }
+        }
+    }
+}
+
+struct SheetHero: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: icon)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(theme.accent)
+                .frame(width: 44, height: 44)
+                .background(theme.accent.opacity(0.15), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .uniformGlassCard(cornerRadius: 20, padding: 16)
+    }
+}
+
+struct SheetActionBar<Trailing: View>: View {
+    let closeLabel: String
+    let onClose: () -> Void
+    @ViewBuilder let trailing: () -> Trailing
+
+    init(
+        closeLabel: String = "Close",
+        onClose: @escaping () -> Void,
+        @ViewBuilder trailing: @escaping () -> Trailing
+    ) {
+        self.closeLabel = closeLabel
+        self.onClose = onClose
+        self.trailing = trailing
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 13, weight: .bold))
+            }
+            .accessibilityLabel(closeLabel)
+            .glassCircleButton(diameter: 34)
+            .hoverLift()
+
+            Spacer()
+            trailing()
+        }
+    }
+}
+
+extension SheetActionBar where Trailing == EmptyView {
+    init(closeLabel: String = "Close", onClose: @escaping () -> Void) {
+        self.init(closeLabel: closeLabel, onClose: onClose) {
+            EmptyView()
+        }
+    }
+}
+
+struct SheetSection<Content: View>: View {
+    let title: String
+    var subtitle: String? = nil
+    let icon: String
+    var role: ButtonRole? = nil
+    @ViewBuilder let content: () -> Content
+
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 9) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(role == .destructive ? Color.red : theme.accent)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        (role == .destructive ? Color.red : theme.accent).opacity(0.12),
+                        in: Circle()
+                    )
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+
+            content()
+        }
+        .uniformGlassCard(cornerRadius: 18, padding: 14)
+    }
+}
+
+struct SheetEmptyState: View {
+    let icon: String
+    let title: String
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 24, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct SheetContactSelectionRow: View {
+    let contact: Contact
+    let isSelected: Bool
+    var isEnabled: Bool = true
+    let action: () -> Void
+
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Image(systemName: "person.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isSelected ? theme.accent : Color.secondary)
+                    .frame(width: 34, height: 34)
+                    .background(
+                        (isSelected ? theme.accent : Color.secondary).opacity(0.12),
+                        in: Circle()
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(contact.displayName)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(contact.fingerprint)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(isSelected ? theme.accent : Color.secondary.opacity(0.65))
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(isSelected ? theme.accent.opacity(0.10) : Color.primary.opacity(0.035))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .stroke(
+                                isSelected ? theme.accent.opacity(0.40) : Color.white.opacity(0.08),
+                                lineWidth: 0.8
+                            )
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.62)
+    }
+}
+
+private struct GroupDetailsView: View {
+    @ObservedObject var model: ClientViewModel
+    let groupId: UUID
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var selectedMembers = Set<UUID>()
+    @State private var memberSearchText = ""
+    @State private var isSaving = false
+    @State private var showingLeaveConfirm = false
+    private var canEditRelayGroup: Bool {
+        guard let group else { return false }
+        return model.canEditRelayGroup(group)
+    }
+    private var isRelayGroupCreator: Bool {
+        guard let group else { return false }
+        return model.isRelayGroupCreator(group)
+    }
+    private var leaveButtonLabel: String {
+        isRelayGroupCreator ? "Leave & Extinguish Group" : "Leave Group"
+    }
+    private var leaveDialogTitle: String {
+        isRelayGroupCreator ? "Extinguish this group?" : "Leave this group?"
+    }
+    private var leaveDialogMessage: String {
+        if isRelayGroupCreator {
+            return "As creator, leaving will extinguish this relay-backed group for all members."
+        }
+        return "You will stop receiving messages for this group on this device."
+    }
+
+    private var group: GroupConversation? {
+        model.state.group(for: groupId)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    SheetActionBar(onClose: { dismiss() }) {
+                        Button {
+                            save()
+                        } label: {
+                            Label(isSaving ? "Saving…" : "Save", systemImage: "checkmark")
+                        }
+                        .glassButton(prominent: true, compact: true)
+                        .disabled(!canSave || isSaving || group == nil || !canEditRelayGroup)
+                    }
+
+                    SheetHero(
+                        icon: "person.3.fill",
+                        title: "Group Settings",
+                        subtitle: canEditRelayGroup
+                            ? "Manage the group name and membership."
+                            : "Review membership and relay policy."
+                    )
+
+                    if group == nil {
+                        SheetEmptyState(
+                            icon: "person.3.sequence.fill",
+                            title: "Group unavailable",
+                            message: "This group no longer exists for the active identity."
+                        )
+                    } else {
+                        SheetSection(title: "Group Name", icon: "textformat") {
+                        TextField("Group name", text: $title)
+                            .disabled(!canEditRelayGroup)
+                            .noctyraInputField()
+                        }
+
+                        SheetSection(
+                            title: "Members",
+                            subtitle: "\(selectedMembers.count) selected",
+                            icon: "person.2.fill"
+                        ) {
+                            InlineSearchField(text: $memberSearchText, prompt: "Search members")
+
+                            if model.state.contacts.isEmpty {
+                                SheetEmptyState(
+                                    icon: "person.crop.circle.badge.plus",
+                                    title: "No contacts available",
+                                    message: "Add contacts before editing group membership."
+                                )
+                            } else if filteredContacts.isEmpty {
+                                SheetEmptyState(
+                                    icon: "magnifyingglass",
+                                    title: "No matching contacts",
+                                    message: "Try another name or fingerprint."
+                                )
+                            } else {
+                                LazyVStack(spacing: 8) {
+                                    ForEach(filteredContacts) { contact in
+                                        SheetContactSelectionRow(
+                                            contact: contact,
+                                            isSelected: selectedMembers.contains(contact.id),
+                                            isEnabled: canEditRelayGroup
+                                        ) {
+                                            toggle(contact.id)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        SheetSection(title: "How Changes Sync", icon: "arrow.triangle.2.circlepath") {
+                            Text(
+                                group?.relayInboxId != nil
+                                    ? "Changes are synced to the relay group registry for this identity. Messages remain end-to-end encrypted for each member."
+                                    : "Changes affect this identity profile on this device. Messages remain end-to-end encrypted for each member."
+                            )
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+
+                            if !canEditRelayGroup {
+                                Label(
+                                    "Only the group creator can edit relay-backed groups.",
+                                    systemImage: "lock.fill"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        SheetSection(
+                            title: isRelayGroupCreator ? "Extinguish Group" : "Leave Group",
+                            icon: "rectangle.portrait.and.arrow.right",
+                            role: .destructive
+                        ) {
+                            Text(
+                                isRelayGroupCreator
+                                    ? "Leaving as creator permanently extinguishes this relay-backed group for every member."
+                                    : "You will stop receiving messages for this group on this identity."
+                            )
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+
+                            Button(leaveButtonLabel, role: .destructive) {
+                                showingLeaveConfirm = true
+                            }
+                            .glassButton(prominent: true)
+                            .disabled(isSaving)
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: 680)
+                .frame(maxWidth: .infinity)
+            }
+            .noctyraSheetBackground()
+            .hideSheetNavigationBar()
+        }
+        .noctyraSheetPresentation()
+        .onAppear {
+            loadCurrentValues()
+        }
+        .onChange(of: group?.id) { _, _ in
+            loadCurrentValues()
+        }
+        .confirmationDialog(leaveDialogTitle, isPresented: $showingLeaveConfirm) {
+            Button(leaveButtonLabel, role: .destructive) {
+                leave()
+            }
+        } message: {
+            Text(leaveDialogMessage)
+        }
+    }
+
+    private func toggle(_ contactId: UUID) {
+        guard canEditRelayGroup else { return }
+        if selectedMembers.contains(contactId) {
+            selectedMembers.remove(contactId)
+        } else {
+            selectedMembers.insert(contactId)
+        }
+        FeedbackGenerator.light()
+    }
+
+    private var canSave: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && selectedMembers.count >= 2
+    }
+
+    private var filteredContacts: [Contact] {
+        let sorted = model.state.contacts.sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+        let query = memberSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return sorted }
+        return sorted.filter { contact in
+            let haystack = "\(contact.displayName) \(contact.fingerprint)".lowercased()
+            return haystack.contains(query)
+        }
+    }
+
+    private func loadCurrentValues() {
+        guard let group else { return }
+        title = group.title
+        selectedMembers = Set(group.memberContactIds)
+    }
+
+    private func save() {
+        guard canSave else { return }
+        isSaving = true
+        Task {
+            await model.updateGroup(
+                id: groupId,
+                title: title,
+                memberContactIds: Array(selectedMembers)
+            )
+            await MainActor.run {
+                isSaving = false
+                if model.state.group(for: groupId) != nil {
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    private func leave() {
+        isSaving = true
+        Task {
+            await model.leaveGroup(id: groupId)
+            await MainActor.run {
+                isSaving = false
+                dismiss()
+            }
+        }
+    }
+}
+
 private struct MessageRow: View {
     @ObservedObject var model: ClientViewModel
-    let message: Message
+    let message: PICCPCore.Message
     let isRevealed: Bool
     let onRetry: (() -> Void)?
     @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack {
@@ -1216,13 +2604,16 @@ private struct MessageRow: View {
                 bubble
             }
         }
-        .listRowSeparator(.hidden)
-        .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+        .padding(.vertical, 2)
     }
 
     private var bubble: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let sender = message.senderDisplayName, message.direction == .received {
+                Text(sender)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
             if message.isMismatch {
                 HStack(spacing: 8) {
                     MismatchInlineBadge()
@@ -1248,29 +2639,48 @@ private struct MessageRow: View {
                     .foregroundStyle(isRevealed ? .primary : .secondary)
             }
         }
-        .padding(10)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: bubbleMaxWidth, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.ultraThinMaterial)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(message.direction == .sent ? bubbleTint.opacity(colorScheme == .dark ? 0.28 : 0.22) : Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.055))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(bubbleTint.opacity(0.22))
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .opacity(message.direction == .sent ? 0.30 : 0.42)
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(
                             LinearGradient(
                                 colors: [
-                                    Color.white.opacity(0.55),
-                                    Color.white.opacity(0.08)
+                                    bubbleTint.opacity(message.direction == .sent ? 0.14 : 0.055),
+                                    Color.clear
                                 ],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
-                            ),
-                            lineWidth: 0.8
+                            )
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(
+                            Color.white.opacity(colorScheme == .dark ? 0.11 : 0.18),
+                            lineWidth: 0.7
                         )
                 )
         )
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: bubbleTint.opacity(message.direction == .sent ? 0.12 : 0.055), radius: 5, x: 0, y: 2)
+    }
+
+    private var bubbleMaxWidth: CGFloat {
+        #if os(iOS)
+        return 330
+        #else
+        return 560
+        #endif
     }
 
     private var bubbleTint: Color {
@@ -1299,7 +2709,17 @@ private struct AttachmentBubble: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            attachmentPreview
+            if isImageAttachment {
+                attachmentPreview
+            } else if isAudioAttachment {
+                AudioAttachmentPlayer(
+                    model: model,
+                    attachment: attachment,
+                    isRevealed: isRevealed
+                )
+            } else {
+                unsupportedPreview
+            }
             Text(title)
                 .font(.callout)
                 .foregroundStyle(isRevealed ? .primary : .secondary)
@@ -1320,6 +2740,18 @@ private struct AttachmentBubble: View {
                 loadImageIfNeeded()
             }
         }
+    }
+
+    private var normalizedMimeType: String {
+        attachment.descriptor.mimeType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var isImageAttachment: Bool {
+        normalizedMimeType.hasPrefix("image/")
+    }
+
+    private var isAudioAttachment: Bool {
+        normalizedMimeType.hasPrefix("audio/")
     }
 
     private var attachmentPreview: some View {
@@ -1349,6 +2781,23 @@ private struct AttachmentBubble: View {
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
+    private var unsupportedPreview: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "paperclip")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text("Attachment")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.08))
+        )
+    }
+
     private var previewSize: CGFloat {
         #if os(macOS)
         return 220
@@ -1373,10 +2822,17 @@ private struct AttachmentBubble: View {
         }
         isLoading = true
         Task {
-            let data = await model.loadAttachmentData(fileName: fileName)
+            var data = await model.loadAttachmentData(fileName: fileName)
             await MainActor.run {
                 defer { isLoading = false }
-                guard let data, let image = makeImage(from: data) else {
+                guard var decrypted = data else {
+                    didFail = true
+                    return
+                }
+                let rendered = makeImage(from: decrypted)
+                decrypted.secureWipe()
+                data = nil
+                guard let image = rendered else {
                     didFail = true
                     return
                 }
@@ -1411,6 +2867,213 @@ private struct AttachmentBubble: View {
         }
         let pixels = width * height
         return pixels > 0 && pixels <= maxPreviewPixels
+    }
+}
+
+private struct AudioAttachmentPlayer: View {
+    @ObservedObject var model: ClientViewModel
+    let attachment: AttachmentInfo
+    let isRevealed: Bool
+
+    @State private var player: AVAudioPlayer?
+    @State private var isLoading = false
+    @State private var didFail = false
+    @State private var isPlaying = false
+    @State private var currentTime: TimeInterval = 0
+    @State private var duration: TimeInterval = 0
+    @State private var progressTimer: Timer?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Button {
+                    togglePlayback()
+                } label: {
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .glassCircleButton(diameter: 30)
+                .hoverLift()
+                .disabled(!isRevealed || isLoading)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(statusLabel)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(isRevealed ? .primary : .secondary)
+                    Text(timeLabel)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            progressBar
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.7)
+                )
+        )
+        .onDisappear {
+            stopPlayback()
+        }
+        .onChange(of: isRevealed) { _, newValue in
+            if !newValue {
+                stopPlayback()
+            }
+        }
+    }
+
+    private var statusLabel: String {
+        if !isRevealed {
+            return "Hidden voice message"
+        }
+        if isLoading {
+            return "Loading voice message..."
+        }
+        if didFail {
+            return "Voice message unavailable"
+        }
+        return isPlaying ? "Playing voice message" : "Voice message"
+    }
+
+    private var timeLabel: String {
+        if duration <= 0 {
+            return "00:00"
+        }
+        return "\(formatDuration(currentTime)) / \(formatDuration(duration))"
+    }
+
+    private var progressBar: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.10))
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.40))
+                    .frame(width: geometry.size.width * progress)
+            }
+        }
+        .frame(height: 6)
+    }
+
+    private var progress: CGFloat {
+        guard duration > 0 else { return 0 }
+        return CGFloat(min(max(currentTime / duration, 0), 1))
+    }
+
+    private func togglePlayback() {
+        guard isRevealed else { return }
+        if isPlaying {
+            stopPlayback()
+            return
+        }
+        Task {
+            if player == nil {
+                await loadPlayer()
+            }
+            guard let player else {
+                didFail = true
+                return
+            }
+            if player.currentTime >= player.duration {
+                player.currentTime = 0
+            }
+            if player.play() {
+                duration = player.duration
+                isPlaying = true
+                startProgressTimer()
+            } else {
+                didFail = true
+            }
+        }
+    }
+
+    private func loadPlayer() async {
+        guard !isLoading else { return }
+        guard let fileName = attachment.localFileName else {
+            didFail = true
+            return
+        }
+        isLoading = true
+        var data = await model.loadAttachmentData(fileName: fileName)
+        defer {
+            isLoading = false
+            data?.secureWipe()
+            data = nil
+        }
+        guard let data else {
+            didFail = true
+            return
+        }
+        do {
+            let candidate = try AVAudioPlayer(data: data)
+            candidate.prepareToPlay()
+            player = candidate
+            duration = candidate.duration
+            currentTime = 0
+            didFail = false
+        } catch {
+            didFail = true
+        }
+    }
+
+    private func stopPlayback() {
+        if let player, player.isPlaying {
+            player.stop()
+        }
+        player?.currentTime = 0
+        currentTime = 0
+        isPlaying = false
+        stopProgressTimer()
+    }
+
+    private func startProgressTimer() {
+        stopProgressTimer()
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+            guard let player else {
+                stopProgressTimer()
+                isPlaying = false
+                return
+            }
+            currentTime = player.currentTime
+            duration = player.duration
+            if !player.isPlaying {
+                isPlaying = false
+                stopProgressTimer()
+                if currentTime >= duration {
+                    currentTime = duration
+                }
+            }
+        }
+    }
+
+    private func stopProgressTimer() {
+        progressTimer?.invalidate()
+        progressTimer = nil
+    }
+
+    private func formatDuration(_ value: TimeInterval) -> String {
+        let seconds = max(0, Int(value.rounded()))
+        let minutes = seconds / 60
+        let remainder = seconds % 60
+        return String(format: "%02d:%02d", minutes, remainder)
+    }
+}
+
+private extension Data {
+    mutating func secureWipe() {
+        guard !isEmpty else { return }
+        let byteCount = count
+        withUnsafeMutableBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            _ = memset_s(baseAddress, byteCount, 0, byteCount)
+        }
+        removeAll(keepingCapacity: false)
     }
 }
 
@@ -1634,6 +3297,7 @@ private struct MyCodeView: View {
     @State private var showingShareSheet = false
     @State private var shareURL: URL?
     @State private var showingCode = false
+    @State private var isPreparingCode = false
 
     var body: some View {
         Group {
@@ -1644,7 +3308,7 @@ private struct MyCodeView: View {
                     if screenProtection.isSensitiveHidden {
                         SensitiveContentPlaceholder(
                             title: "My Code Hidden",
-                            message: "Screen capture or an external display is active. Your contact code is hidden to protect your OPSEC."
+                            message: "Screen capture or an external display is active. Your contact code is hidden to protect your operational security."
                         )
                     } else {
                         codeContent
@@ -1656,7 +3320,7 @@ private struct MyCodeView: View {
                 if screenProtection.isSensitiveHidden {
                     SensitiveContentPlaceholder(
                         title: "My Code Hidden",
-                        message: "Screen capture or an external display is active. Your contact code is hidden to protect your OPSEC."
+                        message: "Screen capture or an external display is active. Your contact code is hidden to protect your operational security."
                     )
                 } else {
                     codeContent
@@ -1680,27 +3344,18 @@ private struct MyCodeView: View {
                 #if os(macOS)
                 PaneHeader(title: "My Code")
                 #endif
-                Text("Share your contact code or export a password-protected file.")
-                    .font(.headline)
-
-	                ViewThatFits(in: .horizontal) {
-	                    qrBlock(size: 260)
-	                    qrBlock(size: 230)
-	                    qrBlock(size: 200)
-	                    qrBlock(size: 180)
-	                }
-	                .frame(maxWidth: .infinity, alignment: .center)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Password-Protected Share")
-                        .font(.subheadline.weight(.semibold))
-                    Text("Create a file share or AirDrop payload protected by a password.")
-                        .font(.caption)
+                    Label("Password-Protected Share", systemImage: "lock.doc.fill")
+                        .font(.headline)
+                    Text("Set a password, then export a file or send it through AirDrop. The recipient imports the same protected payload.")
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                     SecureField("Password", text: $sharePassword)
+                        .noctyraInputField()
                     #if os(iOS)
                     ViewThatFits(in: .horizontal) {
-                        HStack {
+                        HStack(spacing: 10) {
                             exportFileButton
                             shareAirDropButton
                         }
@@ -1719,109 +3374,136 @@ private struct MyCodeView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .padding(14)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.12))
-                )
+                .uniformGlassCard(cornerRadius: 18, padding: 16)
 
-                Text("Contact Code")
-                    .font(.subheadline)
-                if showingCode {
-                    TextEditor(text: $code)
-                        .font(.callout)
-                        .frame(minHeight: 180)
-                        .border(Color.gray.opacity(0.3))
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Contact code hidden.")
-                            .font(.callout.weight(.semibold))
-                        Text("Reveal to show the full share string.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 16)
-                    .padding(.horizontal, 12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(.ultraThinMaterial)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.12))
-                    )
-                }
-
-                #if os(iOS)
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) {
-                        revealCodeButton
-                        copyCodeButton
-                        refreshCodeButton
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Label("Scan to Pair", systemImage: "qrcode")
+                            .font(.headline)
+                        Spacer()
+                        #if os(iOS)
                         fullScreenQRButton
-                    }
-                    HStack(spacing: 10) {
-                        revealCodeButton
-                        copyCodeButton
-                        Menu {
-                            Button("Refresh") { refreshCode() }
-                            Button("Full Screen QR") { showingFullScreenQR = true }
+                        #else
+                        Button {
+                            showingFullScreenQR = true
                         } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .font(.system(size: 16, weight: .semibold))
+                            Label("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
                         }
-                        .glassCircleButton(diameter: 36)
+                        .glassButton(compact: true)
+                        .hoverLift()
+                        #endif
                     }
-                    VStack(spacing: 10) {
+
+                    if isPreparingCode {
+                        VStack(spacing: 12) {
+                            ProgressView()
+                                .controlSize(.large)
+                            Text("Preparing protected contact code…")
+                                .font(.subheadline.weight(.semibold))
+                            Text("Post-quantum keys are large. This may take a moment.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 220)
+                    } else {
+                        #if os(iOS)
+                        ViewThatFits(in: .horizontal) {
+                            qrBlock(size: 220)
+                            qrBlock(size: 200)
+                            qrBlock(size: 180)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        #else
+                        ViewThatFits(in: .horizontal) {
+                            qrBlock(size: 260)
+                            qrBlock(size: 230)
+                            qrBlock(size: 200)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        #endif
+                    }
+                }
+                .uniformGlassCard(cornerRadius: 18, padding: 16)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Contact Code", systemImage: "text.alignleft")
+                        .font(.headline)
+                    if showingCode {
+                        TextEditor(text: $code)
+                            .font(.callout.monospaced())
+                            .scrollContentBackground(.hidden)
+                            .frame(minHeight: 150)
+                            .padding(8)
+                            .background(Color.black.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Contact code hidden")
+                                .font(.callout.weight(.semibold))
+                            Text("You can copy it without revealing the full post-quantum payload.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 10)
+                    }
+
+                    #if os(iOS)
+                    ViewThatFits(in: .horizontal) {
                         HStack(spacing: 10) {
                             revealCodeButton
                             copyCodeButton
+                            refreshCodeButton
                         }
                         HStack(spacing: 10) {
-                            refreshCodeButton
-                            fullScreenQRButton
+                            revealCodeButton
+                            copyCodeButton
+                            Menu {
+                                Button("Refresh") { refreshCode() }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                                    .font(.system(size: 16, weight: .semibold))
+                            }
+                            .glassCircleButton(diameter: 36)
                         }
                     }
-                }
-                #else
-                HStack {
-                    Button(showingCode ? "Hide" : "Reveal") {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            showingCode.toggle()
+                    #else
+                    HStack {
+                        Button(showingCode ? "Hide" : "Reveal") {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                showingCode.toggle()
+                            }
                         }
+                        .glassButton()
+                        .hoverLift()
+                        Button("Copy") {
+                            Clipboard.copy(code)
+                            model.lastInfo = "Copied contact code."
+                        }
+                        .glassButton()
+                        .hoverLift()
+                        Button("Refresh") {
+                            refreshCode()
+                        }
+                        .glassButton()
+                        .hoverLift()
                     }
-                    .glassButton()
-                    .hoverLift()
-                    Button("Copy") {
-                        Clipboard.copy(code)
-                        model.lastInfo = "Copied contact code."
-                    }
-                    .glassButton()
-                    .hoverLift()
-                    Button("Refresh") {
-                        refreshCode()
-                    }
-                    .glassButton()
-                    .hoverLift()
-                }
-                #endif
+                    #endif
 
-                Text("Refresh regenerates the share code and QR frames from your current identity and relay. It does not rotate keys.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    Text("Refresh rebuilds the code from your current identity and relay. It does not rotate keys.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .uniformGlassCard(cornerRadius: 18, padding: 16)
             }
-	            #if os(iOS)
-	            .padding(.horizontal, 16)
-	            #else
-	            .padding(.horizontal, 20)
-	            #endif
-	            .padding(.bottom, 20)
-	        }
+            #if os(iOS)
+            .padding(.horizontal, 16)
+            #else
+            .padding(.horizontal, 20)
+            #endif
+            .padding(.bottom, 20)
+            .adaptiveReadableContent(maxWidth: 880)
+        }
+        .glassBackgroundIfNeeded()
         .privacySensitive()
         .onAppear {
             refreshCode()
@@ -1842,6 +3524,7 @@ private struct MyCodeView: View {
         }
         .sheet(isPresented: $showingFullScreenQR) {
             FullScreenQRView(frames: qrFrames, code: code)
+                .noctyraSheetPresentation()
         }
         #if os(iOS)
         .sheet(isPresented: $showingShareSheet) {
@@ -1856,26 +3539,37 @@ private struct MyCodeView: View {
         #endif
     }
 
-	    private func refreshCode() {
-	        code = model.contactOfferCode()
-	        qrFrames = QRCodeTransfer.encodeFrames(code, maxChunkSize: 360)
-	    }
+    private func refreshCode() {
+        guard !isPreparingCode else { return }
+        isPreparingCode = true
+        Task {
+            let generatedCode = await model.contactOfferCode()
+            await MainActor.run {
+                code = generatedCode
+                qrFrames = QRCodeTransfer.encodeFrames(generatedCode, maxChunkSize: 360)
+                isPreparingCode = false
+            }
+        }
+    }
 
-	    @ViewBuilder
-	    private func qrBlock(size: CGFloat) -> some View {
-	        VStack(spacing: 8) {
-	            if qrFrames.count > 1 {
-	                AnimatedQRCodeView(frames: qrFrames, size: size, interval: 0.7)
-	                Text("Animated QR (scan frames in order)")
-	                    .font(.caption)
-	                    .foregroundStyle(.secondary)
-	                    .multilineTextAlignment(.center)
-	            } else {
-	                QRCodeView(text: code, size: size)
-	            }
-	        }
-	        .frame(maxWidth: .infinity, alignment: .center)
-	    }
+    @ViewBuilder
+    private func qrBlock(size: CGFloat) -> some View {
+        VStack(spacing: 8) {
+            if qrFrames.count > 1 {
+                AnimatedQRCodeView(frames: qrFrames, size: size, interval: 0.45)
+                Text("Animated contact code · \(qrFrames.count) frames")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Text("Use Full Screen QR for the fastest scan.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                QRCodeView(text: code, size: size)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
 
     private func prepareAirDropShare() async {
         guard !sharePassword.isEmpty else {
@@ -1984,6 +3678,201 @@ private struct MyCodeView: View {
     }
 }
 
+private struct CreateGroupView: View {
+    @ObservedObject var model: ClientViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var selectedMembers = Set<UUID>()
+    @State private var memberSearchText = ""
+    @State private var isCreating = false
+    private var selectedRelayInfo: RelayInfo? {
+        guard let selectedRelayId = model.state.selectedRelayId else { return nil }
+        return model.state.relayServers.first(where: { $0.id == selectedRelayId })?.advertisedInfo
+    }
+
+    private var isRelayGroupCreationDisabled: Bool {
+        selectedRelayInfo?.groupCreationMode == .disabled
+    }
+
+    private var relayGroupCreationLabel: String {
+        if selectedRelayInfo?.groupCreationMode == .disabled {
+            return "Disabled"
+        }
+        return "Allowed"
+    }
+
+    private var relayDisplayName: String {
+        if let relayName = selectedRelayInfo?.relayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !relayName.isEmpty {
+            return relayName
+        }
+        return "\(model.state.relay.host):\(model.state.relay.port)"
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    SheetActionBar(closeLabel: "Cancel", onClose: { dismiss() }) {
+                        Button {
+                            create()
+                        } label: {
+                            Label(isCreating ? "Creating…" : "Create", systemImage: "plus")
+                        }
+                        .glassButton(prominent: true, compact: true)
+                        .disabled(!canCreate || isCreating || isRelayGroupCreationDisabled)
+                    }
+
+                    SheetHero(
+                        icon: "person.3.fill",
+                        title: "Create Group",
+                        subtitle: "Choose a name and at least two members."
+                    )
+
+                    SheetSection(title: "Group Name", icon: "textformat") {
+                    TextField("e.g. Ops Team", text: $title)
+                        .noctyraInputField()
+                    }
+
+                    SheetSection(
+                        title: "Members",
+                        subtitle: "\(selectedMembers.count) selected",
+                        icon: "person.2.fill"
+                    ) {
+                        InlineSearchField(text: $memberSearchText, prompt: "Search members")
+
+                        if model.state.contacts.isEmpty {
+                            SheetEmptyState(
+                                icon: "person.crop.circle.badge.plus",
+                                title: "Add contacts first",
+                                message: "Groups require at least two existing contacts."
+                            )
+                        } else if filteredContacts.isEmpty {
+                            SheetEmptyState(
+                                icon: "magnifyingglass",
+                                title: "No matching contacts",
+                                message: "Try another name or fingerprint."
+                            )
+                        } else {
+                            LazyVStack(spacing: 8) {
+                                ForEach(filteredContacts) { contact in
+                                    SheetContactSelectionRow(
+                                        contact: contact,
+                                        isSelected: selectedMembers.contains(contact.id)
+                                    ) {
+                                        toggle(contact.id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    SheetSection(title: "Delivery Model", icon: "lock.shield.fill") {
+                        Text("Each group message is delivered as an independently encrypted envelope to every selected member.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if let relayInfo = selectedRelayInfo {
+                        SheetSection(title: "Relay Policy", icon: "antenna.radiowaves.left.and.right") {
+                            sheetMetadataRow("Relay", relayDisplayName)
+                            sheetMetadataRow("Group creation", relayGroupCreationLabel)
+
+                            if relayInfo.federation.mode == .curated {
+                                if relayInfo.curatedStrictPolicyEnabled == true {
+                                    sheetMetadataRow("Federation", "Strict curated")
+                                }
+                                if let quorum = relayInfo.curatedCoordinatorQuorum {
+                                    sheetMetadataRow("Coordinator quorum", "\(quorum)")
+                                }
+                                if let requireSigned = relayInfo.curatedRequireSignedDirectory {
+                                    Label(
+                                        requireSigned ? "Signed directory required" : "Unsigned directory accepted",
+                                        systemImage: requireSigned ? "checkmark.shield.fill" : "exclamationmark.triangle.fill"
+                                    )
+                                    .font(.caption)
+                                    .foregroundStyle(requireSigned ? Color.secondary : Color.orange)
+                                }
+                            }
+
+                            if relayInfo.groupCreationMode == .disabled {
+                                Label(
+                                    "Choose another relay or ask the operator to enable group creation.",
+                                    systemImage: "exclamationmark.triangle.fill"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: 680)
+                .frame(maxWidth: .infinity)
+            }
+            .noctyraSheetBackground()
+            .hideSheetNavigationBar()
+        }
+        .noctyraSheetPresentation()
+    }
+
+    private func toggle(_ contactId: UUID) {
+        if selectedMembers.contains(contactId) {
+            selectedMembers.remove(contactId)
+        } else {
+            selectedMembers.insert(contactId)
+        }
+        FeedbackGenerator.light()
+    }
+
+    private func sheetMetadataRow(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.caption)
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
+    private var canCreate: Bool {
+        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && selectedMembers.count >= 2
+    }
+
+    private var filteredContacts: [Contact] {
+        let sorted = model.state.contacts.sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+        let query = memberSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return sorted }
+        return sorted.filter { contact in
+            let haystack = "\(contact.displayName) \(contact.fingerprint)".lowercased()
+            return haystack.contains(query)
+        }
+    }
+
+    private func create() {
+        guard canCreate else { return }
+        guard !isRelayGroupCreationDisabled else {
+            model.lastError = "Group creation is disabled on the selected relay."
+            return
+        }
+        isCreating = true
+        let priorCount = model.state.groups.count
+        Task {
+            await model.createGroup(title: title, memberContactIds: Array(selectedMembers))
+            await MainActor.run {
+                isCreating = false
+                if model.state.groups.count > priorCount {
+                    dismiss()
+                }
+            }
+        }
+    }
+}
+
 private struct AddContactView: View {
     @ObservedObject var model: ClientViewModel
     @Environment(\.dismiss) private var dismiss
@@ -2000,96 +3889,42 @@ private struct AddContactView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-	                Section("Pairing Method") {
-	                    #if os(iOS)
-	                    ChipSegmentedControl(
-	                        selection: $method,
-	                        options: PairingMethod.allCases,
-	                        title: { $0.title },
-	                        minItemWidth: 112
-	                    )
-	                    #else
-	                    Picker("Method", selection: $method) {
-	                        ForEach(PairingMethod.allCases) { option in
-	                            Text(option.title).tag(option)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    #endif
-                }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    SheetActionBar(closeLabel: "Cancel", onClose: { dismiss() })
 
-                switch method {
-                case .scanQR:
-                    Section("Scan QR") {
-                        Button("Scan QR Code") {
-                            showingScanner = true
-                        }
-                        .hoverLift()
-                        if !qrProgress.isEmpty {
-                            Text(qrProgress)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                case .pasteCode:
-                    Section("Contact Code") {
-                        TextEditor(text: $code)
-                            .frame(minHeight: 160)
-                        Button("Add Contact") {
-                            Task {
-                                await model.addContact(code: code)
-                                dismiss()
+                    SheetHero(
+                        icon: "person.crop.circle.badge.plus",
+                        title: "Add Contact",
+                        subtitle: pairingMethodSubtitle
+                    )
+
+                    SheetSection(title: "Pairing Method", icon: "point.3.connected.trianglepath.dotted") {
+                        #if os(iOS)
+                        ChipSegmentedControl(
+                            selection: $method,
+                            options: PairingMethod.allCases,
+                            title: { $0.title },
+                            minItemWidth: 112
+                        )
+                        #else
+                        Picker("Method", selection: $method) {
+                            ForEach(PairingMethod.allCases) { option in
+                                Text(option.title).tag(option)
                             }
                         }
-                        .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        .hoverLift()
+                        .pickerStyle(.segmented)
+                        #endif
                     }
-                case .importFile:
-                    Section("Contact File") {
-                        Button("Choose File") {
-                            showingImporter = true
-                        }
-                        .hoverLift()
-                        if let importedFileName {
-                            Text("Selected: \(importedFileName)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        SecureField("Password", text: $sharePassword)
-                        Button("Import Selected File") {
-                            Task {
-                                guard let data = importedFileData else {
-                                    model.lastError = "No file selected."
-                                    return
-                                }
-                                guard !sharePassword.isEmpty else {
-                                    model.lastError = "Password required to import."
-                                    return
-                                }
-                                await model.addContact(shareData: data, password: sharePassword)
-                                dismiss()
-                            }
-                        }
-                        .disabled(importedFileData == nil)
-                        .hoverLift()
-                    }
-                case .insecure:
-                    insecurePairingView
+
+                    pairingMethodContent
                 }
+                .padding(16)
+                .frame(maxWidth: 720)
+                .frame(maxWidth: .infinity)
             }
-            .navigationTitle("Add Contact")
-            .scrollContentBackground(.hidden)
-            .glassBackgroundIfNeeded()
-            #if os(macOS)
-            .formStyle(.grouped)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                        .hoverLift()
-                }
-            }
+            .noctyraSheetBackground()
+            .hideSheetNavigationBar()
             .onAppear {
                 insecureSettings = model.state.insecurePairing
             }
@@ -2110,7 +3945,7 @@ private struct AddContactView: View {
                                     url.stopAccessingSecurityScopedResource()
                                 }
                             }
-                            let data = try Data(contentsOf: url)
+                            let data = try readBoundedFile(url, maxBytes: 1 * 1024 * 1024)
                             importedFileData = data
                             importedFileName = url.lastPathComponent
                         } catch {
@@ -2123,150 +3958,199 @@ private struct AddContactView: View {
             }
             .sheet(isPresented: $showingScanner) {
                 NavigationStack {
-                    QRCodeScannerView(onScan: { scanned in
-                        let result = qrCollector.consume(scanned)
-                        switch result {
-                        case .single(let value):
-                            code = value
-                            qrProgress = ""
+                    VStack(spacing: 0) {
+                        SheetActionBar {
                             showingScanner = false
-                            Task {
-                                await model.addContact(code: value)
-                                dismiss()
-                            }
-                        case .partial(_, let received, let total):
-                            qrProgress = "Scanned \(received) / \(total) frames"
-                        case .complete(let value):
-                            code = value
-                            qrProgress = ""
-                            showingScanner = false
-                            Task {
-                                await model.addContact(code: value)
-                                dismiss()
-                            }
-                        case .invalid:
-                            qrProgress = "Invalid QR sequence."
                         }
-                    }, onError: { message in
-                        showingScanner = false
-                        model.lastError = message
-                    }, allowsMultiple: true)
-                    .padding()
-                    .navigationTitle("Scan QR")
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("Close") { showingScanner = false }
-                                .hoverLift()
+                        .padding(.horizontal, 16)
+                        .padding(.top, 12)
+
+                        VStack(spacing: 14) {
+                            SheetHero(
+                                icon: "qrcode.viewfinder",
+                                title: "Scan Contact Code",
+                                subtitle: "Hold the other device steady while animated frames are collected."
+                            )
+
+                            SheetSection(
+                                title: "Camera",
+                                subtitle: qrProgress.isEmpty ? "Align the QR code inside the guide." : qrProgress,
+                                icon: "camera.fill"
+                            ) {
+                                QRCodeScannerView(onScan: { scanned in
+                                    let result = qrCollector.consume(scanned)
+                                    switch result {
+                                    case .single(let value):
+                                        code = value
+                                        qrProgress = ""
+                                        showingScanner = false
+                                        Task {
+                                            await model.addContact(code: value)
+                                            dismiss()
+                                        }
+                                    case .partial(_, let received, let total):
+                                        qrProgress = "Scanned \(received) of \(total) frames"
+                                    case .complete(let value):
+                                        code = value
+                                        qrProgress = ""
+                                        showingScanner = false
+                                        Task {
+                                            await model.addContact(code: value)
+                                            dismiss()
+                                        }
+                                    case .invalid:
+                                        qrProgress = "That frame is not part of a valid contact code."
+                                    }
+                                }, onError: { message in
+                                    showingScanner = false
+                                    model.lastError = message
+                                }, allowsMultiple: true)
+                            }
                         }
+                        .frame(maxWidth: 680)
+                        .padding(16)
+                        .frame(maxWidth: .infinity)
+                        Spacer(minLength: 0)
                     }
+                    .noctyraSheetBackground()
+                    .hideSheetNavigationBar()
                 }
+                .noctyraSheetPresentation()
             }
         }
+        .noctyraSheetPresentation()
     }
 
     @ViewBuilder
-    private var insecurePairingView: some View {
-        let formattedDate: (Date?) -> String = { date in
-            date?.formatted(date: .abbreviated, time: .shortened) ?? "Never"
-        }
-
-        Section("Insecure Pairing") {
-            Toggle("Enable insecure pairing", isOn: $insecureSettings.isEnabled)
-            Toggle("I understand pairing can be intercepted", isOn: $insecureSettings.acknowledgeInterceptRisk)
-                .disabled(!insecureSettings.isEnabled)
-            Toggle("Allow inbound pairing requests", isOn: $insecureSettings.allowInboundRequests)
-                .disabled(!insecureSettings.isEnabled || !insecureSettings.acknowledgeInterceptRisk)
-            Text("Only enable this if you accept that pairing metadata is sent in clear.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-
-        Section("Pairing Channel") {
-            let binding = Binding(
-                get: { insecureSettings.method ?? .relay },
-                set: { newValue in
-                    insecureSettings.method = newValue
+    private var pairingMethodContent: some View {
+        switch method {
+        case .scanQR:
+            SheetSection(title: "Scan Animated QR", icon: "qrcode.viewfinder") {
+                Text("Point this device at the other person’s contact QR. Multi-frame codes are collected automatically.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button {
+                    showingScanner = true
+                } label: {
+                    Label("Open QR Scanner", systemImage: "camera.viewfinder")
                 }
-            )
-	            #if os(iOS)
-	            ChipSegmentedControl(
-	                selection: binding,
-	                options: InsecurePairingMethod.allCases,
-	                title: { $0.displayName },
-	                minItemWidth: 120
-	            )
-	            .disabled(!insecureSettings.isReady)
-	            #else
-	            Picker("Method", selection: binding) {
-                ForEach(InsecurePairingMethod.allCases) { option in
-                    Text(option.displayName).tag(option)
+                .glassButton(prominent: true)
+                .hoverLift()
+                if !qrProgress.isEmpty {
+                    Label(qrProgress, systemImage: "circle.dotted")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .pickerStyle(.segmented)
-            .disabled(!insecureSettings.isReady)
-            #endif
-
-            if insecureSettings.method == .bluetooth {
-                Text("Bluetooth discovery is coming soon.")
-                    .font(.caption)
+        case .pasteCode:
+            SheetSection(title: "Paste Contact Code", icon: "doc.on.clipboard") {
+                Text("Paste the complete contact payload exactly as received.")
+                    .font(.callout)
                     .foregroundStyle(.secondary)
-            } else if insecureSettings.method == .localNetwork {
-                Text("Local pairing uses your current relay. Set it to a LAN relay to discover peers.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                TextEditor(text: $code)
+                    .font(.caption.monospaced())
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 150)
+                    .noctyraInputField()
+                Button {
+                    Task {
+                        await model.addContact(code: code)
+                        dismiss()
+                    }
+                } label: {
+                    Label("Add Contact", systemImage: "person.badge.plus")
+                }
+                .glassButton(prominent: true)
+                .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .hoverLift()
             }
-        }
+        case .importFile:
+            SheetSection(title: "Protected Contact File", icon: "doc.badge.key") {
+                Text("Choose a Noctyra contact file and enter the password shared by its sender.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
 
-        if insecureSettings.isReady {
-            Section("Status") {
-                VStack(alignment: .leading, spacing: 6) {
-                    let relay = model.insecureLastRelay ?? model.state.relay
-                    Text("Relay: \(relay.host):\(relay.port)")
+                Button {
+                    showingImporter = true
+                } label: {
+                    Label(
+                        importedFileData == nil ? "Choose Contact File" : "Choose Another File",
+                        systemImage: "folder"
+                    )
+                }
+                .glassButton()
+                .hoverLift()
+
+                if let importedFileName {
+                    Label(importedFileName, systemImage: "checkmark.circle.fill")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text("Announced: \(formattedDate(model.insecureLastAnnounceAt))")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("Last discovery: \(formattedDate(model.insecureLastListAt))")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("Peers found: \(model.insecureLastPeerCount)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    if model.state.insecurePairing.allowInboundRequests {
-                        Text("Requests fetched: \(formattedDate(model.insecureLastRequestFetchAt))")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text("Requests pending: \(model.insecureLastRequestCount)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                }
+
+                SecureField("File password", text: $sharePassword)
+                    .noctyraInputField()
+
+                Button {
+                    importSelectedFile()
+                } label: {
+                    Label("Import Contact", systemImage: "square.and.arrow.down")
+                }
+                .glassButton(prominent: true)
+                .disabled(importedFileData == nil || sharePassword.isEmpty)
+                .hoverLift()
+            }
+        case .insecure:
+            relayPairingContent
+        }
+    }
+
+    @ViewBuilder
+    private var relayPairingContent: some View {
+        let formattedDate: (Date?) -> String = { date in
+            date?.formatted(date: .abbreviated, time: .shortened) ?? "Never"
+        }
+
+        SheetSection(title: "Pairing via Relay", icon: "antenna.radiowaves.left.and.right") {
+            Toggle("Enable pairing via relay", isOn: $insecureSettings.isEnabled)
+            Toggle("I understand relay pairing leaks metadata", isOn: $insecureSettings.acknowledgeInterceptRisk)
+                .disabled(!insecureSettings.isEnabled)
+            Toggle("Allow incoming relay pair requests", isOn: $insecureSettings.allowInboundRequests)
+                .disabled(!insecureSettings.isEnabled || !insecureSettings.acknowledgeInterceptRisk)
+            Text("Relay pairing exposes timing, relay endpoint, and participant fingerprints. Encryption protects message content, but the relay cannot prove a discovered identity belongs to the person you expect. Compare the safety code over a separate trusted channel before marking the contact verified.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+
+        if insecureSettings.isReady {
+            SheetSection(
+                title: "Discovery Status",
+                subtitle: "\(model.insecureLastPeerCount) peer\(model.insecureLastPeerCount == 1 ? "" : "s") found",
+                icon: "dot.radiowaves.left.and.right"
+            ) {
+                let relay = model.insecureLastRelay ?? model.state.relay
+                pairingStatusRow("Relay", "\(relay.host):\(relay.port)")
+                pairingStatusRow("Announced", formattedDate(model.insecureLastAnnounceAt))
+                pairingStatusRow("Last discovery", formattedDate(model.insecureLastListAt))
+                if model.state.insecurePairing.allowInboundRequests {
+                    pairingStatusRow("Pending requests", "\(model.insecureLastRequestCount)")
+                }
+                if let error = model.insecureLastError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        announceButton
+                        refreshListButton
                     }
-                    Text("Self-test: \(formattedDate(model.insecureLastSelfTestAt))")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    let result = model.insecureLastSelfTestResult ?? "Not run"
-                    let isFailure = result != "OK" && result != "Not run"
-                    Text("Self-test result: \(result)")
-                        .font(.caption2)
-                        .foregroundStyle(isFailure ? .orange : .secondary)
-                    if let step = model.insecureSelfTestStep {
-                        Text("Self-test step: \(step)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        announceButton
+                        refreshListButton
                     }
-                    if let error = model.insecureLastError {
-                        Text("Last error: \(error)")
-                            .font(.caption2)
-                            .foregroundStyle(.orange)
-                            .lineLimit(2)
-                    }
-                    Text("Your fingerprint: \(model.state.identity.fingerprint)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
                 }
                 .contextMenu {
                     Button("Run Self Test") {
@@ -2275,54 +4159,52 @@ private struct AddContactView: View {
                     }
                 }
             }
-            Section("Discovery") {
-                #if os(iOS)
-                ViewThatFits(in: .horizontal) {
-                    HStack {
-                        announceButton
-                        refreshListButton
-                    }
-                    VStack(alignment: .leading, spacing: 10) {
-                        announceButton
-                        refreshListButton
-                    }
-                }
-                #else
-                HStack {
-                    announceButton
-                    refreshListButton
-                }
-                #endif
-            }
 
-            Section("Discovered Peers") {
+            SheetSection(title: "Discovered Peers", icon: "person.2.wave.2") {
                 if model.insecureAnnouncements.isEmpty {
-                    Text("No peers found")
-                        .foregroundStyle(.secondary)
+                    SheetEmptyState(
+                        icon: "dot.radiowaves.left.and.right",
+                        title: "No peers found",
+                        message: "Ask the other person to enable relay pairing, then refresh."
+                    )
                 }
                 ForEach(model.insecureAnnouncements) { announcement in
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(announcement.offer.displayName)
-                            .font(.headline)
+                        HStack {
+                            Text(announcement.offer.displayName)
+                                .font(.headline)
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
                         Text("Relay: \(announcement.offer.relay.host):\(announcement.offer.relay.port)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                        Text("Safety code: \(pairingSafetyNumber(for: announcement.offer.fingerprint))")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
                         Button("Send Pairing Request") {
                             Task { await model.sendPairRequest(to: announcement) }
                         }
                         .glassButton(prominent: true)
                         .hoverLift()
                     }
-                    .padding(.vertical, 4)
+                    .padding(12)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
                 }
             }
 
-            Section("Incoming Requests") {
+            SheetSection(title: "Incoming Requests", icon: "tray.and.arrow.down.fill") {
                 if model.insecureRequests.isEmpty {
-                    Text("No incoming requests")
-                        .foregroundStyle(.secondary)
+                    SheetEmptyState(
+                        icon: "tray",
+                        title: "No incoming requests",
+                        message: "Requests from discovered peers will appear here."
+                    )
                 }
                 ForEach(model.insecureRequests) { request in
                     VStack(alignment: .leading, spacing: 6) {
@@ -2333,6 +4215,10 @@ private struct AddContactView: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                        Text("Safety code: \(pairingSafetyNumber(for: request.from.fingerprint))")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
                         #if os(iOS)
                         ViewThatFits(in: .horizontal) {
                             HStack {
@@ -2351,15 +4237,54 @@ private struct AddContactView: View {
                         }
                         #endif
                     }
-                    .padding(.vertical, 4)
+                    .padding(12)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
                 }
             }
         } else {
-            Section {
-                Text("Complete the acknowledgements to enable discovery.")
-                    .font(.caption)
+            SheetSection(title: "Discovery Locked", icon: "lock.fill") {
+                Text("Enable relay pairing and acknowledge its metadata exposure to begin discovery.")
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    private var pairingMethodSubtitle: String {
+        switch method {
+        case .scanQR: return "Scan a contact code directly from another device."
+        case .pasteCode: return "Paste a complete contact payload."
+        case .importFile: return "Open a password-protected contact file."
+        case .insecure: return "Discover peers through your configured relay."
+        }
+    }
+
+    private func importSelectedFile() {
+        Task {
+            guard let data = importedFileData else {
+                model.lastError = "No file selected."
+                return
+            }
+            guard !sharePassword.isEmpty else {
+                model.lastError = "Password required to import."
+                return
+            }
+            await model.addContact(shareData: data, password: sharePassword)
+            dismiss()
+        }
+    }
+
+    private func pairingStatusRow(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.caption)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+                .truncationMode(.middle)
         }
     }
 
@@ -2396,6 +4321,13 @@ private struct AddContactView: View {
         .glassButton()
         .hoverLift()
     }
+
+    private func pairingSafetyNumber(for remoteFingerprint: String) -> String {
+        ContactSafetyNumber.make(
+            localFingerprint: model.state.identity.fingerprint,
+            remoteFingerprint: remoteFingerprint
+        )
+    }
 }
 
 private enum PairingMethod: String, CaseIterable, Identifiable {
@@ -2415,7 +4347,7 @@ private enum PairingMethod: String, CaseIterable, Identifiable {
         case .importFile:
             return "Import File"
         case .insecure:
-            return "Insecure"
+            return "Relay Pairing"
         }
     }
 }
@@ -2427,37 +4359,40 @@ private struct FullScreenQRView: View {
 
     var body: some View {
         NavigationStack {
-            GeometryReader { proxy in
-                // Keep within the smallest iPhone widths (avoid horizontal overflow on 320pt devices).
-                let size = max(220, min(360, proxy.size.width - 48))
-                VStack(spacing: 16) {
-                    if frames.count > 1 {
-                        AnimatedQRCodeView(frames: frames, size: size, interval: 0.8)
-                        Text("Animated QR (scan frames in order)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    } else {
-                        QRCodeView(text: code, size: size)
+            VStack(spacing: 0) {
+                SheetActionBar {
+                    dismiss()
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+
+                GeometryReader { proxy in
+                    // Keep within the smallest iPhone widths (avoid horizontal overflow on 320pt devices).
+                    let size = max(220, min(360, proxy.size.width - 48))
+                    VStack(spacing: 16) {
+                        if frames.count > 1 {
+                            AnimatedQRCodeView(frames: frames, size: size, interval: 0.8)
+                            Text("Animated QR · scan frames in order")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        } else {
+                            QRCodeView(text: code, size: size)
+                        }
                     }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.opacity(0.02))
-            }
-            .navigationTitle("Full Screen QR")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                        .hoverLift()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
+            .noctyraSheetBackground()
+            .hideSheetNavigationBar()
         }
     }
 }
 
 private struct SettingsView: View {
     @ObservedObject var model: ClientViewModel
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
     @State private var selectedTheme: ThemePalette = .glacier
     @State private var privacySettings = PrivacySettings()
     @State private var appLockSettings = AppLockSettings()
@@ -2466,54 +4401,342 @@ private struct SettingsView: View {
     @State private var showStorageWarning = false
     @State private var pinSetupKind: PinSetupKind?
     @State private var showingLegalDocuments = false
+    @State private var showingAppSecuritySetup = false
+    @State private var actionPlanEditorRequest: ActionPlanEditorRequest?
+    @State private var pendingActionPlanConfig: ActionPlanCommitConfig?
+    @State private var securityReauthRequest: SecurityReauthRequest?
+    @State private var lockScreenMessageDraft = ""
+    @State private var showPinActions = false
+    @State private var showingDonateSheet = false
+    #if os(iOS)
+    @SceneStorage("noctyra.settings.destination") private var settingsDestinationRaw: String = ""
+    #else
+    @State private var settingsDestinationRaw: String = ""
+    #endif
+
+    private enum SettingsDestination: String, CaseIterable, Identifiable {
+        case appearance
+        case privacy
+        case appLock
+        case storage
+        case legal
+        case donate
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .appearance:
+                return "Appearance"
+            case .privacy:
+                return "Privacy"
+            case .appLock:
+                return "App Lock"
+            case .storage:
+                return "Storage"
+            case .legal:
+                return "Legal"
+            case .donate:
+                return "Donate"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .appearance:
+                return "Theme and visual style"
+            case .privacy:
+                return "Typing, camera, and capture safeguards"
+            case .appLock:
+                return "Biometrics, PIN, and timeout controls"
+            case .storage:
+                return "Encryption and local data protection"
+            case .legal:
+                return "Policies and terms"
+            case .donate:
+                return "Support ongoing development"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .appearance:
+                return "paintpalette"
+            case .privacy:
+                return "lock.shield"
+            case .appLock:
+                return "key.viewfinder"
+            case .storage:
+                return "externaldrive.fill"
+            case .legal:
+                return "doc.text"
+            case .donate:
+                return "heart.fill"
+            }
+        }
+    }
+
+    private enum SecurityReauthRequest: Identifiable {
+        case sessionTimeout(Int)
+        case lockMethod
+        case pinUpdate(PinSetupKind)
+
+        var id: String {
+            switch self {
+            case .sessionTimeout(let minutes):
+                return "session-\(minutes)"
+            case .lockMethod:
+                return "lock-method"
+            case .pinUpdate(let kind):
+                return "pin-\(kind.rawValue)"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .sessionTimeout:
+                return "Confirm Session Timeout Change"
+            case .lockMethod:
+                return "Confirm Unlock Method Change"
+            case .pinUpdate:
+                return "Confirm PIN Update"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .sessionTimeout:
+                return "Re-authenticate to change the session timeout."
+            case .lockMethod:
+                return "Re-authenticate to change the app unlock method."
+            case .pinUpdate:
+                return "Re-authenticate before updating security PINs."
+            }
+        }
+
+        var biometricReason: String {
+            switch self {
+            case .sessionTimeout:
+                return "Authorize session timeout change"
+            case .lockMethod:
+                return "Authorize unlock method change"
+            case .pinUpdate:
+                return "Authorize PIN update"
+            }
+        }
+    }
 
     var body: some View {
         #if os(macOS)
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                PaneHeader(title: "Settings")
-                GroupBox("Appearance") {
-                    appearanceFields
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                if settingsDestination != nil {
+                    Button {
+                        settingsDestination = nil
+                        FeedbackGenerator.light()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .accessibilityLabel("Back")
+                    .glassCircleButton(diameter: 32)
+                    .hoverLift()
                 }
-                GroupBox("Storage Protection") {
-                    storageFields
-                }
-                GroupBox("Privacy") {
-                    privacyFields
-                }
-                GroupBox("App Lock") {
-                    appLockFields
-                }
-                GroupBox("Legal") {
-                    legalFields
-                }
+                PaneHeader(
+                    title: settingsDestination?.title ?? "Settings",
+                    subtitle: settingsDestination?.subtitle ?? "Appearance, privacy, and protection"
+                )
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 20)
-        }
-        .groupBoxStyle(GlassGroupBoxStyle())
-        .background(setupAppearance)
-        .sheet(isPresented: $showingLegalDocuments) {
-            ClientLegalDocumentsView()
-        }
-        #else
-        VStack(spacing: 0) {
-            NoctyraTopBar(title: "Settings", subtitle: "Appearance, privacy, and protection")
-            Form {
-                appearanceSection
-                storageSection
-                privacySection
-                appLockSection
-                legalSection
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+            Group {
+                if let destination = settingsDestination {
+                    settingsDetail(for: destination)
+                } else {
+                    settingsMenuCards
+                }
             }
-            .scrollContentBackground(.hidden)
             .glassBackgroundIfNeeded()
             .background(setupAppearance)
         }
         .sheet(isPresented: $showingLegalDocuments) {
             ClientLegalDocumentsView()
+                .noctyraSheetPresentation()
+        }
+        .sheet(isPresented: $showingDonateSheet) {
+            ClientDonationSheetView()
+                .noctyraSheetPresentation()
+        }
+        .sheet(item: $actionPlanEditorRequest) { request in
+            ActionPinPlanEditorView(model: model, initialPlan: request.plan) { config in
+                pendingActionPlanConfig = config
+                actionPlanEditorRequest = nil
+                beginSecurityReauth(for: .pinUpdate(.actionPlan))
+            } onCancel: {
+                actionPlanEditorRequest = nil
+            }
+            .noctyraSheetPresentation()
+        }
+        #else
+        VStack(spacing: 0) {
+            NoctyraTopBar(
+                title: settingsDestination?.title ?? "Settings",
+                subtitle: settingsDestination?.subtitle ?? "Appearance, privacy, and protection",
+                leading: settingsDestination == nil
+                    ? nil
+                    : AnyView(
+                        Button {
+                            settingsDestination = nil
+                            FeedbackGenerator.light()
+                        } label: {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .accessibilityLabel("Back")
+                        .glassCircleButton(diameter: 32)
+                        .hoverLift()
+                    )
+            )
+            Group {
+                if let destination = settingsDestination {
+                    settingsDetail(for: destination)
+                } else {
+                    settingsMenuCards
+                }
+            }
+            .glassBackgroundIfNeeded()
+            .background(setupAppearance)
+        }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 20)
+                .onEnded { value in
+                    guard settingsDestination != nil else { return }
+                    guard value.translation.width > 80 else { return }
+                    guard abs(value.translation.height) < 90 else { return }
+                    settingsDestination = nil
+                    FeedbackGenerator.light()
+                }
+        )
+        .sheet(isPresented: $showingLegalDocuments) {
+            ClientLegalDocumentsView()
+                .noctyraSheetPresentation()
+        }
+        .sheet(isPresented: $showingDonateSheet) {
+            ClientDonationSheetView()
+                .noctyraSheetPresentation()
+        }
+        .sheet(item: $actionPlanEditorRequest) { request in
+            ActionPinPlanEditorView(model: model, initialPlan: request.plan) { config in
+                pendingActionPlanConfig = config
+                actionPlanEditorRequest = nil
+                beginSecurityReauth(for: .pinUpdate(.actionPlan))
+            } onCancel: {
+                actionPlanEditorRequest = nil
+            }
+            .noctyraSheetPresentation()
         }
         #endif
+    }
+
+    private var settingsDestination: SettingsDestination? {
+        get { SettingsDestination(rawValue: settingsDestinationRaw) }
+        nonmutating set { settingsDestinationRaw = newValue?.rawValue ?? "" }
+    }
+
+    private func settingsDetail(for destination: SettingsDestination) -> some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                SheetSection(
+                    title: destination.title,
+                    subtitle: destination.subtitle,
+                    icon: destination.symbol
+                ) {
+                    settingsFields(for: destination)
+                }
+            }
+            .frame(maxWidth: 760)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 24)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    @ViewBuilder
+    private func settingsFields(for destination: SettingsDestination) -> some View {
+        switch destination {
+        case .appearance:
+            appearanceFields
+        case .privacy:
+            privacyFields
+        case .appLock:
+            appLockFields
+        case .storage:
+            storageFields
+        case .legal:
+            legalFields
+        case .donate:
+            donateFields
+        }
+    }
+
+    private var settingsMenuCards: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(SettingsDestination.allCases) { destination in
+                    Button {
+                        settingsDestination = destination
+                        FeedbackGenerator.light()
+                    } label: {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                Circle()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [
+                                                theme.accent.opacity(colorScheme == .dark ? 0.26 : 0.20),
+                                                theme.glowSecondary.opacity(colorScheme == .dark ? 0.16 : 0.10)
+                                            ],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    .frame(width: 30, height: 30)
+                                Image(systemName: destination.symbol)
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(theme.accent)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(destination.title)
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+                                Text(destination.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(6)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("settings-destination-\(destination.rawValue)")
+                    .frame(maxWidth: .infinity)
+                    .uniformGlassCard(cornerRadius: 14, minHeight: 68)
+                    .contentShape(Rectangle())
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 20)
+            .adaptiveReadableContent(maxWidth: 820)
+        }
     }
 
     private var setupAppearance: some View {
@@ -2522,6 +4745,7 @@ private struct SettingsView: View {
                 selectedTheme = model.state.appearance.theme
                 privacySettings = model.state.privacy
                 appLockSettings = model.state.appLock
+                lockScreenMessageDraft = model.state.appLock.lockScreenMessage
                 storageMode = model.storageProtectionMode
             }
             .onChange(of: selectedTheme) { _, newValue in
@@ -2539,14 +4763,9 @@ private struct SettingsView: View {
             .onChange(of: privacySettings) { _, newValue in
                 Task { await model.updatePrivacy(newValue) }
             }
-            .onChange(of: appLockSettings.mode) { _, _ in
-                Task { await model.updateAppLock(appLockSettings) }
-            }
-            .onChange(of: appLockSettings.sessionTimeoutMinutes) { _, _ in
-                Task { await model.updateAppLock(appLockSettings) }
-            }
             .onChange(of: model.state.appLock) { _, newValue in
                 appLockSettings = newValue
+                lockScreenMessageDraft = newValue.lockScreenMessage
             }
             .onChange(of: model.storageProtectionMode) { _, newValue in
                 storageMode = newValue
@@ -2564,7 +4783,17 @@ private struct SettingsView: View {
             } message: {
                 Text("Device-only storage disables Keychain encryption for local data and attachments. You can switch back later in Settings.")
             }
-            .sheet(item: $pinSetupKind) { kind in
+            .sheet(isPresented: $showingAppSecuritySetup) {
+                AppSecurityUnlockSetupSheet(
+                    model: model,
+                    currentSettings: appLockSettings
+                ) { updated in
+                    appLockSettings = updated
+                    Task { await model.updateAppLock(updated, lockAfterUpdate: false) }
+                }
+                .noctyraSheetPresentation()
+            }
+            .platformPinPresentation(item: $pinSetupKind) { kind in
                 PinSetupView(
                     title: kind.title,
                     subtitle: kind.subtitle,
@@ -2577,53 +4806,51 @@ private struct SettingsView: View {
                             success = await model.setActionPin(pin, action: .burnIdentity)
                         case .clearChats:
                             success = await model.setActionPin(pin, action: .clearChats)
+                        case .actionPlan:
+                            guard let pending = pendingActionPlanConfig else {
+                                success = false
+                                model.lastError = "Missing action plan configuration."
+                                break
+                            }
+                            success = await model.setActionPlanPin(
+                                pin: pin,
+                                planId: pending.planId,
+                                label: pending.label,
+                                operations: pending.operations
+                            )
                         }
                         if success {
                             appLockSettings = model.state.appLock
                             pinSetupKind = nil
+                            pendingActionPlanConfig = nil
+                            actionPlanEditorRequest = nil
                         }
                         return success
                     },
                     onCancel: {
                         pinSetupKind = nil
+                        pendingActionPlanConfig = nil
                     }
                 )
             }
-    }
-
-    @ViewBuilder
-    private var appearanceSection: some View {
-        Section("Appearance") {
-            appearanceFields
-        }
-    }
-
-    @ViewBuilder
-    private var privacySection: some View {
-        Section("Privacy") {
-            privacyFields
-        }
-    }
-
-    @ViewBuilder
-    private var storageSection: some View {
-        Section("Storage Protection") {
-            storageFields
-        }
-    }
-
-    @ViewBuilder
-    private var appLockSection: some View {
-        Section("App Lock") {
-            appLockFields
-        }
-    }
-
-    @ViewBuilder
-    private var legalSection: some View {
-        Section("Legal") {
-            legalFields
-        }
+            .platformPinPresentation(item: $securityReauthRequest) { request in
+                SecurityReauthView(
+                    model: model,
+                    title: request.title,
+                    subtitle: request.subtitle,
+                    biometricReason: request.biometricReason
+                ) {
+                    securityReauthRequest = nil
+                    DispatchQueue.main.async {
+                        completeSecurityReauth(request)
+                    }
+                } onCancel: {
+                    if case .pinUpdate(.actionPlan) = request {
+                        pendingActionPlanConfig = nil
+                    }
+                    securityReauthRequest = nil
+                }
+            }
     }
 
     @ViewBuilder
@@ -2702,17 +4929,74 @@ private struct SettingsView: View {
 
     private var appLockFields: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Picker("Unlock method", selection: $appLockSettings.mode) {
-                ForEach(AppLockMode.allCases) { mode in
-                    Text(mode.displayName).tag(mode)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Unlock Method")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 10) {
+                    Image(systemName: unlockIcon(for: appLockSettings.mode))
+                        .font(.system(size: 16, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(appLockSettings.mode.displayName)
+                            .font(.subheadline.weight(.semibold))
+                        Text(unlockDescription(for: appLockSettings.mode))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
                 }
+                .uniformGlassCard(cornerRadius: 14, minHeight: 64)
+                if !model.biometricsAvailable {
+                    Text("Biometrics are unavailable on this device. Use PIN-based unlock.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Choose App Unlock Method") {
+                    beginSecurityReauth(for: .lockMethod)
+                }
+                .glassButton(prominent: true)
+                .hoverLift()
             }
-            .pickerStyle(.menu)
-            Text("Locks the app when switching tabs or after a timeout. Biometrics do not allow password fallback.")
+
+            Text("Locks the app when switching tabs or after a timeout. Biometrics require biometric match and do not accept device passcode unlock.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Picker("Session timeout", selection: $appLockSettings.sessionTimeoutMinutes) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Lock Screen Message")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                TextField("Optional custom message shown on the lock screen.", text: $lockScreenMessageDraft, axis: .vertical)
+                    .lineLimit(2...3)
+                    .noctyraInputField()
+                    .onChange(of: lockScreenMessageDraft) { _, newValue in
+                        let capped = String(newValue.prefix(140))
+                        if capped != newValue {
+                            lockScreenMessageDraft = capped
+                        }
+                    }
+                Text("Optional. Up to 140 characters.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Button("Save Lock Message") {
+                    appLockSettings.lockScreenMessage = lockScreenMessageDraft
+                    Task { await model.updateAppLock(appLockSettings, lockAfterUpdate: false) }
+                }
+                .glassButton()
+                .hoverLift()
+                .disabled(lockScreenMessageDraft == appLockSettings.lockScreenMessage)
+            }
+
+            Picker(
+                "Session timeout",
+                selection: Binding(
+                    get: { appLockSettings.sessionTimeoutMinutes },
+                    set: { newValue in
+                        guard newValue != appLockSettings.sessionTimeoutMinutes else { return }
+                        beginSecurityReauth(for: .sessionTimeout(newValue))
+                    }
+                )
+            ) {
                 Text("Immediate").tag(0)
                 Text("1 minute").tag(1)
                 Text("5 minutes").tag(5)
@@ -2722,7 +5006,7 @@ private struct SettingsView: View {
             }
             .pickerStyle(.menu)
 
-            if appLockSettings.mode == .biometricsAndPin || appLockSettings.mode == .pinOnly {
+            if modeRequiresPin(appLockSettings.mode) {
                 if appLockSettings.isPinConfigured {
                     Text("PIN set. Enter a new PIN to update.")
                         .font(.caption)
@@ -2736,12 +5020,64 @@ private struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button(appLockSettings.isPinConfigured ? "Update PIN" : "Set PIN") {
-                    pinSetupKind = .unlock
+                    beginSecurityReauth(for: .pinUpdate(.unlock))
                 }
                 .glassButton(prominent: true)
                 .hoverLift()
-                pinActionsFields
+                DisclosureGroup(isExpanded: $showPinActions) {
+                    pinActionsFields
+                } label: {
+                    Label("Advanced: PIN Actions", systemImage: "bolt.shield")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .padding(.top, 2)
             }
+        }
+    }
+
+    private func beginSecurityReauth(for request: SecurityReauthRequest) {
+        securityReauthRequest = request
+    }
+
+    private func completeSecurityReauth(_ request: SecurityReauthRequest) {
+        switch request {
+        case .sessionTimeout(let minutes):
+            appLockSettings.sessionTimeoutMinutes = minutes
+            Task { await model.updateAppLock(appLockSettings, lockAfterUpdate: false) }
+        case .lockMethod:
+            showingAppSecuritySetup = true
+        case .pinUpdate(let kind):
+            pinSetupKind = kind
+        }
+    }
+
+    private func modeRequiresPin(_ mode: AppLockMode) -> Bool {
+        mode == .pinOnly || mode == .biometricsAndPin
+    }
+
+    private func unlockIcon(for mode: AppLockMode) -> String {
+        switch mode {
+        case .off:
+            return "lock.open"
+        case .biometrics:
+            return "faceid"
+        case .pinOnly:
+            return "number.square"
+        case .biometricsAndPin:
+            return "lock.shield"
+        }
+    }
+
+    private func unlockDescription(for mode: AppLockMode) -> String {
+        switch mode {
+        case .off:
+            return "No app lock is enforced."
+        case .biometrics:
+            return "Biometrics only."
+        case .pinOnly:
+            return "PIN only."
+        case .biometricsAndPin:
+            return "Biometrics plus PIN."
         }
     }
 
@@ -2758,54 +5094,656 @@ private struct SettingsView: View {
         }
     }
 
-    private var pinActionsFields: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Pin Actions")
-                .font(.headline)
-            Text("Optional action PINs can trigger emergency actions without unlocking the app.")
+    private var donateFields: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Noctyra is independently developed. Donations fund maintenance, audits, and relay tooling.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Button {
+                showingDonateSheet = true
+            } label: {
+                Label("Donate to Noctyra", systemImage: "heart.fill")
+            }
+            .glassButton(prominent: true)
+            .hoverLift()
+        }
+    }
 
-            pinActionSection(
-                title: "Burn Identity PIN",
-                isConfigured: model.state.appLock.burnPinHash != nil,
-                action: .burnIdentity,
-                kind: .burnIdentity
-            )
-
-            pinActionSection(
-                title: "Clear Chats PIN",
-                isConfigured: model.state.appLock.clearChatsPinHash != nil,
-                action: .clearChats,
-                kind: .clearChats
-            )
+    private var pinActionsFields: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("PIN Actions")
+                .font(.headline)
+            Text("Action plans let one PIN run multiple operations. After execution, that PIN becomes the unlock PIN.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if model.state.appLock.actionPlans.isEmpty {
+                Text("No action plans configured.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(model.state.appLock.actionPlans.sorted(by: { $0.createdAt > $1.createdAt })) { plan in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(plan.label)
+                            .font(.subheadline.weight(.semibold))
+                        Text(plan.operations.map { $0.kind.displayName }.joined(separator: " • "))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                        HStack {
+                            Button("Edit") {
+                                actionPlanEditorRequest = ActionPlanEditorRequest(plan: plan)
+                            }
+                            .glassButton(compact: true)
+                            Button("Delete") {
+                                Task { await model.removeActionPlan(planId: plan.id) }
+                            }
+                            .glassButton(compact: true)
+                        }
+                    }
+                    .uniformGlassCard(cornerRadius: 12, minHeight: 92)
+                }
+            }
+            Button("Add Action Plan") {
+                actionPlanEditorRequest = ActionPlanEditorRequest(plan: nil)
+            }
+            .glassButton(prominent: true)
+            .hoverLift()
         }
         .padding(.top, 6)
     }
+}
 
-    private func pinActionSection(
-        title: String,
-        isConfigured: Bool,
-        action: AppLockPinAction,
-        kind: PinSetupKind
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-            Text(isConfigured ? "PIN set." : "No PIN set.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            HStack {
-                Button(isConfigured ? "Update" : "Set") {
-                    pinSetupKind = kind
+private let clientDonationProductIDs: [String] = [
+    "com.luizwidmer.noctyra.donate.small",
+    "com.luizwidmer.noctyra.donate.medium",
+    "com.luizwidmer.noctyra.donate.large"
+]
+
+@MainActor
+private final class ClientDonationStore: ObservableObject {
+    @Published var products: [Product] = []
+    @Published var isLoading = false
+    @Published var statusMessage: String?
+
+    func loadProducts() async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let loaded = try await Product.products(for: clientDonationProductIDs)
+            products = loaded.sorted { $0.price < $1.price }
+            if loaded.isEmpty {
+                statusMessage = "No donation products were found. Add the product IDs in App Store Connect or a StoreKit config file."
+            } else {
+                statusMessage = nil
+            }
+        } catch {
+            statusMessage = "Unable to load donation products: \(error.localizedDescription)"
+        }
+    }
+
+    func donate(_ product: Product) async {
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let result = try await product.purchase()
+            switch result {
+            case .success(let verification):
+                switch verification {
+                case .verified(let transaction):
+                    await transaction.finish()
+                    statusMessage = "Thanks for supporting Noctyra."
+                case .unverified(_, let error):
+                    statusMessage = "Purchase could not be verified: \(error.localizedDescription)"
                 }
-                .glassButton(prominent: true, compact: true)
-                Button("Clear") {
-                    Task { await model.clearActionPin(action) }
+            case .pending:
+                statusMessage = "Purchase is pending approval."
+            case .userCancelled:
+                statusMessage = "Purchase cancelled."
+            @unknown default:
+                statusMessage = "Purchase failed. Try again."
+            }
+        } catch {
+            statusMessage = "Purchase failed: \(error.localizedDescription)"
+        }
+    }
+}
+
+private struct ClientDonationSheetView: View {
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var store = ClientDonationStore()
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                SheetActionBar {
+                    dismiss()
+                } trailing: {
+                    Button {
+                        Task { await store.loadProducts() }
+                    } label: {
+                        Label("Reload", systemImage: "arrow.clockwise")
+                    }
+                    .glassButton(compact: true)
+                    .disabled(store.isLoading)
                 }
-                .glassButton(compact: true)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+
+                ScrollView {
+                    VStack(spacing: 14) {
+                        SheetHero(
+                            icon: "heart.fill",
+                            title: "Support Noctyra",
+                            subtitle: "Fund continued maintenance, audits, and privacy-focused development."
+                        )
+
+                        SheetSection(
+                            title: "Donation Options",
+                            subtitle: "One-time in-app purchases processed by Apple.",
+                            icon: "giftcard.fill"
+                        ) {
+                            if store.isLoading && store.products.isEmpty {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                    Text("Loading donation options…")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.vertical, 18)
+                            } else if store.products.isEmpty {
+                                SheetEmptyState(
+                                    icon: "shippingbox",
+                                    title: "No options available",
+                                    message: "Donation products are not currently available from the App Store."
+                                )
+                            } else {
+                        LazyVStack(spacing: 10) {
+                            ForEach(store.products, id: \.id) { product in
+                                Button {
+                                    Task { await store.donate(product) }
+                                } label: {
+                                            HStack(spacing: 12) {
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(product.displayName)
+                                                        .font(.subheadline.weight(.semibold))
+                                            Text(product.description)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                        }
+                                        Spacer()
+                                        Text(product.displayPrice)
+                                                    .font(.subheadline.weight(.semibold))
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                            .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                        .uniformGlassCard(cornerRadius: 13, minHeight: 64)
+                                .disabled(store.isLoading)
+                            }
+                        }
+                    }
+                        }
+
+                if let status = store.statusMessage {
+                            Label(status, systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .uniformGlassCard(cornerRadius: 13)
+                        }
+                    }
+                    .frame(maxWidth: 680)
+                    .padding(16)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .noctyraSheetBackground()
+            .hideSheetNavigationBar()
+        }
+        #if os(macOS)
+        .frame(minWidth: 520, minHeight: 420)
+        #endif
+        .task {
+            await store.loadProducts()
+        }
+    }
+}
+
+private struct SecurityReauthView: View {
+    @ObservedObject var model: ClientViewModel
+    let title: String
+    let subtitle: String
+    let biometricReason: String
+    let onSuccess: () -> Void
+    let onCancel: () -> Void
+
+    @State private var pin = ""
+    @State private var errorMessage: String?
+    @State private var biometricPassed = false
+    @State private var isVerifyingBiometrics = false
+
+    private var mode: AppLockMode {
+        model.state.appLock.mode
+    }
+
+    private var requiresBiometrics: Bool {
+        guard model.biometricsAvailable else {
+            return false
+        }
+        switch mode {
+        case .biometrics, .biometricsAndPin:
+            return true
+        case .pinOnly:
+            return false
+        case .off:
+            return false
+        }
+    }
+
+    private var requiresPin: Bool {
+        switch mode {
+        case .pinOnly, .biometricsAndPin:
+            return model.state.appLock.isPinConfigured
+        case .off:
+            return model.state.appLock.isPinConfigured
+        case .biometrics:
+            return false
+        }
+    }
+
+    private var biometricSatisfied: Bool {
+        !requiresBiometrics || biometricPassed
+    }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color.black,
+                    Color.black.opacity(0.92),
+                    Color.black.opacity(0.86)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                HStack {
+                    Button("Cancel", action: onCancel)
+                        .glassButton(compact: true)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+
+                Spacer()
+
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 44, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text(title)
+                    .font(.system(size: 22, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+                Text(subtitle)
+                    .font(.callout)
+                    .foregroundStyle(.white.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+
+                if requiresBiometrics && !biometricPassed {
+                    Button(isVerifyingBiometrics ? "Verifying..." : "Verify Biometrics") {
+                        verifyBiometrics()
+                    }
+                    .glassButton(prominent: true)
+                    .disabled(isVerifyingBiometrics)
+                }
+
+                if requiresPin && biometricSatisfied {
+                    PinDotsRow(total: 6, filled: pin.count)
+                        .padding(.top, 4)
+                    NumericPinPad(pin: $pin, maxLength: 6) { _ in
+                        verifyPin()
+                    }
+                } else if biometricSatisfied && !requiresPin {
+                    Button("Continue") {
+                        onSuccess()
+                    }
+                    .glassButton(prominent: true)
+                }
+
+                if let errorMessage {
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red.opacity(0.9))
+                        .multilineTextAlignment(.center)
+                }
+
+                Spacer()
+            }
+            .padding(.vertical, 24)
+        }
+        .onAppear {
+            errorMessage = nil
+            pin = ""
+            if !requiresPin && !requiresBiometrics {
+                onSuccess()
             }
         }
+    }
+
+    private func verifyBiometrics() {
+        isVerifyingBiometrics = true
+        errorMessage = nil
+        Task {
+            let success = await model.performBiometricUnlock(reason: biometricReason)
+            await MainActor.run {
+                isVerifyingBiometrics = false
+                if success {
+                    biometricPassed = true
+                    if !requiresPin {
+                        onSuccess()
+                    }
+                } else {
+                    errorMessage = "Biometric verification failed. Ensure Face ID/Touch ID is enrolled and enabled for Noctyra in Settings."
+                }
+            }
+        }
+    }
+
+    private func verifyPin() {
+        let lockout = model.appLockPinLockoutRemainingSeconds()
+        if lockout > 0 {
+            pin = ""
+            errorMessage = "Too many attempts. Try again in \(lockout)s."
+            return
+        }
+        guard pin.count == 6 else {
+            errorMessage = "Enter your 6-digit unlock PIN."
+            return
+        }
+        if model.verifyAppLockPin(pin) {
+            errorMessage = nil
+            onSuccess()
+        } else {
+            pin = ""
+            let lockout = model.appLockPinLockoutRemainingSeconds()
+            if lockout > 0 {
+                errorMessage = "Too many attempts. Try again in \(lockout)s."
+            } else {
+                errorMessage = "Invalid unlock PIN."
+            }
+        }
+    }
+}
+
+private struct AppSecurityUnlockSetupSheet: View {
+    @ObservedObject var model: ClientViewModel
+    let currentSettings: AppLockSettings
+    let onApply: (AppLockSettings) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
+    @State private var selectedMode: AppLockMode
+    @State private var biometricVerified: Bool
+    @State private var isVerifyingBiometrics = false
+    @State private var verificationError: String?
+    @State private var showingPinSetup = false
+
+    init(
+        model: ClientViewModel,
+        currentSettings: AppLockSettings,
+        onApply: @escaping (AppLockSettings) -> Void
+    ) {
+        self.model = model
+        self.currentSettings = currentSettings
+        self.onApply = onApply
+        let defaultMode: AppLockMode = model.biometricsAvailable ? .biometrics : .pinOnly
+        var initialMode: AppLockMode = currentSettings.mode == .off ? defaultMode : currentSettings.mode
+        if !model.biometricsAvailable, initialMode == .biometrics {
+            initialMode = currentSettings.isPinConfigured ? .pinOnly : .off
+        }
+        if !model.biometricsAvailable, initialMode == .biometricsAndPin {
+            initialMode = currentSettings.isPinConfigured ? .pinOnly : .off
+        }
+        let wasBiometricModeAlreadyConfigured = (currentSettings.mode == .biometrics || currentSettings.mode == .biometricsAndPin)
+        _selectedMode = State(initialValue: initialMode)
+        _biometricVerified = State(initialValue: wasBiometricModeAlreadyConfigured && currentSettings.mode == initialMode)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                SheetActionBar(closeLabel: "Cancel") {
+                    dismiss()
+                } trailing: {
+                    Button("Apply") {
+                        var updated = model.state.appLock
+                        updated.mode = selectedMode
+                        onApply(updated)
+                        dismiss()
+                    }
+                    .glassButton(prominent: true, compact: true)
+                    .disabled(!canApply)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        SheetHero(
+                            icon: "lock.shield.fill",
+                            title: "App Security Unlock",
+                            subtitle: "Choose how Noctyra verifies access after the app locks."
+                        )
+
+                        SheetSection(
+                            title: "Unlock Method",
+                            subtitle: "Changes are saved only after every required setup step succeeds.",
+                            icon: "key.fill"
+                        ) {
+                            VStack(spacing: 10) {
+                                if !model.biometricsAvailable {
+                                    Label(
+                                        "Biometrics are unavailable on this device. PIN-based unlock remains available.",
+                                        systemImage: "touchid"
+                                    )
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+
+                                ForEach(selectableModes) { mode in
+                                    Button {
+                                        withAnimation(.easeInOut(duration: 0.18)) {
+                                            selectMode(mode)
+                                        }
+                                    } label: {
+                                        HStack(spacing: 12) {
+                                            Image(systemName: icon(for: mode))
+                                                .font(.system(size: 18, weight: .semibold))
+                                                .frame(width: 26)
+                                            VStack(alignment: .leading, spacing: 3) {
+                                                Text(mode.displayName)
+                                                    .font(.headline)
+                                                Text(description(for: mode))
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                                    .multilineTextAlignment(.leading)
+                                            }
+                                            Spacer()
+                                            Image(systemName: selectedMode == mode ? "checkmark.circle.fill" : "circle")
+                                                .font(.system(size: 18, weight: .semibold))
+                                                .foregroundStyle(selectedMode == mode ? theme.accent : Color.secondary)
+                                        }
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .uniformGlassCard(cornerRadius: 16, minHeight: 76)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                            .stroke(
+                                                selectedMode == mode ? theme.accent.opacity(0.75) : Color.white.opacity(0.12),
+                                                lineWidth: selectedMode == mode ? 1.4 : 1
+                                            )
+                                    )
+                                }
+                            }
+                        }
+
+                        if requiresBiometrics(selectedMode) {
+                            SheetSection(
+                                title: "Biometric Setup",
+                                subtitle: biometricVerified ? "Biometrics verified." : "Verification is required before this mode can be enabled.",
+                                icon: "touchid"
+                            ) {
+                                Button(isVerifyingBiometrics ? "Verifying…" : (biometricVerified ? "Re-verify Biometrics" : "Verify Biometrics")) {
+                                    verifyBiometrics()
+                                }
+                                .glassButton(prominent: !biometricVerified)
+                                .disabled(isVerifyingBiometrics)
+                                .hoverLift()
+                            }
+                        }
+
+                        if requiresPin(selectedMode) {
+                            SheetSection(
+                                title: "PIN Setup",
+                                subtitle: model.state.appLock.isPinConfigured ? "A six-digit PIN is configured." : "Set a six-digit PIN to continue.",
+                                icon: "number.square.fill"
+                            ) {
+                                Button(model.state.appLock.isPinConfigured ? "Update PIN" : "Set PIN") {
+                                    showingPinSetup = true
+                                }
+                                .glassButton(prominent: !model.state.appLock.isPinConfigured)
+                                .hoverLift()
+                            }
+                        }
+
+                        if let verificationError {
+                            Label(verificationError, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .uniformGlassCard(cornerRadius: 13)
+                        }
+                    }
+                    .frame(maxWidth: 700)
+                    .padding(16)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .noctyraSheetBackground()
+            .hideSheetNavigationBar()
+        }
+        .platformPinPresentation(isPresented: $showingPinSetup) {
+            PinSetupView(
+                title: PinSetupKind.unlock.title,
+                subtitle: PinSetupKind.unlock.subtitle,
+                onComplete: { pin in
+                    let success = await model.setAppLockPin(pin)
+                    if success {
+                        verificationError = nil
+                        showingPinSetup = false
+                    }
+                    return success
+                },
+                onCancel: {
+                    showingPinSetup = false
+                }
+            )
+        }
+        .onAppear {
+            guard model.biometricsAvailable, requiresBiometrics(selectedMode), !biometricVerified else { return }
+            verifyBiometrics()
+        }
+    }
+
+    private var canApply: Bool {
+        if requiresBiometrics(selectedMode), !biometricVerified {
+            return false
+        }
+        if requiresPin(selectedMode), !model.state.appLock.isPinConfigured {
+            return false
+        }
+        return true
+    }
+
+    private func selectMode(_ mode: AppLockMode) {
+        if !model.biometricsAvailable, requiresBiometrics(mode) {
+            return
+        }
+        selectedMode = mode
+        verificationError = nil
+        if requiresBiometrics(mode) {
+            let previouslyConfiguredForBiometrics = requiresBiometrics(currentSettings.mode) && currentSettings.mode == mode
+            biometricVerified = previouslyConfiguredForBiometrics
+            if !biometricVerified {
+                verifyBiometrics()
+            }
+        } else {
+            biometricVerified = true
+        }
+    }
+
+    private func verifyBiometrics() {
+        isVerifyingBiometrics = true
+        verificationError = nil
+        Task {
+            let success = await model.performBiometricUnlock(reason: "Authorize unlock method change")
+            await MainActor.run {
+                isVerifyingBiometrics = false
+                if success {
+                    biometricVerified = true
+                } else {
+                    verificationError = "Biometric verification failed. Ensure Face ID/Touch ID is enrolled and enabled for Noctyra in Settings."
+                }
+            }
+        }
+    }
+
+    private func requiresBiometrics(_ mode: AppLockMode) -> Bool {
+        mode == .biometrics || mode == .biometricsAndPin
+    }
+
+    private func requiresPin(_ mode: AppLockMode) -> Bool {
+        mode == .pinOnly || mode == .biometricsAndPin
+    }
+
+    private func icon(for mode: AppLockMode) -> String {
+        switch mode {
+        case .off:
+            return "lock.open"
+        case .biometrics:
+            return "faceid"
+        case .pinOnly:
+            return "number.square"
+        case .biometricsAndPin:
+            return "lock.shield"
+        }
+    }
+
+    private func description(for mode: AppLockMode) -> String {
+        switch mode {
+        case .off:
+            return "Disable app unlock checks."
+        case .biometrics:
+            return "Unlock only with biometrics."
+        case .pinOnly:
+            return "Unlock only with your PIN."
+        case .biometricsAndPin:
+            return "Require biometrics first, then PIN."
+        }
+    }
+
+    private var selectableModes: [AppLockMode] {
+        if model.biometricsAvailable {
+            return [.biometrics, .pinOnly, .biometricsAndPin]
+        }
+        return [.pinOnly]
     }
 }
 
@@ -2815,35 +5753,35 @@ private struct IdentityManagementView: View {
     @State private var destination: IdentityDestination?
     @State private var newIdentityName = ""
     @State private var newIdentityRelayId: UUID?
-    #if os(iOS)
-    @State private var showingSettings = false
-    #endif
+    @State private var identitySearchText = ""
 
     var body: some View {
         Group {
             #if os(iOS)
             VStack(spacing: 0) {
                 NoctyraTopBar(
-                    title: "Identity Management",
-                    subtitle: "Profiles, continuity, and burns",
-                    trailing: AnyView(
-                        Button {
-                            showingSettings = true
-                            FeedbackGenerator.light()
-                        } label: {
-                            Image(systemName: "gearshape")
-                                .font(.system(size: 14, weight: .semibold))
-                        }
-                        .accessibilityLabel("Settings")
-                        .glassCircleButton(diameter: 34)
-                        .hoverLift()
-                    )
+                    title: identityTopBarTitle,
+                    subtitle: identityTopBarSubtitle,
+                    leading: destination == nil
+                        ? nil
+                        : AnyView(
+                            Button {
+                                destination = nil
+                                FeedbackGenerator.light()
+                            } label: {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                            .accessibilityLabel("Back")
+                            .glassCircleButton(diameter: 34)
+                            .hoverLift()
+                        )
                 )
                 Group {
                     if screenProtection.isSensitiveHidden {
                         SensitiveContentPlaceholder(
                             title: "Identity Management Hidden",
-                            message: "Screen capture or an external display is active. Identity details are hidden to protect your OPSEC."
+                            message: "Screen capture or an external display is active. Identity details are hidden to protect your operational security."
                         )
                     } else {
                         destinationContent
@@ -2854,30 +5792,60 @@ private struct IdentityManagementView: View {
             Group {
                 if screenProtection.isSensitiveHidden {
                     SensitiveContentPlaceholder(
-                        title: "Identity Management Hidden",
-                        message: "Screen capture or an external display is active. Identity details are hidden to protect your OPSEC."
-                    )
+                    title: "Identity Management Hidden",
+                    message: "Screen capture or an external display is active. Identity details are hidden to protect your operational security."
+                )
                 } else {
                     destinationContent
                 }
             }
             #endif
         }
-        #if os(iOS)
-        .sheet(isPresented: $showingSettings) {
-            SettingsView(model: model)
-        }
-        #endif
         .onAppear {
             if newIdentityRelayId == nil {
                 newIdentityRelayId = model.state.relayServers.first?.id
             }
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 20)
+                .onEnded { value in
+                    guard destination != nil else { return }
+                    guard value.translation.width > 80 else { return }
+                    guard abs(value.translation.height) < 90 else { return }
+                    destination = nil
+                    FeedbackGenerator.light()
+                }
+        )
     }
 
     private enum IdentityDestination: Hashable {
         case audit
         case profile(UUID)
+    }
+
+    private var identityTopBarTitle: String {
+        switch destination {
+        case .audit:
+            return "Continuity Audit"
+        case .profile:
+            return "Profile Management"
+        case .none:
+            return "Identity Management"
+        }
+    }
+
+    private var identityTopBarSubtitle: String {
+        switch destination {
+        case .audit:
+            return "Trust, rotation, and burn history"
+        case .profile(let profileId):
+            if let profile = model.state.identityProfile(id: profileId) {
+                return profile.identity.displayName
+            }
+            return "Identity details and lifecycle controls"
+        case .none:
+            return "Profiles, continuity, and burns"
+        }
     }
 
     @ViewBuilder
@@ -2902,32 +5870,85 @@ private struct IdentityManagementView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 PaneHeader(title: "Identity Management", subtitle: "Manage key continuity and full resets")
-                GroupBox("Identity Book") {
+                identityOverviewCard
+                addIdentityCard
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Identity Book")
+                        .font(.headline)
                     identityBookSection
                 }
-                GroupBox("Continuity Audit") {
-                    continuityAuditLink
-                }
+                .uniformGlassCard(cornerRadius: 16, minHeight: 140)
+                continuityAuditLink
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 20)
         }
         .privacySensitive()
-        .groupBoxStyle(GlassGroupBoxStyle())
         .glassBackgroundIfNeeded()
         #else
-        Form {
-            Section("Identity Book") {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Overview")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+                identityOverviewCard
+
+                addIdentityCard
+
+                Text("Identity Book")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 4)
                 identityBookSection
-            }
-            Section("Continuity Audit") {
+
                 continuityAuditLink
             }
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 24)
+            .adaptiveReadableContent(maxWidth: 860)
         }
         .privacySensitive()
-        .scrollContentBackground(.hidden)
         .glassBackgroundIfNeeded()
         #endif
+    }
+
+    private var identityOverviewCard: some View {
+        let total = model.state.identityProfiles.count
+        let archived = model.state.identityProfiles.filter(\.isArchived).count
+        let activeName = model.state.identityProfile(id: model.state.activeIdentityId)?.identity.displayName ?? "None"
+
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("Active identity")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(activeName)
+                .font(.headline)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            HStack(spacing: 10) {
+                identityMetricBadge(title: "Profiles", value: "\(total)")
+                identityMetricBadge(title: "Archived", value: "\(archived)")
+                identityMetricBadge(title: "Audit Events", value: "\(continuityEventCount)")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .uniformGlassCard(cornerRadius: 14, minHeight: 92)
+    }
+
+    private func identityMetricBadge(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var identityBookSection: some View {
@@ -2943,9 +5964,27 @@ private struct IdentityManagementView: View {
             }
             return lhs.createdAt > rhs.createdAt
         }
+        let query = identitySearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let filtered = ordered.filter { profile in
+            guard !query.isEmpty else { return true }
+            let haystack = [
+                profile.identity.displayName,
+                profile.identity.fingerprint,
+                profile.inboxId
+            ]
+            .joined(separator: " ")
+            .lowercased()
+            return haystack.contains(query)
+        }
 
         return VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(ordered.enumerated()), id: \.element.id) { index, profile in
+            InlineSearchField(text: $identitySearchText, prompt: "Search identities")
+            if filtered.isEmpty {
+                Text("No matching identities.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(filtered) { profile in
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
@@ -2970,21 +6009,47 @@ private struct IdentityManagementView: View {
                                 .background(Capsule().fill(Color.white.opacity(0.12)))
                         }
                         syncBadge(for: profile)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.secondary)
                     }
-                    if model.state.relayServers.isEmpty {
-                        Text("Add a relay to set a home relay for this identity.")
+                    Text("Inbox: \(profile.inboxId)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    HStack(spacing: 10) {
+                        Label("Home Relay", systemImage: "antenna.radiowaves.left.and.right")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    } else {
-                        Picker("Home Relay", selection: relaySelectionBinding(for: profile)) {
-                            ForEach(model.state.relayServers) { server in
-                                Text(server.displayName).tag(Optional(server.id))
+                        Spacer()
+                        if model.state.relayServers.isEmpty {
+                            Text("None")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Menu(currentRelayName(for: profile)) {
+                                ForEach(model.state.relayServers) { server in
+                                    Button(server.displayName) {
+                                        Task {
+                                            await model.updateIdentityRelay(profileId: profile.id, relayId: server.id)
+                                        }
+                                    }
+                                }
                             }
+                            .font(.caption)
+                            .disabled(profile.isArchived)
                         }
-                        .disabled(profile.isArchived)
-                        #if os(macOS)
-                        .pickerStyle(.menu)
-                        #endif
+                    }
+                    if !profile.isArchived, profile.id != model.state.activeIdentityId {
+                        HStack {
+                            Spacer()
+                            Button("Use") {
+                                Task { await model.setActiveIdentity(profile.id) }
+                            }
+                            .glassButton(compact: true)
+                            .hoverLift()
+                        }
                     }
                 }
                 .cardButtonStyle()
@@ -2992,34 +6057,56 @@ private struct IdentityManagementView: View {
                     destination = .profile(profile.id)
                 }
             }
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Add Identity")
-                    .font(.subheadline.weight(.semibold))
-                Text("Inactive identities remain encrypted at rest per your storage protection choice.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextField("Display name", text: $newIdentityName)
-                if !model.state.relayServers.isEmpty {
+        }
+    }
+
+    private var addIdentityCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Add Identity", systemImage: "person.crop.circle.badge.plus")
+                .font(.headline)
+            Text("Create an independent identity with its own inbox and home relay. Other identities remain active and encrypted at rest.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("Display name", text: $newIdentityName)
+                .noctyraInputField()
+            if !model.state.relayServers.isEmpty {
+                HStack(spacing: 10) {
+                    Label("Home Relay", systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
                     Picker("Home Relay", selection: $newIdentityRelayId) {
                         ForEach(model.state.relayServers) { server in
                             Text(server.displayName).tag(Optional(server.id))
                         }
                     }
-                    #if os(macOS)
+                    .labelsHidden()
                     .pickerStyle(.menu)
-                    #endif
                 }
-                Button("Create Identity") {
+            } else {
+                Label("Add a relay before creating another identity.", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            HStack {
+                Spacer()
+                Button {
                     Task {
                         await model.addIdentityProfile(displayName: newIdentityName, relayId: newIdentityRelayId)
                         newIdentityName = ""
                     }
+                } label: {
+                    Label("Create Identity", systemImage: "plus")
                 }
                 .glassButton(prominent: true)
                 .hoverLift()
+                .disabled(
+                    newIdentityName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || model.state.relayServers.isEmpty
+                )
             }
         }
+        .uniformGlassCard(cornerRadius: 16, padding: 16)
     }
 
     @ViewBuilder
@@ -3068,46 +6155,53 @@ private struct IdentityManagementView: View {
     }()
 
     private var continuityAuditLink: some View {
-        #if os(macOS)
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Review rotation history, trust assertions, and identity continuity events.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("\(continuityEventCount) events recorded for the active identity.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Button("Open Continuity Audit") {
-                destination = .audit
-            }
-            .glassButton(prominent: true, compact: true)
-            .hoverLift()
-        }
-        #else
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                destination = .audit
-            } label: {
-                VStack(alignment: .leading, spacing: 4) {
+        Button {
+            destination = .audit
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(Color.accentColor.opacity(0.16))
+                        .frame(width: 34, height: 34)
+                    Image(systemName: "checkmark.shield")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                VStack(alignment: .leading, spacing: 3) {
                     Text("Continuity Audit")
                         .font(.headline)
+                        .foregroundStyle(.primary)
                     Text("\(continuityEventCount) events recorded for the active identity.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(6)
+                    .background(.ultraThinMaterial, in: Circle())
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .uniformGlassCard(cornerRadius: 14, minHeight: 70)
         }
+        .buttonStyle(.plain)
+        #if os(macOS)
+        .hoverLift()
+        #else
+        .listRowBackground(Color.clear)
         #endif
     }
 
-    private func relaySelectionBinding(for profile: IdentityProfile) -> Binding<UUID?> {
-        Binding(
-            get: {
-                model.state.identityProfile(id: profile.id)?.selectedRelayId ?? model.state.relayServers.first?.id
-            },
-            set: { newValue in
-                Task { await model.updateIdentityRelay(profileId: profile.id, relayId: newValue) }
-            }
-        )
+    private func currentRelayName(for profile: IdentityProfile) -> String {
+        guard
+            let relayId = model.state.identityProfile(id: profile.id)?.selectedRelayId,
+            let relay = model.state.relayServers.first(where: { $0.id == relayId })
+        else {
+            return "Select Relay"
+        }
+        return relay.displayName
     }
 
     private var continuityEventCount: Int {
@@ -3126,13 +6220,12 @@ private struct IdentityAuditView: View {
             if screenProtection.isSensitiveHidden {
                 SensitiveContentPlaceholder(
                     title: "Continuity Audit Hidden",
-                    message: "Screen capture or an external display is active. Audit details are hidden to protect your OPSEC."
+                    message: "Screen capture or an external display is active. Audit details are hidden to protect your operational security."
                 )
             } else {
                 auditContent
             }
         }
-        .paneNavigationTitle("Continuity Audit")
         .confirmationDialog(
             "Purge continuity audit?",
             isPresented: $showingPurgeConfirm,
@@ -3150,38 +6243,32 @@ private struct IdentityAuditView: View {
 
     @ViewBuilder
     private var auditContent: some View {
-        #if os(macOS)
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 backButton
+                #if os(macOS)
                 PaneHeader(title: "Continuity Audit", subtitle: "Review trust, rotation, and burn events")
-                GroupBox("Audit Trail") {
+                #else
+                SheetHero(
+                    icon: "checkmark.shield.fill",
+                    title: "Continuity Audit",
+                    subtitle: "Review trust, rotation, and burn events."
+                )
+                #endif
+                SheetSection(title: "Audit Trail", icon: "list.bullet.rectangle") {
                     continuityAuditSection
                 }
-                GroupBox("Purge Audit") {
+                SheetSection(title: "Purge Audit", icon: "trash", role: .destructive) {
                     purgeSection
                 }
             }
             .padding(.horizontal, 20)
+            .padding(.top, 12)
             .padding(.bottom, 20)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
         }
-        .groupBoxStyle(GlassGroupBoxStyle())
         .glassBackgroundIfNeeded()
-        #else
-        Form {
-            Section {
-                backButton
-            }
-            Section("Audit Trail") {
-                continuityAuditSection
-            }
-            Section("Purge Audit") {
-                purgeSection
-            }
-        }
-        .scrollContentBackground(.hidden)
-        .glassBackgroundIfNeeded()
-        #endif
     }
 
     private var backButton: some View {
@@ -3193,12 +6280,19 @@ private struct IdentityAuditView: View {
                 Label("Back", systemImage: "chevron.left")
             }
             .glassButton(compact: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 4)
+        #else
+        return HStack {
+            Button {
+                onBack()
+            } label: {
+                Label("Identity Management", systemImage: "chevron.left")
+            }
+            .glassButton(compact: true)
             .hoverLift()
             Spacer()
-        }
-        #else
-        return Button("Back to Identity Management") {
-            onBack()
         }
         #endif
     }
@@ -3366,13 +6460,12 @@ private struct IdentityDetailView: View {
             if screenProtection.isSensitiveHidden {
                 SensitiveContentPlaceholder(
                     title: "Identity Hidden",
-                    message: "Screen capture or an external display is active. Identity details are hidden to protect your OPSEC."
+                    message: "Screen capture or an external display is active. Identity details are hidden to protect your operational security."
                 )
             } else {
                 detailContent
             }
         }
-        .paneNavigationTitle("Profile Management")
         .onAppear {
             if let profile = profile {
                 displayName = profile.identity.displayName
@@ -3385,6 +6478,12 @@ private struct IdentityDetailView: View {
         }
         .sheet(isPresented: $showingBurnIdentity) {
             IdentityBurnView(model: model)
+                .noctyraSheetPresentation()
+        }
+        .onChange(of: showingBurnIdentity) { _, isPresented in
+            if !isPresented {
+                confirmBurn = false
+            }
         }
         .confirmationDialog("Archive identity?", isPresented: $showingArchiveConfirm, titleVisibility: .visible) {
             Button("Archive", role: .destructive) {
@@ -3419,56 +6518,42 @@ private struct IdentityDetailView: View {
 
     @ViewBuilder
     private var detailContent: some View {
-        #if os(macOS)
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 backButton
+                #if os(macOS)
                 PaneHeader(title: profile?.identity.displayName ?? "Identity")
+                #else
+                SheetHero(
+                    icon: "person.text.rectangle.fill",
+                    title: profile?.identity.displayName ?? "Identity",
+                    subtitle: isActive ? "Active identity profile" : "Encrypted inactive identity"
+                )
+                #endif
                 if !isActive {
-                    activationNotice
+                    SheetSection(title: "Activation Required", icon: "bolt.fill") {
+                        activationNotice
+                    }
                 }
-                GroupBox("Profile Management") {
+                SheetSection(title: "Profile Management", icon: "person.crop.rectangle") {
                     profileManagementSection
                 }
-                GroupBox("Burn Identity") {
+                SheetSection(title: "Burn Identity", icon: "flame.fill", role: .destructive) {
                     burnSection
                 }
                 if !isActive {
-                    GroupBox("Delete Identity") {
+                    SheetSection(title: "Delete Identity", icon: "trash.fill", role: .destructive) {
                         deleteSection
                     }
                 }
             }
             .padding(.horizontal, 20)
+            .padding(.top, 12)
             .padding(.bottom, 20)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
         }
-        .groupBoxStyle(GlassGroupBoxStyle())
         .glassBackgroundIfNeeded()
-        #else
-        Form {
-            Section {
-                backButton
-            }
-            if !isActive {
-                Section("Activation Required") {
-                    activationNotice
-                }
-            }
-            Section("Profile Management") {
-                profileManagementSection
-            }
-            Section("Burn Identity") {
-                burnSection
-            }
-            if !isActive {
-                Section("Delete Identity") {
-                    deleteSection
-                }
-            }
-        }
-        .scrollContentBackground(.hidden)
-        .glassBackgroundIfNeeded()
-        #endif
     }
 
     private var backButton: some View {
@@ -3480,12 +6565,19 @@ private struct IdentityDetailView: View {
                 Label("Back", systemImage: "chevron.left")
             }
             .glassButton(compact: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.leading, 4)
+        #else
+        return HStack {
+            Button {
+                onBack()
+            } label: {
+                Label("Identity Management", systemImage: "chevron.left")
+            }
+            .glassButton(compact: true)
             .hoverLift()
             Spacer()
-        }
-        #else
-        return Button("Back to Identity Management") {
-            onBack()
         }
         #endif
     }
@@ -3509,31 +6601,10 @@ private struct IdentityDetailView: View {
 
         return VStack(alignment: .leading, spacing: 10) {
             TextField("Display name", text: $displayName)
+                .noctyraInputField()
                 .disabled(!isActive)
-            HStack {
-                Text("Fingerprint")
-                Spacer()
-                Text(fingerprint)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.trailing)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .layoutPriority(1)
-            }
-            HStack {
-                Text("Inbox")
-                Spacer()
-                Text(inboxId)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.trailing)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .layoutPriority(1)
-            }
+            identityCodeRow(title: "Fingerprint", value: fingerprint)
+            identityCodeRow(title: "Inbox", value: inboxId)
             Button("Save Identity") {
                 Task {
                     await model.updateDisplayName(displayName)
@@ -3544,6 +6615,25 @@ private struct IdentityDetailView: View {
             .hoverLift()
             .disabled(!isActive)
         }
+    }
+
+    private func identityCodeRow(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var profileManagementSection: some View {
@@ -3677,21 +6767,67 @@ private func shortFingerprint(_ fingerprint: String) -> String {
 private struct RelaysView: View {
     @ObservedObject var model: ClientViewModel
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
-    @State private var selectedRelayId: UUID?
     @State private var newSourceName = ""
     @State private var newSourceURL = ""
-    @State private var relayEditorMode: RelayEditorMode?
+    @State private var relayEditorMode: RelayEditorMode? =
+        ProcessInfo.processInfo.arguments.contains("SHOW_RELAY_EDITOR") ? .add : nil
+    @State private var relaySearchText = ""
+    @State private var showRelayDiagnostics = false
+    @State private var showMasterSourceFormatHelp = false
+    @State private var relayDestination: RelayDestination?
+
+    private enum RelayDestination: String, CaseIterable, Identifiable {
+        case relays
+        case sources
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .relays:
+                return "Relays"
+            case .sources:
+                return "Master Sources"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .relays:
+                return "antenna.radiowaves.left.and.right"
+            case .sources:
+                return "list.bullet.rectangle"
+            }
+        }
+    }
 
     var body: some View {
         Group {
             #if os(iOS)
             VStack(spacing: 0) {
-                NoctyraTopBar(title: "Relays", subtitle: "Preferred servers and master lists")
+                NoctyraTopBar(
+                    title: relayTopBarTitle,
+                    subtitle: relayTopBarSubtitle,
+                    leading: relayDestination == nil
+                        ? nil
+                        : AnyView(
+                            Button {
+                                relayDestination = nil
+                                FeedbackGenerator.light()
+                            } label: {
+                                Image(systemName: "chevron.left")
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                            .accessibilityLabel("Back")
+                            .glassCircleButton(diameter: 34)
+                            .hoverLift()
+                        )
+                )
                 Group {
                     if screenProtection.isSensitiveHidden {
                         SensitiveContentPlaceholder(
                             title: "Relays Hidden",
-                            message: "Screen capture or an external display is active. Relay details are hidden to protect your OPSEC."
+                            message: "Screen capture or an external display is active. Relay details are hidden to protect your operational security."
                         )
                     } else {
                         relaysContent
@@ -3703,7 +6839,7 @@ private struct RelaysView: View {
                 if screenProtection.isSensitiveHidden {
                     SensitiveContentPlaceholder(
                         title: "Relays Hidden",
-                        message: "Screen capture or an external display is active. Relay details are hidden to protect your OPSEC."
+                        message: "Screen capture or an external display is active. Relay details are hidden to protect your operational security."
                     )
                 } else {
                     relaysContent
@@ -3716,62 +6852,116 @@ private struct RelaysView: View {
                 relayEditorMode = nil
             }
         }
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 20)
+                .onEnded { value in
+                    guard relayDestination != nil else { return }
+                    guard value.translation.width > 80 else { return }
+                    guard abs(value.translation.height) < 90 else { return }
+                    relayDestination = nil
+                    FeedbackGenerator.light()
+                }
+        )
+    }
+
+    private var relayTopBarTitle: String {
+        relayDestination?.title ?? "Relays"
+    }
+
+    private var relayTopBarSubtitle: String {
+        relayDestination == nil ? "Relay list and master sources" : relaySubtitle(for: relayDestination!)
+    }
+
+    private func relaySubtitle(for destination: RelayDestination) -> String {
+        switch destination {
+        case .relays:
+            return "\(model.state.relayServers.count) configured relay\(model.state.relayServers.count == 1 ? "" : "s") + diagnostics"
+        case .sources:
+            let enabled = model.state.masterServerSources.filter(\.isEnabled).count
+            return "\(enabled) enabled source\(enabled == 1 ? "" : "s")"
+        }
     }
 
     @ViewBuilder
     private var relaysContent: some View {
         #if os(macOS)
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                PaneHeader(title: "Relays")
-                GroupBox("Preferred Relay") {
-                    preferredRelayFields
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                if relayDestination != nil {
+                    Button {
+                        relayDestination = nil
+                        FeedbackGenerator.light()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .accessibilityLabel("Back")
+                    .glassCircleButton(diameter: 32)
+                    .hoverLift()
                 }
-                GroupBox("Relay Servers") {
-                    relayServersFields
-                }
-                GroupBox("Master Server Sources") {
-                    masterSourcesFields
-                }
-                GroupBox("Add Master Source") {
-                    addMasterSourceFields
-                }
+                PaneHeader(title: relayTopBarTitle, subtitle: relayTopBarSubtitle)
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 20)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+            Group {
+                if let destination = relayDestination {
+                    relayDetail(for: destination)
+                } else {
+                    relayMenuCards
+                }
+            }
         }
         .privacySensitive()
-        .groupBoxStyle(GlassGroupBoxStyle())
         .background(setupRelays)
         #else
-        Form {
-            preferredRelaySection
-            relayServersSection
-            masterSourcesSection
-            addMasterSourceSection
+        Group {
+            if let destination = relayDestination {
+                relayDetail(for: destination)
+            } else {
+                relayMenuCards
+            }
         }
         .privacySensitive()
-        .scrollContentBackground(.hidden)
         .glassBackgroundIfNeeded()
         .background(setupRelays)
         #endif
     }
 
+    private func relayDetail(for destination: RelayDestination) -> some View {
+        ScrollView {
+            VStack(spacing: 14) {
+                SheetSection(
+                    title: destination.title,
+                    subtitle: relaySubtitle(for: destination),
+                    icon: destination == .relays ? "network" : "list.bullet.rectangle.portrait"
+                ) {
+                    relaySectionContent(for: destination)
+                }
+            }
+            .frame(maxWidth: 820)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 24)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
     private var setupRelays: some View {
         Color.clear
             .onAppear {
-                selectedRelayId = model.state.selectedRelayId
+                if model.state.selectedRelayId == nil, let first = model.state.relayServers.first {
+                    Task { await model.selectRelayServer(id: first.id) }
+                }
             }
             .sheet(item: $relayEditorMode) { mode in
-                RelayEditorView(title: mode.title, initial: mode.record) { name, host, port, useTLS, note, relayPassword in
+                RelayEditorView(title: mode.title, initial: mode.record) { name, endpoint, note, relayPassword in
                     Task {
                         switch mode {
                         case .add:
                             await model.addRelayServer(
                                 name: name,
-                                host: host,
-                                port: port,
-                                useTLS: useTLS,
+                                endpoint: endpoint,
                                 note: note,
                                 relayPassword: relayPassword
                             )
@@ -3779,74 +6969,109 @@ private struct RelaysView: View {
                             await model.updateRelayServer(
                                 id: record.id,
                                 name: name,
-                                host: host,
-                                port: port,
-                                useTLS: useTLS,
+                                endpoint: endpoint,
                                 note: note,
                                 relayPassword: relayPassword
                             )
                         }
                     }
                 }
+                .noctyraSheetPresentation()
+            }
+            .sheet(isPresented: $showMasterSourceFormatHelp) {
+                MasterSourceFormatHelpView()
+                    .noctyraSheetPresentation()
             }
     }
 
     @ViewBuilder
-    private var preferredRelaySection: some View {
-        Section("Preferred Relay") {
-            preferredRelayFields
+    private func relaySectionContent(for destination: RelayDestination) -> some View {
+        switch destination {
+        case .relays:
+            VStack(alignment: .leading, spacing: 12) {
+                relayServersFields
+                Divider().opacity(0.35)
+                relayDiagnosticsFields
+            }
+        case .sources:
+            VStack(alignment: .leading, spacing: 12) {
+                masterSourcesFields
+                Divider().opacity(0.35)
+                Text("Add Master Source")
+                    .font(.subheadline.weight(.semibold))
+                addMasterSourceFields
+            }
         }
     }
 
-    @ViewBuilder
-    private var relayServersSection: some View {
-        Section("Relay Servers") {
-            relayServersFields
-        }
-    }
-
-    @ViewBuilder
-    private var masterSourcesSection: some View {
-        Section(
-            header: Text("Master Server Sources"),
-            footer: Text("Formats: JSON array, JSON {servers:[...]}, or text lines host:port,name,region,tags,website,note,kind,federationMode,federationName,federationDescription,temporalBucketSeconds,operatorNote,softwareVersion,requiresPassword,useTLS. Use | or ; to separate tags. host may also be https://host[:port].")
-        ) {
-            masterSourcesFields
-        }
-    }
-
-    @ViewBuilder
-    private var addMasterSourceSection: some View {
-        Section("Add Master Source") {
-            addMasterSourceFields
-        }
-    }
-
-    @ViewBuilder
-    private var preferredRelayFields: some View {
-        if model.state.relayServers.isEmpty {
-            Text("No relay servers yet")
-                .foregroundStyle(.secondary)
-        } else {
-            Picker("Server", selection: selectedRelayBinding) {
-                ForEach(model.state.relayServers) { server in
-                    Text(server.displayName).tag(Optional(server.id))
+    private var relayMenuCards: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(RelayDestination.allCases) { destination in
+                    Button {
+                        relayDestination = destination
+                        FeedbackGenerator.light()
+                    } label: {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                Circle()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [
+                                                Color.accentColor.opacity(0.24),
+                                                Color.accentColor.opacity(0.08)
+                                            ],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    .frame(width: 32, height: 32)
+                                Image(systemName: destination.symbol)
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(destination.title)
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+                                Text(relaySubtitle(for: destination))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(6)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: .infinity)
+                    .uniformGlassCard(cornerRadius: 14, minHeight: 68)
                 }
             }
-            Button("Test Connection") {
-                Task { await model.testSelectedRelay() }
-            }
-            .glassButton()
-            .hoverLift()
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 20)
+            .adaptiveReadableContent(maxWidth: 820)
         }
     }
 
     @ViewBuilder
     private var relayServersFields: some View {
-        ForEach(model.state.relayServers) { server in
+        InlineSearchField(text: $relaySearchText, prompt: "Search relays")
+        if filteredRelayServers.isEmpty {
+            Text(hasRelaySearch ? "No matching relays" : "No relays yet")
+                .foregroundStyle(.secondary)
+        }
+        ForEach(filteredRelayServers) { server in
             RelayServerRow(
                 server: server,
-                isPreferred: server.id == model.state.selectedRelayId
+                isPreferred: server.id == model.state.selectedRelayId,
+                health: model.relayHealth[server.id]
             ) {
                 relayEditorMode = .edit(server)
             } onRefreshInfo: {
@@ -3856,7 +7081,7 @@ private struct RelaysView: View {
             }
         }
 
-        Button("Add Relay Server") {
+        Button("Add Relay") {
             relayEditorMode = .add
         }
         .hoverLift()
@@ -3877,11 +7102,75 @@ private struct RelaysView: View {
             }
             .hoverLift()
         }
-        #if os(macOS)
-        Text("Formats: JSON array, JSON {servers:[...]}, or text lines host:port,name,region,tags,website,note,kind,federationMode,federationName,federationDescription,temporalBucketSeconds,operatorNote,softwareVersion,requiresPassword. Use | or ; to separate tags.")
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-        #endif
+        Button("Format Help") {
+            showMasterSourceFormatHelp = true
+        }
+        .glassButton(compact: true)
+        .hoverLift()
+    }
+
+    @ViewBuilder
+    private var relayDiagnosticsFields: some View {
+        DisclosureGroup(isExpanded: $showRelayDiagnostics) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let selectedRelay = model.state.relayServers.first(where: { $0.id == model.state.selectedRelayId }) {
+                    Text("Selected: \(selectedRelay.displayName)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(endpointDisplayString(selectedRelay.endpoint))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                } else {
+                    Text("No relay selected.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    Button("Test Connection") {
+                        Task { await model.testSelectedRelay() }
+                    }
+                    .glassButton(compact: true)
+                    if !model.state.relayServers.isEmpty {
+                        Button("Refresh All Relay Info") {
+                            refreshAllRelayInfo()
+                        }
+                        .glassButton(compact: true)
+                    }
+                }
+            }
+            .padding(.top, 4)
+        } label: {
+            Label("Advanced Relay Tools", systemImage: "stethoscope")
+                .font(.subheadline.weight(.semibold))
+        }
+    }
+
+    private func endpointDisplayString(_ endpoint: RelayEndpoint) -> String {
+        let scheme: String = {
+            switch endpoint.transport {
+            case .tcp:
+                return endpoint.useTLS ? "tls" : "tcp"
+            case .http:
+                return endpoint.useTLS ? "https" : "http"
+            case .websocket:
+                return endpoint.useTLS ? "wss" : "ws"
+            }
+        }()
+        let host = endpoint.host.contains(":") ? "[\(endpoint.host)]" : endpoint.host
+        let includePort: Bool = {
+            switch endpoint.transport {
+            case .http, .websocket:
+                let defaultPort: UInt16 = endpoint.useTLS ? 443 : 80
+                return endpoint.port != defaultPort
+            case .tcp:
+                return true
+            }
+        }()
+        if includePort {
+            return "\(scheme)://\(host):\(endpoint.port)"
+        }
+        return "\(scheme)://\(host)"
     }
 
     @ViewBuilder
@@ -3905,16 +7194,52 @@ private struct RelaysView: View {
         .hoverLift()
     }
 
-    private var selectedRelayBinding: Binding<UUID?> {
-        Binding(
-            get: { selectedRelayId ?? model.state.selectedRelayId },
-            set: { newValue in
-                selectedRelayId = newValue
-                if let id = newValue {
-                    Task { await model.selectRelayServer(id: id) }
-                }
+    private var hasRelaySearch: Bool {
+        !relaySearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var normalizedRelaySearch: String {
+        relaySearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var filteredRelayServers: [RelayServerRecord] {
+        let sorted = model.state.relayServers.sorted { lhs, rhs in
+            let lhsPreferred = lhs.id == model.state.selectedRelayId
+            let rhsPreferred = rhs.id == model.state.selectedRelayId
+            if lhsPreferred != rhsPreferred {
+                return lhsPreferred
             }
-        )
+            return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+        }
+        guard hasRelaySearch else { return sorted }
+        return sorted.filter { server in
+            let info = server.advertisedInfo
+            let haystackParts: [String] = [
+                server.displayName,
+                server.endpoint.host,
+                "\(server.endpoint.port)",
+                server.region ?? "",
+                server.tags?.joined(separator: " ") ?? "",
+                server.website ?? "",
+                server.note ?? "",
+                info?.relayName ?? "",
+                info?.operatorNote ?? "",
+                info?.softwareVersion ?? "",
+                info?.federation.name ?? "",
+                info?.federation.description ?? ""
+            ]
+            let haystack = haystackParts.joined(separator: " ").lowercased()
+            return haystack.contains(normalizedRelaySearch)
+        }
+    }
+
+    private func refreshAllRelayInfo() {
+        let relayIds = model.state.relayServers.map(\.id)
+        Task {
+            for relayId in relayIds {
+                await model.fetchRelayInfo(id: relayId)
+            }
+        }
     }
 
     @ViewBuilder
@@ -3962,7 +7287,86 @@ private struct RelaysView: View {
             .hoverLift()
             #endif
         }
-        .padding(.vertical, 4)
+        .uniformGlassCard(cornerRadius: 12, minHeight: 96)
+        .padding(.vertical, 2)
+    }
+}
+
+private struct MasterSourceFormatHelpView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private let textExample = """
+# host:port,name,region,tags,website,note,kind,federationMode,federationName,federationDescription,temporalBucketSeconds,operatorNote,softwareVersion,groupCreationMode,requiresPassword,useTLS,curatedStrictPolicyEnabled,curatedCoordinatorQuorum,curatedRequireSignedDirectory,transport
+https://relay.example.org:443,Example Relay,US,privacy|high-uptime,https://relay.example.org,Public relay,standard,curated,Noctyra Federation,Trusted mesh,300,No logs,1.2.0,allowed,false,true,true,2,true,http
+wss://relay-b.example.org:443,WS Relay,EU,privacy,https://relay-b.example.org,WebSocket endpoint,bridge,open,OpenMesh,Community open federation,120,,,allowed,false,true,,,websocket
+"""
+
+    private let jsonExample = """
+{
+  "servers": [
+    {
+      "name": "Example Relay",
+      "host": "relay.example.org",
+      "port": 443,
+      "useTLS": true,
+      "transport": "http",
+      "relayKind": "standard",
+      "federationMode": "curated",
+      "federationName": "Noctyra Federation"
+    }
+  ]
+}
+"""
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                SheetActionBar {
+                    dismiss()
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        SheetHero(
+                            icon: "doc.text.magnifyingglass",
+                            title: "Master Source Format",
+                            subtitle: "Publish relay directories as JSON or line-based text."
+                        )
+
+                        SheetSection(
+                            title: "Accepted Formats",
+                            subtitle: "URL hosts may use HTTP(S) or WebSocket schemes.",
+                            icon: "checklist"
+                        ) {
+                            Text("Use JSON for structured directories or text lines for compact lists. Unknown optional fields are ignored.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        SheetSection(title: "JSON Example", icon: "curlybraces") {
+                            Text(jsonExample)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+
+                        SheetSection(title: "Text Example", icon: "text.alignleft") {
+                            Text(textExample)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                    .frame(maxWidth: 760)
+                    .padding(16)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .noctyraSheetBackground()
+            .hideSheetNavigationBar()
+        }
     }
 }
 
@@ -3972,6 +7376,7 @@ private struct ContactBookView: View {
     let onOpen: (UUID) -> Void
     let onAdd: () -> Void
     @State private var trustPrompt: TrustPrompt?
+    @State private var searchText = ""
 
     var body: some View {
         Group {
@@ -3996,10 +7401,10 @@ private struct ContactBookView: View {
                     if screenProtection.isSensitiveHidden {
                         SensitiveContentPlaceholder(
                             title: "Contact Book Hidden",
-                            message: "Screen capture or an external display is active. Contact details are hidden to protect your OPSEC."
+                            message: "Screen capture or an external display is active. Contact details are hidden to protect your operational security."
                         )
                     } else {
-                        contactList
+                        iosContactList
                     }
                 }
             }
@@ -4007,7 +7412,7 @@ private struct ContactBookView: View {
             if screenProtection.isSensitiveHidden {
                 SensitiveContentPlaceholder(
                     title: "Contact Book Hidden",
-                    message: "Screen capture or an external display is active. Contact details are hidden to protect your OPSEC."
+                    message: "Screen capture or an external display is active. Contact details are hidden to protect your operational security."
                 )
             } else {
                 contactBookMac
@@ -4025,6 +7430,7 @@ private struct ContactBookView: View {
                     }
                 }
             }
+            .noctyraSheetPresentation()
         }
     }
 
@@ -4044,6 +7450,127 @@ private struct ContactBookView: View {
         .padding(.horizontal, 20)
         .padding(.bottom, 20)
         .privacySensitive()
+    }
+    #endif
+
+    #if os(iOS)
+    private var iosContactList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                InlineSearchField(text: $searchText, prompt: "Search contacts")
+
+                HStack {
+                    Label(
+                        "\(filteredContacts.count) contact\(filteredContacts.count == 1 ? "" : "s")",
+                        systemImage: "person.2.fill"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 4)
+
+                if filteredContacts.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: hasActiveSearch ? "magnifyingglass" : "person.crop.circle.badge.plus")
+                            .font(.system(size: 28, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Text(hasActiveSearch ? "No matching contacts" : "Your contact book is empty")
+                            .font(.headline)
+                        if !hasActiveSearch {
+                            Text("Add a contact using a protected file, animated QR, AirDrop, or relay pairing.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                            Button("Add Contact") { onAdd() }
+                                .glassButton(prominent: true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 24)
+                    .uniformGlassCard(cornerRadius: 18, padding: 16)
+                } else {
+                    ForEach(filteredContacts) { contact in
+                        contactCard(contact)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 24)
+            .adaptiveReadableContent(maxWidth: 860)
+        }
+        .privacySensitive()
+        .glassBackgroundIfNeeded()
+    }
+
+    private func contactCard(_ contact: Contact) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "person.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 40, height: 40)
+                    .background(Color.accentColor.opacity(0.14), in: Circle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(contact.displayName)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Text(contact.isTrusted ? "Verified contact" : "Verification pending")
+                        .font(.caption)
+                        .foregroundStyle(contact.isTrusted ? Color.green : Color.secondary)
+                }
+                Spacer()
+                if let unread = model.state.conversation(for: contact.id)?.unreadCount, unread > 0 {
+                    UnreadBadge(count: unread)
+                }
+                Button { onOpen(contact.id) } label: {
+                    Image(systemName: "bubble.left.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .accessibilityLabel("Open Chat")
+                .glassCircleButton(prominent: true, diameter: 34)
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                contactMetadataRow("Relay", value: "\(contact.relay.host):\(contact.relay.port)")
+                contactMetadataRow("Inbox", value: contact.inboxId)
+                contactMetadataRow("Fingerprint", value: shortFingerprint(contact.fingerprint))
+            }
+
+            trustSection(for: contact)
+
+            Toggle(isOn: identityResetBinding(for: contact)) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Receive identity after burn")
+                        .font(.caption.weight(.semibold))
+                    Text("Keep this contact through a full identity reset.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+        }
+        .uniformGlassCard(cornerRadius: 18, padding: 14)
+        .contextMenu {
+            Button("Remove Contact", role: .destructive) {
+                Task { await model.removeContact(id: contact.id) }
+            }
+        }
+    }
+
+    private func contactMetadataRow(_ label: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 64, alignment: .leading)
+            Text(value)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
     }
     #endif
 
@@ -4077,16 +7604,19 @@ private struct ContactBookView: View {
             }
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
+            InlineSearchField(text: $searchText, prompt: "Search contacts")
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
         }
 
-        if model.state.contacts.isEmpty {
-            Text("No contacts yet")
+        if filteredContacts.isEmpty {
+            Text(hasActiveSearch ? "No matching contacts" : "No contacts yet")
                 .foregroundStyle(.secondary)
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
         }
 
-        ForEach(model.state.contacts) { contact in
+        ForEach(filteredContacts) { contact in
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text(contact.displayName)
@@ -4117,11 +7647,11 @@ private struct ContactBookView: View {
                     Button("Open") { onOpen(contact.id) }
                         .glassButton()
                         .hoverLift()
-                    Button("Delete") {
-                        Task { await model.removeContact(id: contact.id) }
-                    }
-                    .glassButton()
-                    .hoverLift()
+                Button("Delete") {
+                    Task { await model.removeContact(id: contact.id) }
+                }
+                .glassButton()
+                .hoverLift()
                     #endif
                 }
                 Text("Inbox: \(contact.inboxId)")
@@ -4153,26 +7683,10 @@ private struct ContactBookView: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.5),
-                                Color.white.opacity(0.08)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.8
-                    )
-            )
+            .uniformGlassCard(cornerRadius: 12, padding: 0, minHeight: 156)
             .listRowSeparator(.hidden)
             .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
             .contextMenu {
                 Button("Remove Contact", role: .destructive) {
                     Task { await model.removeContact(id: contact.id) }
@@ -4185,6 +7699,33 @@ private struct ContactBookView: View {
                     Label("Delete", systemImage: "trash")
                 }
             }
+        }
+    }
+
+    private var hasActiveSearch: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var normalizedSearchText: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var filteredContacts: [Contact] {
+        let sorted = model.state.contacts.sorted {
+            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        }
+        guard hasActiveSearch else { return sorted }
+        return sorted.filter { contact in
+            let haystack = [
+                contact.displayName,
+                contact.inboxId,
+                contact.fingerprint,
+                contact.relay.host,
+                "\(contact.relay.port)"
+            ]
+                .joined(separator: " ")
+                .lowercased()
+            return haystack.contains(normalizedSearchText)
         }
     }
 
@@ -4224,10 +7765,18 @@ private struct ContactBookView: View {
             #if os(iOS)
             Menu {
                 Button(trustActionLabel(for: contact)) {
-                    trustPrompt = TrustPrompt(contact: contact, action: .verified)
+                    trustPrompt = TrustPrompt(
+                        contact: contact,
+                        action: .verified,
+                        localFingerprint: model.state.identity.fingerprint
+                    )
                 }
                 Button("Revoke", role: .destructive) {
-                    trustPrompt = TrustPrompt(contact: contact, action: .revoked)
+                    trustPrompt = TrustPrompt(
+                        contact: contact,
+                        action: .revoked,
+                        localFingerprint: model.state.identity.fingerprint
+                    )
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -4238,12 +7787,20 @@ private struct ContactBookView: View {
             #else
             VStack(alignment: .trailing, spacing: 6) {
                 Button(trustActionLabel(for: contact)) {
-                    trustPrompt = TrustPrompt(contact: contact, action: .verified)
+                    trustPrompt = TrustPrompt(
+                        contact: contact,
+                        action: .verified,
+                        localFingerprint: model.state.identity.fingerprint
+                    )
                 }
                 .glassButton(compact: true)
                 .hoverLift()
                 Button("Revoke") {
-                    trustPrompt = TrustPrompt(contact: contact, action: .revoked)
+                    trustPrompt = TrustPrompt(
+                        contact: contact,
+                        action: .revoked,
+                        localFingerprint: model.state.identity.fingerprint
+                    )
                 }
                 .glassButton(compact: true)
                 .hoverLift()
@@ -4304,6 +7861,7 @@ private struct TrustPrompt: Identifiable {
     let id = UUID()
     let contact: Contact
     let action: ContactTrustKind
+    let localFingerprint: String
 }
 
 private struct TrustAssertionSheet: View {
@@ -4319,8 +7877,27 @@ private struct TrustAssertionSheet: View {
             Text(message)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+            if prompt.action == .verified {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Safety code")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(
+                        ContactSafetyNumber.make(
+                            localFingerprint: prompt.localFingerprint,
+                            remoteFingerprint: prompt.contact.fingerprint
+                        )
+                    )
+                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
             TextField("Optional note", text: $note, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
+                .lineLimit(2...4)
+                .noctyraInputField()
             HStack {
                 Button("Cancel") {
                     dismiss()
@@ -4336,7 +7913,10 @@ private struct TrustAssertionSheet: View {
             }
         }
         .padding(20)
-        .frame(maxWidth: 420)
+        .frame(maxWidth: 460)
+        .uniformGlassCard(cornerRadius: 18, padding: 16)
+        .padding(16)
+        .noctyraSheetBackground()
     }
 
     private var title: String {
@@ -4370,6 +7950,7 @@ private struct TrustAssertionSheet: View {
 private struct RelayServerRow: View {
     let server: RelayServerRecord
     let isPreferred: Bool
+    let health: RelayHealthSnapshot?
     let onEdit: () -> Void
     let onRefreshInfo: () -> Void
     let onRemove: () -> Void
@@ -4387,10 +7968,12 @@ private struct RelayServerRow: View {
                         .foregroundStyle(.secondary)
                 }
                 transportBadge
+                relayHealthBadge
                 Spacer()
                 #if os(iOS)
                 Menu {
                     Button("Refresh Info") { onRefreshInfo() }
+                    Button("Copy Endpoint") { copyEndpoint() }
                     Button("Edit") { onEdit() }
                     Button("Remove", role: .destructive) { onRemove() }
                 } label: {
@@ -4413,6 +7996,7 @@ private struct RelayServerRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            relayHealthSummary
             if let region = server.region, !region.isEmpty {
                 Text("Region: \(region)")
                     .font(.caption2)
@@ -4440,7 +8024,9 @@ private struct RelayServerRow: View {
             }
             relayInfoSection
         }
+        .uniformGlassCard(cornerRadius: 12, minHeight: 138)
         .contextMenu {
+            Button("Copy Endpoint") { copyEndpoint() }
             Button("Edit") { onEdit() }
             Button("Refresh Info") { onRefreshInfo() }
             Button("Remove", role: .destructive) { onRemove() }
@@ -4451,6 +8037,72 @@ private struct RelayServerRow: View {
             }
         }
     }
+
+    @ViewBuilder
+    private var relayHealthBadge: some View {
+        if let badge = relayHealthBadgeData {
+            #if os(macOS)
+            Label(badge.text, systemImage: badge.icon)
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .foregroundStyle(badge.color)
+                .background(Capsule().fill(badge.color.opacity(0.18)))
+                .help(badge.help)
+            #else
+            Label(badge.text, systemImage: badge.icon)
+                .font(.caption2.weight(.semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .foregroundStyle(badge.color)
+                .background(Capsule().fill(badge.color.opacity(0.18)))
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private var relayHealthSummary: some View {
+        if let health {
+            let checked = Self.relativeFormatter.localizedString(for: health.lastCheckedAt, relativeTo: Date())
+            if let latency = health.latencyMs {
+                Text("Latency: \(latency) ms · checked \(checked)")
+                    .font(.caption2)
+                    .foregroundStyle(health.isReachable ? Color.secondary : Color.orange)
+            } else {
+                Text("Checked \(checked)")
+                    .font(.caption2)
+                    .foregroundStyle(health.isReachable ? Color.secondary : Color.orange)
+            }
+            if let failureReason = health.failureReason, !failureReason.isEmpty, !health.isReachable {
+                Text("Health issue: \(failureReason)")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+        } else {
+            Text("Health not checked yet.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var relayHealthBadgeData: (text: String, icon: String, color: Color, help: String)? {
+        guard let health else { return nil }
+        let isStale = Date().timeIntervalSince(health.lastCheckedAt) > 300
+        if health.isReachable {
+            if isStale {
+                return ("Stale", "clock.badge.exclamationmark", .orange, "Relay responded before, but health data is older than 5 minutes.")
+            }
+            return ("Healthy", "checkmark.circle.fill", .green, "Relay is reachable.")
+        }
+        return ("Unreachable", "xmark.octagon.fill", .red, "Relay failed last health check.")
+    }
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
 
     @ViewBuilder
     private var transportBadge: some View {
@@ -4502,9 +8154,46 @@ private struct RelayServerRow: View {
             Text("Federation: \(federationLabel(info.federation))")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            policyBadgesRow(for: info)
             Text("Temporal bucket: \(formatBucket(info.temporalBucketSeconds))")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            if let schedule = info.temporalBucketScheduleSeconds, !schedule.isEmpty {
+                Text("Multi-buckets: \(formatBucketSchedule(schedule))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let attachmentDefaultTTL = info.attachmentDefaultTTLSeconds {
+                let attachmentMaxTTL = info.attachmentMaxTTLSeconds ?? attachmentDefaultTTL
+                Text("Attachment retention: default \(formatTTL(attachmentDefaultTTL)), max \(formatTTL(attachmentMaxTTL))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if info.attachmentsEnabled == false {
+                Text("Media policy: text-only")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            if let coordinators = info.federationCoordinatorEndpoints, !coordinators.isEmpty {
+                let display = coordinators.prefix(2).map { endpoint in
+                    "\(endpoint.host):\(endpoint.port)"
+                }.joined(separator: ", ")
+                let suffix = coordinators.count > 2 ? " +\(coordinators.count - 2) more" : ""
+                Text("Coordinators: \(display)\(suffix)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            if let relayCount = info.coordinatorReportedRelayCount {
+                Text("Coordinator directory: \(relayCount) relays")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let groupMode = info.groupCreationMode {
+                Text("Group creation: \(groupCreationLabel(groupMode))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             if let relayName = info.relayName, !relayName.isEmpty {
                 Text("Relay name: \(relayName)")
                     .font(.caption2)
@@ -4542,6 +8231,145 @@ private struct RelayServerRow: View {
         }
     }
 
+    private struct PolicyBadge: Identifiable {
+        let id: String
+        let text: String
+        let icon: String
+        let color: Color
+        let help: String
+    }
+
+    @ViewBuilder
+    private func policyBadgesRow(for info: RelayInfo) -> some View {
+        let badges = federationPolicyBadges(for: info)
+        if !badges.isEmpty {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) {
+                    ForEach(badges) { badge in
+                        policyBadgeView(badge)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(badges) { badge in
+                        policyBadgeView(badge)
+                    }
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    @ViewBuilder
+    private func policyBadgeView(_ badge: PolicyBadge) -> some View {
+        let view = Label(badge.text, systemImage: badge.icon)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .foregroundStyle(badge.color)
+            .background(Capsule().fill(badge.color.opacity(0.18)))
+        #if os(macOS)
+        view.help(badge.help)
+        #else
+        view
+        #endif
+    }
+
+    private func federationPolicyBadges(for info: RelayInfo) -> [PolicyBadge] {
+        var badges: [PolicyBadge] = []
+
+        if info.federation.mode == .curated {
+            if info.curatedStrictPolicyEnabled == true {
+                badges.append(
+                    PolicyBadge(
+                        id: "curated-strict",
+                        text: "Strict Curated",
+                        icon: "shield.checkered",
+                        color: .green,
+                        help: "Curated forwarding requires allowlist + coordinator verification."
+                    )
+                )
+            } else if info.curatedStrictPolicyEnabled == false {
+                badges.append(
+                    PolicyBadge(
+                        id: "curated-soft",
+                        text: "Curated",
+                        icon: "shield.lefthalf.filled",
+                        color: .orange,
+                        help: "Curated forwarding is running with strict policy disabled."
+                    )
+                )
+            }
+            if let quorum = info.curatedCoordinatorQuorum {
+                badges.append(
+                    PolicyBadge(
+                        id: "curated-quorum-\(quorum)",
+                        text: "Quorum \(quorum)",
+                        icon: "person.3.fill",
+                        color: .blue,
+                        help: "Coordinator quorum required for curated forwarding."
+                    )
+                )
+            }
+            if let requireSigned = info.curatedRequireSignedDirectory {
+                badges.append(
+                    PolicyBadge(
+                        id: "curated-signed-\(requireSigned ? "on" : "off")",
+                        text: requireSigned ? "Signed Dir" : "Unsigned Dir OK",
+                        icon: requireSigned ? "checkmark.seal.fill" : "exclamationmark.shield.fill",
+                        color: requireSigned ? .mint : .orange,
+                        help: requireSigned
+                            ? "Relay requires signed coordinator directory snapshots."
+                            : "Relay accepts unsigned coordinator directory responses."
+                    )
+                )
+            }
+        }
+
+        if info.requiresPassword == true {
+            badges.append(
+                PolicyBadge(
+                    id: "password-required",
+                    text: "Password",
+                    icon: "key.fill",
+                    color: .orange,
+                    help: "Relay requires an access password for operational requests."
+                )
+            )
+        }
+
+        return badges
+    }
+
+    private func copyEndpoint() {
+        Clipboard.copy(endpointClipboardValue)
+        FeedbackGenerator.light()
+    }
+
+    private var endpointClipboardValue: String {
+        let scheme: String
+        switch server.endpoint.transport {
+        case .tcp:
+            scheme = server.endpoint.useTLS ? "tls" : "tcp"
+        case .http:
+            scheme = server.endpoint.useTLS ? "https" : "http"
+        case .websocket:
+            scheme = server.endpoint.useTLS ? "wss" : "ws"
+        }
+        let includePort: Bool = {
+            switch server.endpoint.transport {
+            case .http, .websocket:
+                let defaultPort: UInt16 = server.endpoint.useTLS ? 443 : 80
+                return server.endpoint.port != defaultPort
+            case .tcp:
+                return true
+            }
+        }()
+        if includePort {
+            return "\(scheme)://\(server.endpoint.host):\(server.endpoint.port)"
+        }
+        return "\(scheme)://\(server.endpoint.host)"
+    }
+
     private func federationLabel(_ federation: FederationDescriptor) -> String {
         switch federation.mode {
         case .solo:
@@ -4571,6 +8399,17 @@ private struct RelayServerRow: View {
             return "Archive"
         case .privateRelay:
             return "Private"
+        case .coordinator:
+            return "Coordinator"
+        }
+    }
+
+    private func groupCreationLabel(_ mode: GroupCreationMode) -> String {
+        switch mode {
+        case .allowed:
+            return "Allowed"
+        case .disabled:
+            return "Disabled"
         }
     }
 
@@ -4585,6 +8424,27 @@ private struct RelayServerRow: View {
             return "\(seconds / 60)m"
         }
         return String(format: "%.1fm", Double(seconds) / 60.0)
+    }
+
+    private func formatBucketSchedule(_ schedule: [Int]) -> String {
+        let normalized = Array(Set(schedule.filter { $0 > 0 })).sorted()
+        if normalized.isEmpty {
+            return "Off"
+        }
+        return normalized.map(formatBucket).joined(separator: ", ")
+    }
+
+    private func formatTTL(_ seconds: Int) -> String {
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+        if seconds < 3600 {
+            return "\(seconds / 60)m"
+        }
+        if seconds % 3600 == 0 {
+            return "\(seconds / 3600)h"
+        }
+        return String(format: "%.1fh", Double(seconds) / 3600.0)
     }
 
     private func formatInfoDate(_ date: Date) -> String {
@@ -4615,9 +8475,9 @@ private enum RelayEditorMode: Identifiable {
     var title: String {
         switch self {
         case .add:
-            return "Add Relay Server"
+            return "Add Relay"
         case .edit:
-            return "Edit Relay Server"
+            return "Edit Relay"
         }
     }
 
@@ -4675,7 +8535,11 @@ private struct ThemeSwatch: View {
 
 #if os(macOS)
 private struct GlassGroupBoxStyle: GroupBoxStyle {
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
     func makeBody(configuration: Configuration) -> some View {
+        let isDark = colorScheme == .dark
         VStack(alignment: .leading, spacing: 10) {
             configuration.label
                 .font(.system(.headline, design: .rounded))
@@ -4686,6 +8550,24 @@ private struct GlassGroupBoxStyle: GroupBoxStyle {
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.black.opacity(isDark ? 0.20 : 0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    theme.accent.opacity(isDark ? 0.16 : 0.10),
+                                    theme.glowSecondary.opacity(isDark ? 0.10 : 0.06),
+                                    Color.clear
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
         )
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -4701,6 +8583,7 @@ private struct GlassGroupBoxStyle: GroupBoxStyle {
                     lineWidth: 0.8
                 )
         )
+        .shadow(color: theme.accent.opacity(isDark ? 0.12 : 0.08), radius: 10, x: 0, y: 4)
     }
 }
 #endif
@@ -4765,6 +8648,7 @@ private extension View {
     func cardButtonStyle() -> some View {
         #if os(macOS)
         return self
+            .frame(maxWidth: .infinity, minHeight: 108, alignment: .leading)
             .padding(12)
             .background(
                 ZStack {
@@ -4778,6 +8662,7 @@ private extension View {
             .modifier(GlowCardModifier())
         #else
         return self
+            .frame(maxWidth: .infinity, minHeight: 108, alignment: .leading)
             .padding(12)
             .background(
                 ZStack {
@@ -4813,6 +8698,19 @@ private struct GlassCardBacking: View {
         }()
         return RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             .fill(Color.black.opacity(opacity))
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func searchInputBehavior() -> some View {
+        #if os(iOS)
+        self
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+        #else
+        self
+        #endif
     }
 }
 
@@ -4993,11 +8891,22 @@ private struct HostingBackgroundClearer: UIViewControllerRepresentable {
 private enum Clipboard {
     static func copy(_ text: String) {
         #if os(iOS)
-        UIPasteboard.general.string = text
+        UIPasteboard.general.setItems(
+            [[UTType.plainText.identifier: text]],
+            options: [
+                .localOnly: true,
+                .expirationDate: Date().addingTimeInterval(60)
+            ]
+        )
         #elseif os(macOS)
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+            if pasteboard.string(forType: .string) == text {
+                pasteboard.clearContents()
+            }
+        }
         #endif
     }
 }
@@ -5010,4 +8919,19 @@ private enum FeedbackGenerator {
         generator.impactOccurred()
         #endif
     }
+}
+
+private func readBoundedFile(_ url: URL, maxBytes: Int) throws -> Data {
+    let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+    guard values.isRegularFile == true,
+          let fileSize = values.fileSize,
+          fileSize >= 0,
+          fileSize <= maxBytes else {
+        throw CocoaError(.fileReadTooLarge)
+    }
+    let data = try Data(contentsOf: url, options: .mappedIfSafe)
+    guard data.count <= maxBytes else {
+        throw CocoaError(.fileReadTooLarge)
+    }
+    return data
 }

@@ -6,49 +6,51 @@ struct StorageChoiceView: View {
     var body: some View {
         ZStack {
             Color.black.opacity(0.88)
-            VStack(spacing: 16) {
-                Image(systemName: "lock.shield.fill")
-                    .font(.system(size: 44, weight: .semibold))
-                    .foregroundStyle(.white)
-                Text("Choose Storage Protection")
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white)
-                Text("Pick how the app stores local data and attachments. You can change this later in Settings.")
-                    .font(.callout)
-                    .foregroundStyle(.white.opacity(0.7))
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 360)
-                VStack(spacing: 12) {
-                    Button {
-                        onSelect(.keychain)
-                    } label: {
-                        StorageOptionRow(
-                            title: "Use Keychain (Recommended)",
-                            subtitle: StorageProtectionMode.keychain.descriptionText,
-                            systemImage: "key.fill"
-                        )
-                    }
-                    .glassButton(prominent: true)
+            ScrollView {
+                VStack(spacing: 16) {
+                    Image(systemName: "lock.shield.fill")
+                        .font(.system(size: 44, weight: .semibold))
+                        .foregroundStyle(.white)
+                    Text("Choose Storage Protection")
+                        .font(.system(size: 22, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("Pick how the app stores local data and attachments. You can change this later in Settings.")
+                        .font(.callout)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 360)
+                    VStack(spacing: 12) {
+                        Button {
+                            onSelect(.keychain)
+                        } label: {
+                            StorageOptionRow(
+                                title: "Use Keychain (Recommended)",
+                                subtitle: StorageProtectionMode.keychain.descriptionText,
+                                systemImage: "key.fill"
+                            )
+                        }
+                        .glassButton(prominent: true)
 
-                    Button {
-                        onSelect(.deviceOnly)
-                    } label: {
-                        StorageOptionRow(
-                            title: "Continue without Keychain",
-                            subtitle: StorageProtectionMode.deviceOnly.descriptionText,
-                            systemImage: "internaldrive"
-                        )
+                        Button {
+                            onSelect(.deviceOnly)
+                        } label: {
+                            StorageOptionRow(
+                                title: "Continue without Keychain",
+                                subtitle: StorageProtectionMode.deviceOnly.descriptionText,
+                                systemImage: "internaldrive"
+                            )
+                        }
+                        .glassButton()
                     }
-                    .glassButton()
                 }
+                .padding(32)
+                .background(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .opacity(0.9)
+                )
+                .padding()
             }
-            .padding(32)
-            .background(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(.ultraThinMaterial)
-                    .opacity(0.9)
-            )
-            .padding()
         }
         .ignoresSafeArea()
     }

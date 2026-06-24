@@ -38,47 +38,34 @@ struct NoctyraTopBar: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        // In iPhone landscape, the safe area can introduce large left/right insets that make
-        // the top bar look "underfit". Keep content in the safe area, but let the glass
-        // background bleed edge-to-edge for a professional look.
+        .padding(.vertical, 9)
         .background {
-            ZStack {
-                Rectangle()
-                    .fill(.ultraThinMaterial)
-                LinearGradient(
-                    colors: [
-                        theme.accent.opacity(isDark ? 0.14 : 0.10),
-                        Color.white.opacity(isDark ? 0.03 : 0.05),
-                        theme.glowSecondary.opacity(isDark ? 0.10 : 0.06)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .opacity(isDark ? 0.7 : 0.5)
-                // No blend modes here; iOS secure-container pipelines can flatten them.
-                Rectangle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(isDark ? 0.18 : 0.30),
-                                Color.white.opacity(0.0)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    theme.accent.opacity(isDark ? 0.075 : 0.045),
+                                    theme.glowSecondary.opacity(isDark ? 0.045 : 0.025),
+                                    Color.clear
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
-                    .frame(height: 1)
-                    .frame(maxHeight: .infinity, alignment: .top)
-                Rectangle()
-                    .fill(Color.white.opacity(isDark ? 0.12 : 0.18))
-                    .frame(height: 0.5)
-                    .frame(maxHeight: .infinity, alignment: .bottom)
-            }
+                )
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(Color.white.opacity(isDark ? 0.055 : 0.10))
+                        .frame(height: 0.5)
+                }
             .allowsHitTesting(false)
             #if os(iOS)
             .ignoresSafeArea(.container, edges: [.top, .leading, .trailing])
             #endif
         }
+        .shadow(color: theme.accent.opacity(isDark ? 0.055 : 0.035), radius: 8, x: 0, y: 3)
     }
 }

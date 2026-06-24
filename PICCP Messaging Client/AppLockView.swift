@@ -6,9 +6,45 @@ struct AppLockView: View {
     @State private var biometricPassed = false
     @State private var pin = ""
     @State private var errorMessage: String?
+    @State private var isUnlocking = false
+    @State private var isBiometricUnlocking = false
 
     private var mode: AppLockMode {
         model.state.appLock.mode
+    }
+
+    private var effectiveMode: AppLockMode {
+        guard !model.biometricsAvailable else {
+            return mode
+        }
+        switch mode {
+        case .biometricsAndPin:
+            return model.state.appLock.isPinConfigured ? .pinOnly : .off
+        case .biometrics:
+            return model.state.appLock.isPinConfigured ? .pinOnly : .off
+        case .pinOnly, .off:
+            return mode
+        }
+    }
+
+    private var customLockMessage: String? {
+        let message = model.state.appLock.lockScreenMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        return message.isEmpty ? nil : message
+    }
+
+    private var shouldShowCustomMessage: Bool {
+        switch effectiveMode {
+        case .pinOnly:
+            return true
+        case .biometricsAndPin:
+            return biometricPassed
+        case .biometrics, .off:
+            return false
+        }
+    }
+
+    private var shouldShowLockSubtitle: Bool {
+        !(shouldShowCustomMessage && customLockMessage != nil)
     }
 
     var body: some View {
@@ -29,19 +65,28 @@ struct AppLockView: View {
                 Text("App Locked")
                     .font(.system(size: 22, weight: .semibold, design: .rounded))
                     .foregroundStyle(.white)
-                Text(lockSubtitle)
-                    .font(.callout)
-                    .foregroundStyle(.white.opacity(0.7))
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 360)
+                if shouldShowCustomMessage, let customLockMessage {
+                    Text(customLockMessage)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.92))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 360)
+                }
+                if shouldShowLockSubtitle {
+                    Text(lockSubtitle)
+                        .font(.callout)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 360)
+                }
 
-                switch mode {
+                switch effectiveMode {
                 case .biometricsAndPin:
                     if model.state.appLock.isPinConfigured {
                         if biometricPassed {
                             pinUnlockView
                         } else {
-                            unlockButton
+                            biometricProgressView
                         }
                     } else {
                         missingPinNote
@@ -53,7 +98,7 @@ struct AppLockView: View {
                         missingPinNote
                     }
                 case .biometrics:
-                    unlockButton
+                    biometricProgressView
                 case .off:
                     EmptyView()
                 }
@@ -78,19 +123,42 @@ struct AppLockView: View {
             biometricPassed = false
             pin = ""
             errorMessage = nil
+            Task { await attemptAutoBiometricUnlockIfNeeded() }
+        }
+        .onChange(of: effectiveMode) { _, _ in
+            Task { await attemptAutoBiometricUnlockIfNeeded() }
         }
     }
 
-    private var unlockButton: some View {
-        Button("Unlock with Biometrics") {
+    private var retryBiometricButton: some View {
+        Button("Retry Biometrics") {
             Task { await attemptBiometricUnlock() }
         }
         .glassButton(prominent: true)
-        .disabled(mode == .off)
+        .disabled(effectiveMode == .off)
+    }
+
+    @ViewBuilder
+    private var biometricProgressView: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                if isBiometricUnlocking {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white.opacity(0.85))
+                }
+                Text(isBiometricUnlocking ? "Verifying biometrics..." : "Waiting for biometric verification...")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.75))
+            }
+            if !isBiometricUnlocking, errorMessage != nil {
+                retryBiometricButton
+            }
+        }
     }
 
     private var lockSubtitle: String {
-        switch mode {
+        switch effectiveMode {
         case .off:
             return "Unlocking is disabled."
         case .biometrics:
@@ -104,19 +172,12 @@ struct AppLockView: View {
 
     private var pinUnlockView: some View {
         VStack(spacing: 10) {
-            SecureField("PIN", text: $pin)
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 180)
-                #if os(iOS)
-                .keyboardType(.numberPad)
-                #endif
-                .onChange(of: pin) { _, newValue in
-                    pin = sanitizePin(newValue)
-                }
-            Button("Unlock") {
+            PinDotsRow(total: 6, filled: pin.count)
+                .padding(.top, 4)
+            NumericPinPad(pin: $pin, maxLength: 6, isEnabled: !isUnlocking) { _ in
                 attemptPinUnlock()
             }
-            .glassButton(prominent: true)
+            .padding(.top, 4)
         }
     }
 
@@ -127,11 +188,16 @@ struct AppLockView: View {
     }
 
     private func attemptBiometricUnlock() async {
+        await MainActor.run {
+            guard !isBiometricUnlocking else { return }
+            isBiometricUnlocking = true
+        }
         let success = await model.performBiometricUnlock()
         await MainActor.run {
+            isBiometricUnlocking = false
             if success {
                 errorMessage = nil
-                if mode == .biometrics {
+                if effectiveMode == .biometrics {
                     model.completeUnlock()
                 } else {
                     biometricPassed = true
@@ -142,18 +208,33 @@ struct AppLockView: View {
         }
     }
 
+    private func attemptAutoBiometricUnlockIfNeeded() async {
+        guard effectiveMode == .biometrics || (effectiveMode == .biometricsAndPin && !biometricPassed) else {
+            return
+        }
+        await attemptBiometricUnlock()
+    }
+
     private func attemptPinUnlock() {
+        let lockout = model.appLockPinLockoutRemainingSeconds()
+        if lockout > 0 {
+            errorMessage = "Too many attempts. Try again in \(lockout)s."
+            pin = ""
+            return
+        }
         let trimmed = sanitizePin(pin)
         guard trimmed.count == 6 else {
             errorMessage = "Enter a 6-digit PIN."
             return
         }
+        isUnlocking = true
         Task {
             if await model.performActionPinIfNeeded(trimmed) != nil {
                 await MainActor.run {
                     errorMessage = nil
                     pin = ""
                     biometricPassed = false
+                    isUnlocking = false
                     model.completeUnlock()
                 }
                 return
@@ -163,8 +244,16 @@ struct AppLockView: View {
                     model.completeUnlock()
                     pin = ""
                     errorMessage = nil
+                    isUnlocking = false
                 } else {
-                    errorMessage = "Invalid PIN."
+                    let lockout = model.appLockPinLockoutRemainingSeconds()
+                    if lockout > 0 {
+                        errorMessage = "Too many attempts. Try again in \(lockout)s."
+                    } else {
+                        errorMessage = "Invalid PIN."
+                    }
+                    pin = ""
+                    isUnlocking = false
                 }
             }
         }

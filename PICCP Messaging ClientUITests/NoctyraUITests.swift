@@ -19,6 +19,7 @@ final class NoctyraUITests: XCTestCase {
 
     func testSecureTypingEnabledByDefault() {
         openSettings()
+        openPrivacySettings()
         let toggle = app.switches["secure-typing-toggle"]
         if toggle.waitForExistence(timeout: 2) {
             assertToggleOn(toggle)
@@ -61,6 +62,9 @@ final class NoctyraUITests: XCTestCase {
     }
 
     private func openContact() {
+        if app.buttons["reveal-toggle"].exists || app.staticTexts["Hidden message"].exists {
+            return
+        }
         let contactButton = app.buttons["contact-00000000-0000-0000-0000-000000000001"]
         if contactButton.waitForExistence(timeout: 1) {
             contactButton.tap()
@@ -69,6 +73,22 @@ final class NoctyraUITests: XCTestCase {
         let fallback = app.staticTexts["UITest Contact"]
         XCTAssertTrue(fallback.waitForExistence(timeout: 1))
         fallback.tap()
+    }
+
+    private func openPrivacySettings() {
+        let identified = app.buttons["settings-destination-privacy"]
+        if identified.waitForExistence(timeout: 2) {
+            identified.tap()
+            return
+        }
+        let button = app.buttons["Privacy"]
+        if button.waitForExistence(timeout: 2) {
+            button.tap()
+            return
+        }
+        let text = app.staticTexts["Privacy"]
+        XCTAssertTrue(text.waitForExistence(timeout: 2))
+        text.tap()
     }
 
     private func assertToggleOn(_ element: XCUIElement) {

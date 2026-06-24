@@ -12,11 +12,15 @@ struct QRCodeScannerView: View {
             if permission == .authorized {
                 ScannerRepresentable(onScan: onScan, onError: onError, allowsMultiple: allowsMultiple)
                     .frame(minHeight: 240, maxHeight: 360)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(.secondary.opacity(0.4), lineWidth: 1)
-                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.white.opacity(0.22), lineWidth: 1)
+                            ScannerReticle()
+                                .padding(42)
+                        }
+                    }
             } else if permission == .denied {
                 VStack(spacing: 8) {
                     Image(systemName: "camera.fill")
@@ -51,6 +55,40 @@ struct QRCodeScannerView: View {
         @unknown default:
             permission = .denied
         }
+    }
+}
+
+private struct ScannerReticle: View {
+    var body: some View {
+        GeometryReader { proxy in
+            let side = min(proxy.size.width, proxy.size.height)
+            let length = max(22, side * 0.16)
+            Path { path in
+                path.move(to: CGPoint(x: 0, y: length))
+                path.addLine(to: CGPoint(x: 0, y: 0))
+                path.addLine(to: CGPoint(x: length, y: 0))
+
+                path.move(to: CGPoint(x: proxy.size.width - length, y: 0))
+                path.addLine(to: CGPoint(x: proxy.size.width, y: 0))
+                path.addLine(to: CGPoint(x: proxy.size.width, y: length))
+
+                path.move(to: CGPoint(x: proxy.size.width, y: proxy.size.height - length))
+                path.addLine(to: CGPoint(x: proxy.size.width, y: proxy.size.height))
+                path.addLine(to: CGPoint(x: proxy.size.width - length, y: proxy.size.height))
+
+                path.move(to: CGPoint(x: length, y: proxy.size.height))
+                path.addLine(to: CGPoint(x: 0, y: proxy.size.height))
+                path.addLine(to: CGPoint(x: 0, y: proxy.size.height - length))
+            }
+            .stroke(
+                Color.white.opacity(0.92),
+                style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
+            )
+            .shadow(color: Color.black.opacity(0.45), radius: 3)
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
     }
 }
 

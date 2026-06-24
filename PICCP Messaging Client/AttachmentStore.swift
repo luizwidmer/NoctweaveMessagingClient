@@ -24,9 +24,17 @@ final class AttachmentStore {
     }
 
     func loadAttachment(fileName: String) throws -> Data {
+        let encrypted = try loadEncryptedAttachment(fileName: fileName)
+        return try decryptAttachmentPayload(encrypted)
+    }
+
+    func loadEncryptedAttachment(fileName: String) throws -> Data {
         let url = directory.appendingPathComponent(fileName)
-        let data = try Data(contentsOf: url)
-        return try decryptIfNeeded(data)
+        return try Data(contentsOf: url)
+    }
+
+    func decryptAttachmentPayload(_ data: Data) throws -> Data {
+        try decryptIfNeeded(data)
     }
 
     func deleteAttachment(fileName: String) throws {
@@ -34,6 +42,11 @@ final class AttachmentStore {
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
+    }
+
+    func warmUpKeychain() throws {
+        guard useEncryption else { return }
+        _ = try AttachmentKeychain.loadOrCreateKey()
     }
 
     private func encryptIfNeeded(_ payload: Data) throws -> Data {
@@ -53,13 +66,16 @@ final class AttachmentStore {
         guard useEncryption else {
             return data
         }
-        if let envelope = try? PICCPCoder.decode(AttachmentEnvelope.self, from: data),
-           envelope.version == 1 {
-            let key = try AttachmentKeychain.loadOrCreateKey()
-            let sealed = try AES.GCM.SealedBox(combined: envelope.sealed)
-            return try AES.GCM.open(sealed, using: key)
+        guard let envelope = try? PICCPCoder.decode(AttachmentEnvelope.self, from: data),
+              envelope.version == 1 else {
+            throw AttachmentStoreError.unexpectedPlaintextInEncryptedMode
         }
-        return data
+        let sealed = try AES.GCM.SealedBox(combined: envelope.sealed)
+        let key = try AttachmentKeychain.loadOrCreateKey()
+        guard let opened = try? AES.GCM.open(sealed, using: key) else {
+            throw AttachmentStoreError.encryptionFailed
+        }
+        return opened
     }
 
     private func writeData(_ data: Data, to url: URL) throws {
@@ -95,23 +111,24 @@ private struct AttachmentEnvelope: Codable {
 
 private enum AttachmentStoreError: Error {
     case encryptionFailed
+    case unexpectedPlaintextInEncryptedMode
 }
 
 #if canImport(Security)
 private enum AttachmentKeychain {
-    private static let service = "com.lattice.attachments"
-    private static let account = "attachment-key"
+    private static let service = "com.noctyra.securestorage"
+    private static let account = "vault-key-v1"
 
     static func loadOrCreateKey() throws -> SymmetricKey {
-        if let existing = try loadKey() {
+        if let existing = try loadKey(service: service, account: account) {
             return existing
         }
         let key = SymmetricKey(size: .bits256)
-        try saveKey(key)
+        try saveKey(key, service: service, account: account)
         return key
     }
 
-    private static func loadKey() throws -> SymmetricKey? {
+    private static func loadKey(service: String, account: String) throws -> SymmetricKey? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -131,7 +148,7 @@ private enum AttachmentKeychain {
         return SymmetricKey(data: data)
     }
 
-    private static func saveKey(_ key: SymmetricKey) throws {
+    private static func saveKey(_ key: SymmetricKey, service: String, account: String) throws {
         let data = key.withUnsafeBytes { Data($0) }
         var attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

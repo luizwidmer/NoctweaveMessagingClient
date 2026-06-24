@@ -5,6 +5,7 @@ enum PinSetupKind: String, Identifiable {
     case unlock
     case burnIdentity
     case clearChats
+    case actionPlan
 
     var id: String { rawValue }
 
@@ -16,6 +17,8 @@ enum PinSetupKind: String, Identifiable {
             return "Set Burn Identity PIN"
         case .clearChats:
             return "Set Clear Chats PIN"
+        case .actionPlan:
+            return "Set Action Plan PIN"
         }
     }
 
@@ -27,6 +30,8 @@ enum PinSetupKind: String, Identifiable {
             return "This PIN burns your identity immediately from the lock screen."
         case .clearChats:
             return "This PIN clears all chats immediately from the lock screen."
+        case .actionPlan:
+            return "This PIN runs your selected action bundle, then becomes your unlock PIN."
         }
     }
 }
@@ -40,7 +45,7 @@ struct PinSetupView: View {
     @State private var entry = ""
     @State private var confirm = ""
     @State private var errorMessage: String?
-    @FocusState private var isFocused: Bool
+    @State private var isSubmitting = false
 
     private enum Step {
         case enter
@@ -95,7 +100,7 @@ struct PinSetupView: View {
                 }
                 .frame(maxWidth: 320)
 
-                PinDots(count: 6, filled: currentInput.count)
+                PinDotsRow(total: 6, filled: currentInput.count)
                     .padding(.top, 4)
 
                 if let errorMessage {
@@ -104,22 +109,20 @@ struct PinSetupView: View {
                         .foregroundStyle(.red.opacity(0.9))
                 }
 
-                hiddenField
+                NumericPinPad(
+                    pin: step == .enter ? $entry : $confirm,
+                    maxLength: 6,
+                    isEnabled: !isSubmitting
+                ) { _ in
+                    submitCurrentStep()
+                }
+                .padding(.top, 6)
 
                 Spacer()
             }
             .padding(.vertical, 24)
-            .onTapGesture {
-                isFocused = true
-            }
         }
         .ignoresSafeArea()
-        .onAppear {
-            isFocused = true
-        }
-        .onChange(of: step) { _, _ in
-            isFocused = true
-        }
     }
 
     private var stepText: String {
@@ -130,61 +133,34 @@ struct PinSetupView: View {
         step == .enter ? entry : confirm
     }
 
-    private var hiddenField: some View {
-        SecureField("", text: step == .enter ? $entry : $confirm)
-            .pinKeyboard()
-            .focused($isFocused)
-            .opacity(0.01)
-            .frame(width: 1, height: 1)
-            .onChange(of: entry) { _, newValue in
-                guard step == .enter else { return }
-                entry = sanitize(newValue)
-                errorMessage = nil
-                if entry.count == 6 {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        step = .confirm
-                    }
-                }
+    private func submitCurrentStep() {
+        errorMessage = nil
+        switch step {
+        case .enter:
+            guard entry.count == 6 else { return }
+            withAnimation(.easeInOut(duration: 0.15)) {
+                step = .confirm
             }
-            .onChange(of: confirm) { _, newValue in
-                guard step == .confirm else { return }
-                confirm = sanitize(newValue)
-                if confirm.count == 6 {
-                    Task { @MainActor in
-                        if confirm == entry {
-                            let success = await onComplete(entry)
-                            if !success {
-                                errorMessage = "Unable to set PIN. Choose a different PIN."
-                                confirm = ""
-                                step = .enter
-                                entry = ""
-                            }
-                        } else {
-                            errorMessage = "PINs do not match."
-                            confirm = ""
-                        }
-                    }
-                }
+        case .confirm:
+            guard confirm.count == 6 else { return }
+            guard confirm == entry else {
+                errorMessage = "PINs do not match."
+                confirm = ""
+                return
             }
-    }
-
-    private func sanitize(_ value: String) -> String {
-        String(value.filter { $0.isNumber }.prefix(6))
-    }
-}
-
-private struct PinDots: View {
-    let count: Int
-    let filled: Int
-
-    var body: some View {
-        HStack(spacing: 12) {
-            ForEach(0..<count, id: \.self) { index in
-                Circle()
-                    .fill(index < filled ? Color.white : Color.white.opacity(0.2))
-                    .frame(width: 12, height: 12)
+            isSubmitting = true
+            Task { @MainActor in
+                let success = await onComplete(entry)
+                isSubmitting = false
+                if !success {
+                    errorMessage = "Unable to set PIN. Choose a different PIN."
+                    confirm = ""
+                    entry = ""
+                    step = .enter
+                }
             }
         }
     }
+
 }
 #endif

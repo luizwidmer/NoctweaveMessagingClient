@@ -8,7 +8,9 @@ import Combine
 final class AppWindowController: ObservableObject {
     @Published private(set) var isWindowKey: Bool = true
     @Published private(set) var isAppActive: Bool = true
-    @Published private(set) var isWindowCaptureBlocked: Bool = true
+    @Published private(set) var isWindowCaptureBlocked: Bool = !ProcessInfo.processInfo.arguments.contains("UI_TESTING")
+
+    private let isUITesting = ProcessInfo.processInfo.arguments.contains("UI_TESTING")
 
     weak var window: NSWindow? {
         didSet {
@@ -42,7 +44,7 @@ final class AppWindowController: ObservableObject {
     }
 
     func setBlockWindowCapture(_ blocked: Bool) {
-        isWindowCaptureBlocked = blocked
+        isWindowCaptureBlocked = isUITesting ? false : blocked
         applySharingType()
     }
 

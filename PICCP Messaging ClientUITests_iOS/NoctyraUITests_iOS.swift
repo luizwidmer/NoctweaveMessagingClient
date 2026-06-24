@@ -13,6 +13,7 @@ final class NoctyraUITests_iOS: XCTestCase {
 
     func testSecureTypingEnabledByDefault() {
         openSettings()
+        openPrivacySettings()
         let element = findSecureTypingElement()
         XCTAssertTrue(element.waitForExistence(timeout: 2))
         assertToggleOn(element)
@@ -39,6 +40,11 @@ final class NoctyraUITests_iOS: XCTestCase {
     }
 
     private func openSettings() {
+        let tab = app.buttons["tab-settings"]
+        if tab.waitForExistence(timeout: 2) {
+            tab.tap()
+            return
+        }
         let settingsButton = app.buttons["sidebar-settings"]
         if settingsButton.waitForExistence(timeout: 1) {
             settingsButton.tap()
@@ -58,6 +64,18 @@ final class NoctyraUITests_iOS: XCTestCase {
     }
 
     private func openContact() {
+        if app.buttons["reveal-toggle"].exists || app.staticTexts["Hidden message"].exists {
+            return
+        }
+        let chats = app.buttons["tab-chats"]
+        if chats.waitForExistence(timeout: 1) {
+            chats.tap()
+        }
+        let chatButton = app.buttons["chat-00000000-0000-0000-0000-000000000001"]
+        if chatButton.waitForExistence(timeout: 1) {
+            chatButton.tap()
+            return
+        }
         let contactButton = app.buttons["contact-00000000-0000-0000-0000-000000000001"]
         if contactButton.waitForExistence(timeout: 1) {
             contactButton.tap()
@@ -74,6 +92,22 @@ final class NoctyraUITests_iOS: XCTestCase {
         let fallback = app.staticTexts["UITest Contact"]
         XCTAssertTrue(fallback.waitForExistence(timeout: 1))
         fallback.tap()
+    }
+
+    private func openPrivacySettings() {
+        let identified = app.buttons["settings-destination-privacy"]
+        if identified.waitForExistence(timeout: 2) {
+            identified.tap()
+            return
+        }
+        let button = app.buttons["Privacy"]
+        if button.waitForExistence(timeout: 2) {
+            button.tap()
+            return
+        }
+        let text = app.staticTexts["Privacy"]
+        XCTAssertTrue(text.waitForExistence(timeout: 2))
+        text.tap()
     }
 
     private func assertToggleOn(_ element: XCUIElement) {
