@@ -1374,6 +1374,98 @@ private struct ChatWallpaper: View {
     }
 }
 
+#if os(iOS)
+private struct ChatTopBar: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    let title: String
+    let status: String
+    var trailing: AnyView? = nil
+
+    private var isDark: Bool { colorScheme == .dark }
+    private var isRegularWidth: Bool { horizontalSizeClass == .regular }
+    private var buttonDiameter: CGFloat { isRegularWidth ? 40 : 34 }
+    private var titleSize: CGFloat { isRegularWidth ? 21 : 18 }
+    private var statusSize: CGFloat { isRegularWidth ? 14 : 12 }
+    private var horizontalPadding: CGFloat { isRegularWidth ? 18 : 12 }
+    private var verticalPadding: CGFloat { isRegularWidth ? 10 : 8 }
+
+    var body: some View {
+        HStack(spacing: isRegularWidth ? 12 : 9) {
+            Button {
+                dismiss()
+                FeedbackGenerator.light()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: isRegularWidth ? 17 : 15, weight: .semibold))
+            }
+            .accessibilityLabel("Back")
+            .glassCircleButton(diameter: buttonDiameter)
+            .hoverLift()
+
+            HStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: titleSize, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+                    .layoutPriority(1)
+
+                if !status.isEmpty {
+                    Circle()
+                        .fill(Color.secondary.opacity(0.55))
+                        .frame(width: 3.5, height: 3.5)
+                        .accessibilityHidden(true)
+                    Text(status)
+                        .font(.system(size: statusSize, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                        .layoutPriority(0)
+                }
+            }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+
+            if let trailing {
+                trailing
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: isRegularWidth ? 60 : 52, alignment: .center)
+        .padding(.horizontal, horizontalPadding)
+        .padding(.vertical, verticalPadding)
+        .background {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    theme.accent.opacity(isDark ? 0.075 : 0.045),
+                                    theme.glowSecondary.opacity(isDark ? 0.045 : 0.025),
+                                    Color.clear
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                )
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(Color.white.opacity(isDark ? 0.055 : 0.10))
+                        .frame(height: 0.5)
+                }
+                .allowsHitTesting(false)
+                .ignoresSafeArea(.container, edges: [.top, .leading, .trailing])
+        }
+        .shadow(color: theme.accent.opacity(isDark ? 0.055 : 0.035), radius: 8, x: 0, y: 3)
+    }
+}
+#endif
+
 private struct InlineSearchField: View {
     @Binding var text: String
     let prompt: String
@@ -1556,6 +1648,7 @@ private struct ConversationView: View {
     @State private var showingInsecureCamera = false
     @State private var showCameraChoiceAlert = false
     @AppStorage("lattice.secureCameraPromptShown.v1") private var secureCameraPromptShown = false
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #else
     @State private var showingAttachmentImporter = false
     #endif
@@ -1572,21 +1665,26 @@ private struct ConversationView: View {
         let isRevealed = revealMessages && !isSensitiveHidden
         VStack(spacing: 0) {
             #if os(iOS)
-            NoctyraTopBar(
+            ChatTopBar(
                 title: isSensitiveHidden ? "Secure Chat" : contact.displayName,
-                subtitle: isSensitiveHidden ? "Screen capture is active" : "Secure chat",
+                status: isSensitiveHidden ? "Capture active" : "Secure chat",
                 trailing: AnyView(
-                    HStack(spacing: 10) {
+                    HStack(spacing: chatHeaderSpacing) {
                         Button {
                             showingClearChatConfirm = true
                         } label: {
                             Image(systemName: "trash")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(.system(size: chatHeaderIconSize, weight: .semibold))
                         }
                         .accessibilityLabel("Clear Chat")
-                        .glassCircleButton(diameter: 32)
+                        .glassCircleButton(diameter: chatHeaderButtonDiameter)
                         .hoverLift()
-                        RevealToggleButton(isRevealed: $revealMessages, isDisabled: isSensitiveHidden)
+                        RevealToggleButton(
+                            isRevealed: $revealMessages,
+                            isDisabled: isSensitiveHidden,
+                            diameter: chatHeaderButtonDiameter,
+                            iconSize: chatHeaderIconSize
+                        )
                     }
                 )
             )
@@ -1744,6 +1842,9 @@ private struct ConversationView: View {
         }
         .glassBackgroundIfNeeded()
         .privacySensitive()
+        #if os(iOS)
+        .toolbar(.hidden, for: .navigationBar)
+        #endif
         .sheet(isPresented: $showingVoiceRecorder) {
             VoiceRecorderSheetView(
                 onRecorded: { data, fileName, mimeType in
@@ -1911,6 +2012,24 @@ private struct ConversationView: View {
     }
     #endif
 
+    #if os(iOS)
+    private var isRegularWidth: Bool {
+        horizontalSizeClass == .regular
+    }
+
+    private var chatHeaderButtonDiameter: CGFloat {
+        isRegularWidth ? 40 : 32
+    }
+
+    private var chatHeaderIconSize: CGFloat {
+        isRegularWidth ? 16 : 14
+    }
+
+    private var chatHeaderSpacing: CGFloat {
+        isRegularWidth ? 10 : 8
+    }
+    #endif
+
     private func sendMessage() {
         let trimmed = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -2003,6 +2122,9 @@ private struct GroupConversationView: View {
     @State private var showingGroupDetails = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     @Environment(\.scenePhase) private var scenePhase
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
     #if os(macOS)
     @FocusState private var isComposerFocused: Bool
     #endif
@@ -2028,30 +2150,35 @@ private struct GroupConversationView: View {
         let isRevealed = revealMessages && !isSensitiveHidden
         VStack(spacing: 0) {
             #if os(iOS)
-            NoctyraTopBar(
+            ChatTopBar(
                 title: isSensitiveHidden ? "Secure Group" : groupTitle,
-                subtitle: isSensitiveHidden ? "Screen capture is active" : "\(memberCount) members",
+                status: isSensitiveHidden ? "Capture active" : "\(memberCount) members",
                 trailing: AnyView(
-                    HStack(spacing: 10) {
+                    HStack(spacing: chatHeaderSpacing) {
                         Button {
                             showingGroupDetails = true
                         } label: {
                             Image(systemName: "slider.horizontal.3")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(.system(size: chatHeaderIconSize, weight: .semibold))
                         }
                         .accessibilityLabel("Group Settings")
-                        .glassCircleButton(diameter: 32)
+                        .glassCircleButton(diameter: chatHeaderButtonDiameter)
                         .hoverLift()
                         Button {
                             showingClearChatConfirm = true
                         } label: {
                             Image(systemName: "trash")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(.system(size: chatHeaderIconSize, weight: .semibold))
                         }
                         .accessibilityLabel("Clear Group Chat")
-                        .glassCircleButton(diameter: 32)
+                        .glassCircleButton(diameter: chatHeaderButtonDiameter)
                         .hoverLift()
-                        RevealToggleButton(isRevealed: $revealMessages, isDisabled: isSensitiveHidden)
+                        RevealToggleButton(
+                            isRevealed: $revealMessages,
+                            isDisabled: isSensitiveHidden,
+                            diameter: chatHeaderButtonDiameter,
+                            iconSize: chatHeaderIconSize
+                        )
                     }
                 )
             )
@@ -2170,6 +2297,9 @@ private struct GroupConversationView: View {
         }
         .glassBackgroundIfNeeded()
         .privacySensitive()
+        #if os(iOS)
+        .toolbar(.hidden, for: .navigationBar)
+        #endif
         .sheet(isPresented: $showingGroupDetails) {
             GroupDetailsView(model: model, groupId: group.id)
                 .noctyraSheetPresentation()
@@ -2216,6 +2346,24 @@ private struct GroupConversationView: View {
             }
         }
     }
+
+    #if os(iOS)
+    private var isRegularWidth: Bool {
+        horizontalSizeClass == .regular
+    }
+
+    private var chatHeaderButtonDiameter: CGFloat {
+        isRegularWidth ? 40 : 32
+    }
+
+    private var chatHeaderIconSize: CGFloat {
+        isRegularWidth ? 16 : 14
+    }
+
+    private var chatHeaderSpacing: CGFloat {
+        isRegularWidth ? 10 : 8
+    }
+    #endif
 
     private func sendMessage() {
         let trimmed = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3145,17 +3293,19 @@ private extension Data {
 private struct RevealToggleButton: View {
     @Binding var isRevealed: Bool
     var isDisabled: Bool = false
+    var diameter: CGFloat = 32
+    var iconSize: CGFloat = 14
 
     var body: some View {
         Button {
             isRevealed.toggle()
         } label: {
             Image(systemName: isRevealed ? "eye" : "eye.slash")
-                .font(.system(size: 14, weight: .semibold))
+                .font(.system(size: iconSize, weight: .semibold))
         }
         .accessibilityLabel(isRevealed ? "Hide Messages" : "Reveal Messages")
         .accessibilityIdentifier("reveal-toggle")
-        .glassCircleButton(diameter: 32)
+        .glassCircleButton(diameter: diameter)
         .hoverLift()
         .disabled(isDisabled)
         .opacity(isDisabled ? 0.5 : 1.0)
