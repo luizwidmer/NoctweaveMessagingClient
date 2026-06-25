@@ -2061,7 +2061,11 @@ private struct ConversationView: View {
                 .hoverLift()
                 #endif
                 #if os(iOS)
-                MessageInputField(text: $messageText, secureTypingEnabled: model.state.privacy.secureTypingEnabled) {
+                MessageInputField(
+                    text: $messageText,
+                    secureTypingEnabled: model.state.privacy.secureTypingEnabled,
+                    secureTypingKeyboard: model.state.privacy.secureTypingKeyboard
+                ) {
                     sendMessage()
                 }
                 #else
@@ -2585,7 +2589,11 @@ private struct GroupConversationView: View {
 
             HStack(spacing: 8) {
                 #if os(iOS)
-                MessageInputField(text: $messageText, secureTypingEnabled: model.state.privacy.secureTypingEnabled) {
+                MessageInputField(
+                    text: $messageText,
+                    secureTypingEnabled: model.state.privacy.secureTypingEnabled,
+                    secureTypingKeyboard: model.state.privacy.secureTypingKeyboard
+                ) {
                     sendMessage()
                 }
                 #else
@@ -3714,6 +3722,7 @@ private final class SecureEventInputController {
 private struct MessageInputField: View {
     @Binding var text: String
     let secureTypingEnabled: Bool
+    let secureTypingKeyboard: SecureTypingKeyboard
     let onSubmit: () -> Void
     @Environment(\.appTheme) private var theme
 
@@ -3726,7 +3735,12 @@ private struct MessageInputField: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                     .padding(.leading, IOSControlMetrics.isPad ? 16 : 8)
             }
-            UIKitMessageInput(text: $text, secureTypingEnabled: secureTypingEnabled, onSubmit: onSubmit)
+            UIKitMessageInput(
+                text: $text,
+                secureTypingEnabled: secureTypingEnabled,
+                secureTypingKeyboard: secureTypingKeyboard,
+                onSubmit: onSubmit
+            )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 .padding(.horizontal, IOSControlMetrics.isPad ? 8 : 2)
         }
@@ -3742,6 +3756,7 @@ private struct MessageInputField: View {
 private struct UIKitMessageInput: UIViewRepresentable {
     @Binding var text: String
     let secureTypingEnabled: Bool
+    let secureTypingKeyboard: SecureTypingKeyboard
     let onSubmit: () -> Void
 
     func makeUIView(context: Context) -> UITextView {
@@ -3761,7 +3776,11 @@ private struct UIKitMessageInput: UIViewRepresentable {
         view.returnKeyType = .send
         view.keyboardDismissMode = .interactive
         applyPrivacyTraits(to: view)
-        context.coordinator.configureKeyboard(for: view, secureTypingEnabled: secureTypingEnabled)
+        context.coordinator.configureKeyboard(
+            for: view,
+            secureTypingEnabled: secureTypingEnabled,
+            secureTypingKeyboard: secureTypingKeyboard
+        )
         view.text = text
         return view
     }
@@ -3775,15 +3794,16 @@ private struct UIKitMessageInput: UIViewRepresentable {
             ? UIFont.systemFont(ofSize: 24, weight: .regular)
             : UIFont.preferredFont(forTextStyle: .body)
         applyPrivacyTraits(to: uiView)
-        context.coordinator.configureKeyboard(for: uiView, secureTypingEnabled: secureTypingEnabled)
+        context.coordinator.configureKeyboard(
+            for: uiView,
+            secureTypingEnabled: secureTypingEnabled,
+            secureTypingKeyboard: secureTypingKeyboard
+        )
         uiView.setNeedsLayout()
     }
 
     private func applyPrivacyTraits(to view: UITextView) {
-        // `isSecureTextEntry` makes iOS classify the composer as a password field,
-        // which surfaces the Passwords shortcut. Keep typing private by disabling
-        // learning helpers without opting into password-field behavior.
-        view.isSecureTextEntry = false
+        view.isSecureTextEntry = secureTypingEnabled && secureTypingKeyboard == .apple
         view.autocorrectionType = secureTypingEnabled ? .no : .default
         view.spellCheckingType = secureTypingEnabled ? .no : .default
         view.autocapitalizationType = secureTypingEnabled ? .none : .sentences
@@ -3807,8 +3827,12 @@ private struct UIKitMessageInput: UIViewRepresentable {
             self.parent = parent
         }
 
-        func configureKeyboard(for textView: UITextView, secureTypingEnabled: Bool) {
-            if secureTypingEnabled {
+        func configureKeyboard(
+            for textView: UITextView,
+            secureTypingEnabled: Bool,
+            secureTypingKeyboard: SecureTypingKeyboard
+        ) {
+            if secureTypingEnabled && secureTypingKeyboard == .noctyra {
                 let keyboard = secureKeyboard ?? SecureComposerKeyboard()
                 keyboard.textView = textView
                 keyboard.onSend = { [weak self, weak textView] in
@@ -5753,6 +5777,20 @@ private struct SettingsView: View {
             Text("Uses secure input where supported to reduce keylogging and OS-level text capture. Some third-party keyboards may ignore this.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            #if os(iOS)
+            Picker("Secure typing keyboard", selection: $privacySettings.secureTypingKeyboard) {
+                ForEach(SecureTypingKeyboard.allCases) { keyboard in
+                    Text(keyboard.displayName).tag(keyboard)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(!privacySettings.secureTypingEnabled)
+            Text(privacySettings.secureTypingKeyboard == .noctyra
+                 ? "Noctyra's keyboard avoids the iOS Passwords shortcut by staying outside Apple's password-field path."
+                 : "Apple's keyboard keeps native secure text entry. iOS may still show the Passwords shortcut.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            #endif
             Toggle("Use in-app camera capture", isOn: $privacySettings.useSecureCameraCapture)
             Text("Captures images inside Noctyra without saving to Photos. This adds a camera button in chats. The OS camera stack can still access raw frames.")
                 .font(.caption)

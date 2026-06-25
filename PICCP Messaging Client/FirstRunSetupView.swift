@@ -438,6 +438,20 @@ struct FirstRunSetupView: View {
                 Text("Enables secure input where available to reduce keyboard capture exposure.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                #if os(iOS)
+                Picker("Secure typing keyboard", selection: $privacySettings.secureTypingKeyboard) {
+                    ForEach(SecureTypingKeyboard.allCases) { keyboard in
+                        Text(keyboard.displayName).tag(keyboard)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(!privacySettings.secureTypingEnabled)
+                Text(privacySettings.secureTypingKeyboard == .noctyra
+                     ? "Noctyra's keyboard avoids the iOS Passwords shortcut by not using Apple's secure text field."
+                     : "Apple's secure keyboard uses native secure text entry. iOS may show the Passwords shortcut.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                #endif
                 Toggle("Use in-app camera capture", isOn: $privacySettings.useSecureCameraCapture)
                 Text("Captures inside Noctyra and avoids automatic Photos persistence.")
                     .font(.caption)
@@ -541,7 +555,12 @@ struct FirstRunSetupView: View {
             reviewRow(label: "Name", value: displayName.isEmpty ? "Not set" : displayName)
             reviewRow(label: "Relay", value: selectedRelayDisplay)
             reviewRow(label: "Storage", value: storageMode.displayName)
-            reviewRow(label: "Secure Typing", value: privacySettings.secureTypingEnabled ? "On" : "Off")
+            reviewRow(
+                label: "Secure Typing",
+                value: privacySettings.secureTypingEnabled
+                    ? "On (\(privacySettings.secureTypingKeyboard.shortName))"
+                    : "Off"
+            )
             reviewRow(label: "In-App Camera", value: privacySettings.useSecureCameraCapture ? "On" : "Off")
             reviewRow(label: "App Lock", value: appLockSettings.mode.displayName)
             reviewRow(
