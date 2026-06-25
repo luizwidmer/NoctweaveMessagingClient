@@ -3874,11 +3874,66 @@ private final class SecureComposerKeyboard: UIInputView {
     weak var textView: UITextView?
     var onSend: (() -> Void)?
 
+    private enum KeyboardMode {
+        case letters
+        case numbers
+        case symbols
+        case emoji
+    }
+
+    private struct Key {
+        enum Action {
+            case input(String)
+            case shift
+            case delete
+            case mode(KeyboardMode)
+            case space
+            case send
+        }
+
+        let title: String?
+        let imageName: String?
+        let action: Action
+        let weight: CGFloat
+        let isAccent: Bool
+
+        init(
+            _ title: String,
+            action: Action? = nil,
+            weight: CGFloat = 1,
+            isAccent: Bool = false
+        ) {
+            self.title = title
+            self.imageName = nil
+            self.action = action ?? .input(title)
+            self.weight = weight
+            self.isAccent = isAccent
+        }
+
+        init(
+            imageName: String,
+            action: Action,
+            weight: CGFloat = 1,
+            isAccent: Bool = false
+        ) {
+            self.title = nil
+            self.imageName = imageName
+            self.action = action
+            self.weight = weight
+            self.isAccent = isAccent
+        }
+    }
+
+    private let rootStack = UIStackView()
     private var letterButtons: [UIButton] = []
+    private var modeButtons: [UIButton] = []
     private var isShifted = false
+    private var isCapsLocked = false
+    private var mode: KeyboardMode = .letters
+    private var lastShiftTap: Date?
 
     init() {
-        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 260), inputViewStyle: .keyboard)
+        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 292), inputViewStyle: .keyboard)
         allowsSelfSizing = true
         setup()
     }
@@ -3889,138 +3944,271 @@ private final class SecureComposerKeyboard: UIInputView {
     }
 
     private func setup() {
-        backgroundColor = UIColor.systemBackground.withAlphaComponent(0.98)
+        backgroundColor = UIColor.systemBackground.withAlphaComponent(0.96)
         translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = UIStackView()
-        stack.axis = .vertical
-        stack.spacing = 8
-        stack.alignment = .fill
-        stack.distribution = .fillEqually
-        stack.translatesAutoresizingMaskIntoConstraints = false
+        rootStack.axis = .vertical
+        rootStack.spacing = 7
+        rootStack.alignment = .fill
+        rootStack.distribution = .fillEqually
+        rootStack.translatesAutoresizingMaskIntoConstraints = false
 
-        addSubview(stack)
+        addSubview(rootStack)
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 252),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            stack.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -8)
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 282),
+            rootStack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            rootStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            rootStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            rootStack.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -8)
         ])
 
-        addRow(["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"], to: stack)
-        addRow(["a", "s", "d", "f", "g", "h", "j", "k", "l"], to: stack, sideInset: 18)
-        addRow(["shift", "z", "x", "c", "v", "b", "n", "m", "delete"], to: stack)
-        addRow([".", ",", "?", "!", "space", "send"], to: stack)
+        render()
     }
 
-    private func addRow(_ keys: [String], to stack: UIStackView, sideInset: CGFloat = 0) {
+    private func render() {
+        letterButtons.removeAll()
+        modeButtons.removeAll()
+        rootStack.arrangedSubviews.forEach { view in
+            rootStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        for row in rows(for: mode) {
+            addRow(row, to: rootStack)
+        }
+
+        refreshLetterCase()
+        refreshModeButtons()
+    }
+
+    private func rows(for mode: KeyboardMode) -> [[Key]] {
+        switch mode {
+        case .letters:
+            return [
+                ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"].map { Key($0) },
+                ["a", "s", "d", "f", "g", "h", "j", "k", "l"].map { Key($0) },
+                [
+                    Key(imageName: shiftImageName, action: .shift, weight: 1.35),
+                    Key("z"), Key("x"), Key("c"), Key("v"), Key("b"), Key("n"), Key("m"),
+                    Key(imageName: "delete.left", action: .delete, weight: 1.35)
+                ],
+                [
+                    Key("123", action: .mode(.numbers), weight: 1.35),
+                    Key("😀", action: .mode(.emoji), weight: 1.15),
+                    Key(",", weight: 0.85),
+                    Key("space", action: .space, weight: 4.8),
+                    Key(".", weight: 0.85),
+                    Key(imageName: "paperplane.fill", action: .send, weight: 1.35, isAccent: true)
+                ]
+            ]
+        case .numbers:
+            return [
+                ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].map { Key($0) },
+                ["-", "/", ":", ";", "(", ")", "$", "&", "@", "\""].map { Key($0) },
+                [
+                    Key("#+=", action: .mode(.symbols), weight: 1.35),
+                    Key("."), Key(","), Key("?"), Key("!"), Key("'"),
+                    Key(imageName: "delete.left", action: .delete, weight: 1.35)
+                ],
+                [
+                    Key("ABC", action: .mode(.letters), weight: 1.35),
+                    Key("😀", action: .mode(.emoji), weight: 1.15),
+                    Key("space", action: .space, weight: 5.6),
+                    Key(imageName: "paperplane.fill", action: .send, weight: 1.35, isAccent: true)
+                ]
+            ]
+        case .symbols:
+            return [
+                ["[", "]", "{", "}", "#", "%", "^", "*", "+", "="].map { Key($0) },
+                ["_", "\\", "|", "~", "<", ">", "€", "£", "¥", "•"].map { Key($0) },
+                [
+                    Key("123", action: .mode(.numbers), weight: 1.35),
+                    Key("."), Key(","), Key("?"), Key("!"), Key("'"),
+                    Key(imageName: "delete.left", action: .delete, weight: 1.35)
+                ],
+                [
+                    Key("ABC", action: .mode(.letters), weight: 1.35),
+                    Key("😀", action: .mode(.emoji), weight: 1.15),
+                    Key("space", action: .space, weight: 5.6),
+                    Key(imageName: "paperplane.fill", action: .send, weight: 1.35, isAccent: true)
+                ]
+            ]
+        case .emoji:
+            return [
+                ["😀", "😂", "😊", "😍", "😎", "😭", "😡", "👍"].map { Key($0) },
+                ["🙏", "👏", "🔥", "✨", "❤️", "💯", "✅", "⚠️"].map { Key($0) },
+                ["👀", "🤝", "🔐", "🛡️", "📎", "📷", "🎙️", "🚀"].map { Key($0) },
+                [
+                    Key("ABC", action: .mode(.letters), weight: 1.35),
+                    Key("123", action: .mode(.numbers), weight: 1.15),
+                    Key("space", action: .space, weight: 5.6),
+                    Key(imageName: "delete.left", action: .delete, weight: 1.2),
+                    Key(imageName: "paperplane.fill", action: .send, weight: 1.35, isAccent: true)
+                ]
+            ]
+        }
+    }
+
+    private var shiftImageName: String {
+        isCapsLocked ? "shift.fill" : "shift"
+    }
+
+    private func addRow(_ keys: [Key], to stack: UIStackView) {
         let row = UIStackView()
         row.axis = .horizontal
-        row.spacing = 6
+        row.spacing = 5
         row.alignment = .fill
         row.distribution = .fillProportionally
-
-        if sideInset > 0 {
-            row.addArrangedSubview(spacer(width: sideInset))
-        }
 
         for key in keys {
             let button = makeButton(for: key)
             row.addArrangedSubview(button)
         }
 
-        if sideInset > 0 {
-            row.addArrangedSubview(spacer(width: sideInset))
-        }
-
         stack.addArrangedSubview(row)
     }
 
-    private func spacer(width: CGFloat) -> UIView {
-        let view = UIView()
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.widthAnchor.constraint(equalToConstant: width).isActive = true
-        return view
-    }
-
-    private func makeButton(for key: String) -> UIButton {
+    private func makeButton(for key: Key) -> UIButton {
         var configuration = UIButton.Configuration.filled()
-        configuration.baseForegroundColor = .label
-        configuration.baseBackgroundColor = key == "send"
-            ? UIColor.tintColor.withAlphaComponent(0.92)
-            : UIColor.secondarySystemBackground
+        configuration.baseForegroundColor = key.isAccent ? .white : .label
+        configuration.baseBackgroundColor = backgroundColor(for: key)
         configuration.cornerStyle = .medium
-        configuration.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 7, bottom: 7, trailing: 7)
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 6, bottom: 6, trailing: 6)
 
         let button = UIButton(configuration: configuration)
         button.translatesAutoresizingMaskIntoConstraints = false
         button.heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
+        button.widthAnchor.constraint(equalToConstant: max(34, 34 * key.weight)).isActive = true
         button.setContentHuggingPriority(.defaultLow, for: .horizontal)
         button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         button.accessibilityLabel = accessibilityLabel(for: key)
 
-        switch key {
-        case "shift":
-            button.setImage(UIImage(systemName: "shift"), for: .normal)
-            button.widthAnchor.constraint(equalToConstant: 54).isActive = true
-        case "delete":
-            button.setImage(UIImage(systemName: "delete.left"), for: .normal)
-            button.widthAnchor.constraint(equalToConstant: 54).isActive = true
-        case "space":
-            button.setTitle("space", for: .normal)
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
-        case "send":
-            button.setImage(UIImage(systemName: "paperplane.fill"), for: .normal)
-            button.widthAnchor.constraint(equalToConstant: 64).isActive = true
-        default:
-            button.setTitle(key, for: .normal)
-            button.titleLabel?.font = .systemFont(ofSize: 20, weight: .regular)
-            if key.count == 1, key.rangeOfCharacter(from: .letters) != nil {
-                letterButtons.append(button)
-            }
+        if let imageName = key.imageName {
+            button.setImage(UIImage(systemName: imageName), for: .normal)
+            button.imageView?.contentMode = .scaleAspectFit
+        } else if let title = key.title {
+            button.setTitle(title, for: .normal)
+            button.titleLabel?.adjustsFontSizeToFitWidth = true
+            button.titleLabel?.minimumScaleFactor = 0.7
+            button.titleLabel?.font = font(for: key)
+        }
+
+        if case .input(let value) = key.action,
+           value.count == 1,
+           value.rangeOfCharacter(from: .letters) != nil {
+            letterButtons.append(button)
+        }
+
+        if case .mode = key.action {
+            modeButtons.append(button)
         }
 
         button.addAction(UIAction { [weak self] _ in
-            self?.handle(key)
+            self?.handle(key.action)
         }, for: .touchUpInside)
 
         return button
     }
 
-    private func accessibilityLabel(for key: String) -> String {
-        switch key {
-        case "shift": "Shift"
-        case "delete": "Delete"
-        case "space": "Space"
-        case "send": "Send"
-        default: key
+    private func backgroundColor(for key: Key) -> UIColor {
+        if key.isAccent {
+            return UIColor.tintColor.withAlphaComponent(0.92)
+        }
+        switch key.action {
+        case .shift, .delete, .mode:
+            return UIColor.tertiarySystemFill
+        case .space:
+            return UIColor.secondarySystemBackground
+        case .input, .send:
+            return UIColor.secondarySystemBackground
         }
     }
 
-    private func handle(_ key: String) {
+    private func font(for key: Key) -> UIFont {
+        guard let title = key.title else { return .systemFont(ofSize: 20, weight: .regular) }
+        if title.containsEmoji {
+            return .systemFont(ofSize: 24, weight: .regular)
+        }
+        switch key.action {
+        case .mode, .space:
+            return .systemFont(ofSize: 15, weight: .semibold)
+        default:
+            return .systemFont(ofSize: 20, weight: .regular)
+        }
+    }
+
+    private func accessibilityLabel(for key: Key) -> String {
+        switch key.action {
+        case .shift:
+            return isCapsLocked ? "Caps lock" : "Shift"
+        case .delete:
+            return "Delete"
+        case .space:
+            return "Space"
+        case .send:
+            return "Send"
+        case .mode(let mode):
+            switch mode {
+            case .letters: return "Letters"
+            case .numbers: return "Numbers"
+            case .symbols: return "Symbols"
+            case .emoji: return "Emoji"
+            }
+        case .input(let value):
+            return value
+        }
+    }
+
+    private func handle(_ action: Key.Action) {
         guard let textView else { return }
-        switch key {
-        case "shift":
-            isShifted.toggle()
-            refreshLetterCase()
-        case "delete":
+        switch action {
+        case .shift:
+            handleShift()
+        case .delete:
             textView.deleteBackward()
             notifyChanged(textView)
-        case "space":
+        case .mode(let newMode):
+            mode = newMode
+            if mode != .letters {
+                isShifted = false
+                isCapsLocked = false
+            }
+            render()
+        case .space:
             textView.insertText(" ")
             notifyChanged(textView)
-        case "send":
+        case .send:
             onSend?()
-        default:
-            let value = isShifted ? key.uppercased() : key
-            textView.insertText(value)
+        case .input(let value):
+            let inserted = shouldCapitalize(value) ? value.uppercased() : value
+            textView.insertText(inserted)
             notifyChanged(textView)
-            if isShifted {
+            if isShifted && !isCapsLocked {
                 isShifted = false
+                lastShiftTap = nil
                 refreshLetterCase()
+                refreshModeButtons()
             }
         }
+    }
+
+    private func handleShift() {
+        let now = Date()
+        if let lastShiftTap, now.timeIntervalSince(lastShiftTap) < 0.35 {
+            isCapsLocked.toggle()
+            isShifted = isCapsLocked
+        } else if isCapsLocked {
+            isCapsLocked = false
+            isShifted = false
+        } else {
+            isShifted.toggle()
+        }
+        lastShiftTap = now
+        render()
+    }
+
+    private func shouldCapitalize(_ value: String) -> Bool {
+        isShifted && value.rangeOfCharacter(from: .letters) != nil
     }
 
     private func refreshLetterCase() {
@@ -4030,8 +4218,34 @@ private final class SecureComposerKeyboard: UIInputView {
         }
     }
 
+    private func refreshModeButtons() {
+        for button in modeButtons {
+            guard let label = button.title(for: .normal) else { continue }
+            let isCurrent: Bool
+            switch (label, mode) {
+            case ("ABC", .letters), ("123", .numbers), ("#+=", .symbols):
+                isCurrent = true
+            case ("😀", .emoji):
+                isCurrent = true
+            default:
+                isCurrent = false
+            }
+            button.configuration?.baseBackgroundColor = isCurrent
+                ? UIColor.tintColor.withAlphaComponent(0.22)
+                : UIColor.tertiarySystemFill
+        }
+    }
+
     private func notifyChanged(_ textView: UITextView) {
         textView.delegate?.textViewDidChange?(textView)
+    }
+}
+
+private extension String {
+    var containsEmoji: Bool {
+        unicodeScalars.contains { scalar in
+            scalar.properties.isEmojiPresentation || scalar.properties.isEmoji
+        }
     }
 }
 
