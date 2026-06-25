@@ -4116,21 +4116,30 @@ private final class SecureComposerKeyboard: UIInputView {
         case recent = "🕘"
         case faces = "🙂"
         case hands = "👍"
+        case nature = "🌿"
+        case food = "🍕"
+        case places = "🚗"
         case symbols = "❤️"
         case objects = "🔐"
 
         var values: [String] {
             switch self {
             case .recent:
-                return ["😀", "😂", "😊", "😍", "😎", "😭", "👍", "🙏", "🔥", "❤️", "✅", "🔐"]
+                return ["😀", "😂", "😊", "😍", "😎", "😭", "👍", "🙏", "🔥", "❤️", "✅", "🔐", "🎉", "✨", "👀", "💯", "🤔", "😅", "🙌", "🫶", "📎", "📷", "🎙️", "🛡️"]
             case .faces:
-                return ["😀", "😃", "😄", "😁", "😂", "🤣", "😊", "🙂", "😉", "😍", "😘", "😎", "🤔", "😐", "😬", "😭", "😡", "😴"]
+                return ["😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "🥲", "😊", "😇", "🙂", "🙃", "😉", "😌", "😍", "🥰", "😘", "😗", "😙", "😚", "😋", "😛", "😝", "😜", "🤪", "🤨", "🧐", "🤓", "😎", "🥸", "🤩", "🥳", "😏", "😒", "😞", "😔", "😟", "😕", "🙁", "☹️", "😣", "😖", "😫", "😩", "🥺", "😢", "😭", "😤", "😠", "😡", "🤬", "🤯", "😳", "🥵", "🥶", "😱", "😨", "😰", "😥", "😓", "🤗", "🤔", "🫣", "🤭", "🫢", "🫡", "🤫", "🫠", "🤥", "😶", "😐", "😑", "😬", "🙄", "😯", "😦", "😧", "😮", "😲", "🥱", "😴", "🤤", "😪"]
             case .hands:
-                return ["👍", "👎", "👏", "🙏", "🤝", "👌", "✌️", "🤞", "👊", "✋", "👋", "🫡", "💪", "🙌", "🫶", "👀", "🗣️", "🧠"]
+                return ["👍", "👎", "👏", "🙌", "🫶", "🙏", "🤝", "👌", "🤌", "🤏", "✌️", "🤞", "🫰", "🤟", "🤘", "🤙", "👈", "👉", "👆", "👇", "☝️", "✋", "🤚", "🖐️", "🖖", "👋", "🤲", "💪", "🦾", "🖕", "✍️", "💅", "👀", "👁️", "👅", "👄", "🧠", "🫀", "🫁", "🦷", "🦴", "👤", "👥", "🗣️"]
+            case .nature:
+                return ["🌱", "🌿", "☘️", "🍀", "🎋", "🍃", "🍂", "🍁", "🌾", "🌵", "🌲", "🌳", "🌴", "🪵", "🌺", "🌸", "🌼", "🌻", "🌹", "🥀", "🌷", "💐", "🍄", "🌰", "🌍", "🌎", "🌏", "🌕", "🌖", "🌗", "🌘", "🌑", "🌒", "🌓", "🌔", "🌙", "⭐️", "🌟", "✨", "⚡️", "🔥", "💧", "🌊", "❄️", "☃️", "⛄️", "🌈", "☀️", "🌤️", "⛅️", "🌥️", "☁️", "🌦️", "🌧️", "⛈️", "🌩️", "🌨️", "💨", "🌪️", "🌫️"]
+            case .food:
+                return ["🍏", "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇", "🍓", "🫐", "🍈", "🍒", "🍑", "🥭", "🍍", "🥥", "🥝", "🍅", "🥑", "🥦", "🥬", "🥒", "🌶️", "🫑", "🌽", "🥕", "🫒", "🧄", "🧅", "🥔", "🍠", "🥐", "🥯", "🍞", "🥖", "🧀", "🥚", "🍳", "🧈", "🥞", "🧇", "🥓", "🥩", "🍗", "🍖", "🌭", "🍔", "🍟", "🍕", "🥪", "🥙", "🧆", "🌮", "🌯", "🥗", "🥘", "🫕", "🍝", "🍜", "🍲", "🍛", "🍣", "🍱", "🥟", "🦪", "🍤", "🍙", "🍚", "🍘", "🍥", "🥠", "🥮", "🍢", "🍡", "🍧", "🍨", "🍦", "🥧", "🧁", "🍰", "🎂", "🍮", "🍭", "🍬", "🍫", "🍿", "🍩", "🍪"]
+            case .places:
+                return ["🚗", "🚕", "🚙", "🚌", "🚎", "🏎️", "🚓", "🚑", "🚒", "🚐", "🛻", "🚚", "🚛", "🚜", "🛵", "🏍️", "🛺", "🚲", "🛴", "🚨", "🚔", "🚍", "🚘", "🚖", "✈️", "🛫", "🛬", "🛩️", "💺", "🚁", "🚀", "🛸", "🚉", "🚆", "🚄", "🚅", "🚈", "🚝", "🚞", "🚋", "🚃", "🚂", "🚢", "⛴️", "🛳️", "🚤", "⛵️", "🛶", "⚓️", "🗺️", "🧭", "🏠", "🏡", "🏢", "🏣", "🏤", "🏥", "🏦", "🏨", "🏪", "🏫", "🏬", "🏭", "🏯", "🏰", "💒", "🗼", "🗽", "⛪️", "🕌", "🛕", "🕍", "⛩️", "🕋", "⛲️", "⛺️", "🌁", "🌃", "🏙️", "🌄", "🌅", "🌆", "🌇", "🌉", "♨️", "🎠", "🛝", "🎡", "🎢", "💈", "🎪"]
             case .symbols:
-                return ["❤️", "🖤", "💜", "💯", "✅", "❌", "⚠️", "❗️", "❓", "✨", "🔥", "⭐️", "🔴", "🟢", "🔵", "⬆️", "⬇️", "➡️"]
+                return ["❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❣️", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟", "☮️", "✝️", "☪️", "🕉️", "☸️", "✡️", "🔯", "🕎", "☯️", "☦️", "🛐", "⛎", "♈️", "♉️", "♊️", "♋️", "♌️", "♍️", "♎️", "♏️", "♐️", "♑️", "♒️", "♓️", "🆔", "⚛️", "🉑", "☢️", "☣️", "📴", "📳", "🈶", "🈚️", "🈸", "🈺", "🈷️", "✴️", "🆚", "💮", "🉐", "㊙️", "㊗️", "🈴", "🈵", "🈹", "🈲", "🅰️", "🅱️", "🆎", "🆑", "🅾️", "🆘", "❌", "⭕️", "🛑", "⛔️", "📛", "🚫", "💯", "💢", "♨️", "🚷", "🚯", "🚳", "🚱", "🔞", "📵", "🚭", "❗️", "❕", "❓", "❔", "‼️", "⁉️", "🔅", "🔆", "〽️", "⚠️", "🚸", "🔱", "⚜️", "🔰", "✅", "🈯️", "💹", "❇️", "✳️"]
             case .objects:
-                return ["🔐", "🛡️", "📎", "📷", "🎙️", "📁", "📄", "🔑", "💬", "📡", "🧬", "💎", "🧊", "🧵", "🚀", "🌐", "🧭", "🕯️"]
+                return ["🔐", "🔒", "🔓", "🔑", "🗝️", "🛡️", "📎", "🖇️", "✂️", "📌", "📍", "📏", "📐", "🧮", "🧰", "🪛", "🔧", "🔨", "⚒️", "🛠️", "⛏️", "🪚", "🔩", "⚙️", "🧱", "⛓️", "🧲", "🔫", "💣", "🧨", "🪓", "🔪", "🗡️", "⚔️", "🚬", "⚰️", "🪦", "⚱️", "🏺", "🔮", "📿", "🧿", "💈", "⚗️", "🔭", "🔬", "🕳️", "🩹", "🩺", "💊", "💉", "🩸", "🧬", "🦠", "🧫", "🧪", "🌡️", "🧹", "🧺", "🧻", "🚽", "🚰", "🚿", "🛁", "🛀", "🧼", "🪥", "🪒", "🧽", "🪣", "🧴", "🛎️", "🔔", "🔕", "📯", "📣", "📢", "👁️‍🗨️", "💬", "💭", "🗯️", "♠️", "♥️", "♦️", "♣️", "🃏", "🀄️", "🎴", "🖼️", "🎨", "🧵", "🪡", "🧶", "🪢", "👓", "🕶️", "🥽", "🥼", "🦺", "👔", "👕", "👖", "🧣", "🧤", "🧥", "🧦", "👗", "👘", "🥻", "🩱", "🩲", "🩳", "👙", "👚", "👛", "👜", "👝", "🛍️", "🎒", "🩴", "👞", "👟", "🥾", "🥿", "👠", "👡", "🩰", "👢", "👑", "👒", "🎩", "🎓", "🧢", "🪖"]
             }
         }
     }
@@ -4142,6 +4151,8 @@ private final class SecureComposerKeyboard: UIInputView {
             case delete
             case mode(KeyboardMode)
             case emojiCategory(EmojiCategory)
+            case emojiPage(Int)
+            case pageLabel
             case space
             case send
         }
@@ -4186,15 +4197,17 @@ private final class SecureComposerKeyboard: UIInputView {
     private var isCapsLocked = false
     private var mode: KeyboardMode = .letters
     private var emojiCategory: EmojiCategory = .recent
+    private var emojiPage = 0
     private var lastShiftTap: Date?
     private var deleteRepeatTimer: Timer?
     private var alternatePressTimer: Timer?
     private var suppressNextTouchUp = false
     private weak var keyPreviewView: UIView?
     private weak var alternatePickerView: UIView?
+    private var heightConstraint: NSLayoutConstraint?
 
     init() {
-        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 292), inputViewStyle: .keyboard)
+        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 304), inputViewStyle: .keyboard)
         allowsSelfSizing = true
         setup()
     }
@@ -4215,8 +4228,10 @@ private final class SecureComposerKeyboard: UIInputView {
         rootStack.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(rootStack)
+        let heightConstraint = heightAnchor.constraint(equalToConstant: preferredKeyboardHeight)
+        self.heightConstraint = heightConstraint
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 282),
+            heightConstraint,
             rootStack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
             rootStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             rootStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
@@ -4226,7 +4241,21 @@ private final class SecureComposerKeyboard: UIInputView {
         render()
     }
 
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let targetHeight = preferredKeyboardHeight
+        if heightConstraint?.constant != targetHeight {
+            heightConstraint?.constant = targetHeight
+            invalidateIntrinsicContentSize()
+        }
+    }
+
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: UIView.noIntrinsicMetric, height: preferredKeyboardHeight)
+    }
+
     private func render() {
+        clampEmojiPage()
         letterButtons.removeAll()
         modeButtons.removeAll()
         rootStack.arrangedSubviews.forEach { view in
@@ -4240,6 +4269,13 @@ private final class SecureComposerKeyboard: UIInputView {
 
         refreshLetterCase()
         refreshModeButtons()
+    }
+
+    private var preferredKeyboardHeight: CGFloat {
+        if traitCollection.userInterfaceIdiom == .pad {
+            return mode == .emoji ? 388 : 346
+        }
+        return mode == .emoji ? 336 : 304
     }
 
     private func rows(for mode: KeyboardMode) -> [[Key]] {
@@ -4295,16 +4331,19 @@ private final class SecureComposerKeyboard: UIInputView {
                 ]
             ]
         case .emoji:
-            let emojiRows = Array(emojiCategory.values.chunked(into: 6).prefix(2)).map { row in
+            let columns = emojiColumns
+            let emojiRowsPerPage = traitCollection.userInterfaceIdiom == .pad ? 4 : 3
+            let pageSize = columns * emojiRowsPerPage
+            let pageValues = Array(emojiCategory.values.dropFirst(emojiPage * pageSize).prefix(pageSize))
+            let emojiRows = pageValues.chunked(into: columns).map { row in
                 row.map { Key($0) }
             }
-            return [
-                emojiRows[safe: 0] ?? [],
-                emojiRows[safe: 1] ?? [],
+            return (0..<emojiRowsPerPage).map { emojiRows[safe: $0] ?? [] } + [
                 emojiCategoryRow(),
                 [
                     Key("ABC", action: .mode(.letters), weight: 1.35),
                     Key("123", action: .mode(.numbers), weight: 1.15),
+                    Key(emojiPageLabel, action: .pageLabel, weight: 1.4),
                     Key("space", action: .space, weight: 5.6),
                     Key(imageName: "delete.left", action: .delete, weight: 1.2),
                     Key(imageName: "paperplane.fill", action: .send, weight: 1.35, isAccent: true)
@@ -4314,14 +4353,37 @@ private final class SecureComposerKeyboard: UIInputView {
     }
 
     private func emojiCategoryRow() -> [Key] {
-        EmojiCategory.allCases.map { category in
+        let previous = Key("‹", action: .emojiPage(-1), weight: 1.05, isAccent: emojiPage > 0)
+        let next = Key("›", action: .emojiPage(1), weight: 1.05, isAccent: emojiPage < maxEmojiPage)
+        return [previous] + EmojiCategory.allCases.map { category in
             Key(
                 category.rawValue,
                 action: .emojiCategory(category),
                 weight: 1,
                 isAccent: category == emojiCategory
             )
-        } + [Key(imageName: "delete.left", action: .delete, weight: 1.2)]
+        } + [next]
+    }
+
+    private var emojiColumns: Int {
+        if traitCollection.userInterfaceIdiom == .pad {
+            return bounds.width > 760 ? 12 : 10
+        }
+        return bounds.width > 390 ? 8 : 7
+    }
+
+    private var maxEmojiPage: Int {
+        let rows = traitCollection.userInterfaceIdiom == .pad ? 4 : 3
+        let pageSize = max(1, emojiColumns * rows)
+        return max(0, Int(ceil(Double(emojiCategory.values.count) / Double(pageSize))) - 1)
+    }
+
+    private var emojiPageLabel: String {
+        "\(emojiPage + 1)/\(maxEmojiPage + 1)"
+    }
+
+    private func clampEmojiPage() {
+        emojiPage = min(max(emojiPage, 0), maxEmojiPage)
     }
 
     private var shiftImageName: String {
@@ -4331,7 +4393,7 @@ private final class SecureComposerKeyboard: UIInputView {
     private func addRow(_ keys: [Key], to stack: UIStackView) {
         let row = UIStackView()
         row.axis = .horizontal
-        row.spacing = 5
+        row.spacing = traitCollection.userInterfaceIdiom == .pad ? 8 : 5
         row.alignment = .fill
         row.distribution = .fillProportionally
 
@@ -4352,8 +4414,8 @@ private final class SecureComposerKeyboard: UIInputView {
 
         let button = UIButton(configuration: configuration)
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
-        button.widthAnchor.constraint(equalToConstant: max(34, 34 * key.weight)).isActive = true
+        button.heightAnchor.constraint(greaterThanOrEqualToConstant: traitCollection.userInterfaceIdiom == .pad ? 48 : 40).isActive = true
+        button.widthAnchor.constraint(equalToConstant: baseKeyWidth * key.weight).isActive = true
         button.setContentHuggingPriority(.defaultLow, for: .horizontal)
         button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         button.accessibilityLabel = accessibilityLabel(for: key)
@@ -4382,6 +4444,10 @@ private final class SecureComposerKeyboard: UIInputView {
             modeButtons.append(button)
         }
 
+        if case .emojiPage = key.action {
+            modeButtons.append(button)
+        }
+
         button.addAction(UIAction { [weak self, weak button] _ in
             guard let self, let button else { return }
             self.pressFeedback(on: button, key: key)
@@ -4404,12 +4470,16 @@ private final class SecureComposerKeyboard: UIInputView {
         return button
     }
 
+    private var baseKeyWidth: CGFloat {
+        traitCollection.userInterfaceIdiom == .pad ? 48 : 34
+    }
+
     private func backgroundColor(for key: Key) -> UIColor {
         if key.isAccent {
             return UIColor.tintColor.withAlphaComponent(0.92)
         }
         switch key.action {
-        case .shift, .delete, .mode, .emojiCategory:
+        case .shift, .delete, .mode, .emojiCategory, .emojiPage, .pageLabel:
             return UIColor.tertiarySystemFill
         case .space:
             return UIColor.secondarySystemBackground
@@ -4424,9 +4494,9 @@ private final class SecureComposerKeyboard: UIInputView {
             return .systemFont(ofSize: 24, weight: .regular)
         }
         switch key.action {
-        case .mode, .space:
+        case .mode, .space, .pageLabel:
             return .systemFont(ofSize: 15, weight: .semibold)
-        case .emojiCategory:
+        case .emojiCategory, .emojiPage:
             return .systemFont(ofSize: 21, weight: .regular)
         default:
             return .systemFont(ofSize: 20, weight: .regular)
@@ -4455,9 +4525,16 @@ private final class SecureComposerKeyboard: UIInputView {
             case .recent: return "Recent emoji"
             case .faces: return "Faces emoji"
             case .hands: return "Hands emoji"
+            case .nature: return "Nature emoji"
+            case .food: return "Food emoji"
+            case .places: return "Places emoji"
             case .symbols: return "Symbols emoji"
             case .objects: return "Objects emoji"
             }
+        case .emojiPage(let direction):
+            return direction < 0 ? "Previous emoji page" : "Next emoji page"
+        case .pageLabel:
+            return "Emoji page \(emojiPage + 1) of \(maxEmojiPage + 1)"
         case .input(let value):
             return value
         }
@@ -4479,7 +4556,13 @@ private final class SecureComposerKeyboard: UIInputView {
             render()
         case .emojiCategory(let category):
             emojiCategory = category
+            emojiPage = 0
             render()
+        case .emojiPage(let direction):
+            emojiPage = min(max(emojiPage + direction, 0), maxEmojiPage)
+            render()
+        case .pageLabel:
+            break
         case .space:
             textView.insertText(" ")
             notifyChanged(textView)
