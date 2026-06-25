@@ -3957,7 +3957,10 @@ private final class SecureComposerKeyboard: UIInputView {
     private var emojiCategory: EmojiCategory = .recent
     private var lastShiftTap: Date?
     private var deleteRepeatTimer: Timer?
+    private var alternatePressTimer: Timer?
+    private var suppressNextTouchUp = false
     private weak var keyPreviewView: UIView?
+    private weak var alternatePickerView: UIView?
 
     init() {
         super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 292), inputViewStyle: .keyboard)
@@ -4156,6 +4159,8 @@ private final class SecureComposerKeyboard: UIInputView {
             guard let self else { return }
             if case .delete = key.action {
                 self.stopDeleteRepeat()
+            } else if self.suppressNextTouchUp {
+                self.suppressNextTouchUp = false
             } else {
                 self.handle(key.action)
             }
@@ -4250,15 +4255,20 @@ private final class SecureComposerKeyboard: UIInputView {
         case .send:
             onSend?()
         case .input(let value):
-            let inserted = shouldCapitalize(value) ? value.uppercased() : value
-            textView.insertText(inserted)
-            notifyChanged(textView)
-            if isShifted && !isCapsLocked {
-                isShifted = false
-                lastShiftTap = nil
-                refreshLetterCase()
-                refreshModeButtons()
-            }
+            insertInput(value)
+        }
+    }
+
+    private func insertInput(_ value: String) {
+        guard let textView else { return }
+        let inserted = shouldCapitalize(value) ? value.uppercased() : value
+        textView.insertText(inserted)
+        notifyChanged(textView)
+        if isShifted && !isCapsLocked {
+            isShifted = false
+            lastShiftTap = nil
+            refreshLetterCase()
+            refreshModeButtons()
         }
     }
 
@@ -4315,11 +4325,15 @@ private final class SecureComposerKeyboard: UIInputView {
     }
 
     private func pressFeedback(on button: UIButton, key: Key) {
+        dismissAlternatePicker()
+        suppressNextTouchUp = false
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         showKeyPreview(for: key, from: button)
         if case .delete = key.action {
             deleteBackward()
             startDeleteRepeat()
+        } else {
+            startAlternatePickerTimer(for: key, from: button)
         }
         UIView.animate(withDuration: 0.06, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
             button.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
@@ -4329,6 +4343,7 @@ private final class SecureComposerKeyboard: UIInputView {
 
     private func releaseFeedback(on button: UIButton?) {
         stopDeleteRepeat()
+        stopAlternatePickerTimer()
         dismissKeyPreview()
         UIView.animate(withDuration: 0.14, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
             button?.transform = .identity
@@ -4349,6 +4364,126 @@ private final class SecureComposerKeyboard: UIInputView {
     private func stopDeleteRepeat() {
         deleteRepeatTimer?.invalidate()
         deleteRepeatTimer = nil
+    }
+
+    private func startAlternatePickerTimer(for key: Key, from button: UIButton) {
+        stopAlternatePickerTimer()
+        guard case .input(let value) = key.action, !alternates(for: value).isEmpty else { return }
+        alternatePressTimer = Timer.scheduledTimer(withTimeInterval: 0.38, repeats: false) { [weak self, weak button] _ in
+            guard let self, let button else { return }
+            self.suppressNextTouchUp = true
+            self.dismissKeyPreview()
+            self.showAlternatePicker(for: value, from: button)
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+    }
+
+    private func stopAlternatePickerTimer() {
+        alternatePressTimer?.invalidate()
+        alternatePressTimer = nil
+    }
+
+    private func alternates(for value: String) -> [String] {
+        switch value.lowercased() {
+        case "a": return ["á", "à", "â", "ä", "ã", "å", "ā", "æ"]
+        case "c": return ["ç", "ć", "č"]
+        case "e": return ["é", "è", "ê", "ë", "ē", "ė", "ę"]
+        case "i": return ["í", "ì", "î", "ï", "ī", "į"]
+        case "l": return ["ł"]
+        case "n": return ["ñ", "ń"]
+        case "o": return ["ó", "ò", "ô", "ö", "õ", "ø", "ō", "œ"]
+        case "s": return ["ś", "š", "ß"]
+        case "u": return ["ú", "ù", "û", "ü", "ū"]
+        case "y": return ["ý", "ÿ"]
+        case "z": return ["ž", "ź", "ż"]
+        case ".": return ["…"]
+        case "?": return ["¿"]
+        case "!": return ["¡"]
+        case "-": return ["–", "—"]
+        case "\"": return ["“", "”", "„"]
+        case "'": return ["‘", "’"]
+        case "/": return ["\\"]
+        default: return []
+        }
+    }
+
+    private func showAlternatePicker(for value: String, from button: UIButton) {
+        let alternates = alternates(for: value)
+        guard !alternates.isEmpty else { return }
+        dismissAlternatePicker()
+
+        let container = UIView()
+        container.backgroundColor = UIColor.secondarySystemBackground.withAlphaComponent(0.98)
+        container.layer.cornerRadius = 16
+        container.layer.cornerCurve = .continuous
+        container.layer.shadowColor = UIColor.black.cgColor
+        container.layer.shadowOpacity = 0.2
+        container.layer.shadowRadius = 14
+        container.layer.shadowOffset = CGSize(width: 0, height: 6)
+        container.accessibilityLabel = "Alternate characters"
+
+        let stack = UIStackView()
+        stack.axis = .horizontal
+        stack.spacing = 4
+        stack.alignment = .fill
+        stack.distribution = .fillEqually
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let presentedAlternates = alternates.map { shouldCapitalize($0) ? $0.uppercased() : $0 }
+        for alternate in presentedAlternates {
+            var configuration = UIButton.Configuration.plain()
+            configuration.baseForegroundColor = .label
+            configuration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 8)
+
+            let alternateButton = UIButton(configuration: configuration)
+            alternateButton.setTitle(alternate, for: .normal)
+            alternateButton.titleLabel?.font = .systemFont(ofSize: 23, weight: .medium)
+            alternateButton.accessibilityLabel = "Insert \(alternate)"
+            alternateButton.addAction(UIAction { [weak self] _ in
+                guard let self else { return }
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                self.insertInput(alternate)
+                self.suppressNextTouchUp = false
+                self.dismissAlternatePicker()
+            }, for: .touchUpInside)
+            stack.addArrangedSubview(alternateButton)
+        }
+
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -6)
+        ])
+
+        let buttonFrame = button.convert(button.bounds, to: self)
+        let buttonWidth: CGFloat = 36
+        let width = min(bounds.width - 8, CGFloat(presentedAlternates.count) * buttonWidth + 12)
+        let height: CGFloat = 52
+        let x = min(max(buttonFrame.midX - width / 2, 4), max(bounds.width - width - 4, 4))
+        let y = max(buttonFrame.minY - height - 8, 4)
+        container.frame = CGRect(x: x, y: y, width: width, height: height)
+        container.alpha = 0
+        container.transform = CGAffineTransform(translationX: 0, y: 6)
+
+        addSubview(container)
+        alternatePickerView = container
+        UIView.animate(withDuration: 0.12, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            container.alpha = 1
+            container.transform = .identity
+        }
+    }
+
+    private func dismissAlternatePicker() {
+        guard let picker = alternatePickerView else { return }
+        alternatePickerView = nil
+        UIView.animate(withDuration: 0.1, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            picker.alpha = 0
+            picker.transform = CGAffineTransform(translationX: 0, y: 4)
+        } completion: { _ in
+            picker.removeFromSuperview()
+        }
     }
 
     private func showKeyPreview(for key: Key, from button: UIButton) {
