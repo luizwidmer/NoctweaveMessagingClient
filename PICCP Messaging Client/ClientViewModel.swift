@@ -147,7 +147,6 @@ final class ClientViewModel: ObservableObject {
     private var decryptedAttachmentScopes: [String: AttachmentCacheScope] = [:]
     private static let storageModeKey = "lattice.storageProtection.mode.v1"
     private static let keychainAuthPreflightKey = "noctyra.keychainAuthPreflight.v1"
-    private static let groupPayloadPrefix = "PICCP-GROUP-V1:"
     private enum AttachmentCacheScope: Hashable {
         case contact(UUID)
         case group(UUID)
@@ -216,45 +215,6 @@ final class ClientViewModel: ObservableObject {
         let conversation: Conversation
         let usedPrekey: Bool
         let agreementKey: AgreementKeyPair?
-    }
-
-    private struct GroupTransportPayload: Codable {
-        let groupId: UUID
-        let groupTitle: String
-        let memberFingerprints: [String]
-        let body: String
-        let sentAt: Date
-
-        private enum CodingKeys: String, CodingKey {
-            case groupId
-            case groupTitle
-            case memberFingerprints
-            case body
-            case sentAt
-        }
-
-        init(
-            groupId: UUID,
-            groupTitle: String,
-            memberFingerprints: [String],
-            body: String,
-            sentAt: Date
-        ) {
-            self.groupId = groupId
-            self.groupTitle = groupTitle
-            self.memberFingerprints = memberFingerprints
-            self.body = body
-            self.sentAt = sentAt
-        }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            groupId = try container.decode(UUID.self, forKey: .groupId)
-            groupTitle = try container.decode(String.self, forKey: .groupTitle)
-            memberFingerprints = try container.decodeIfPresent([String].self, forKey: .memberFingerprints) ?? []
-            body = try container.decode(String.self, forKey: .body)
-            sentAt = try container.decode(Date.self, forKey: .sentAt)
-        }
     }
 
     init() {
@@ -1396,56 +1356,7 @@ final class ClientViewModel: ObservableObject {
                         }
                     }
                     let appendedMessage: Message?
-                    if case .text(let text) = body,
-                       let groupPayload = decodeGroupPayload(from: text) {
-                        var group = group(for: groupPayload.groupId, in: profile)
-                            ?? GroupConversation(
-                                id: groupPayload.groupId,
-                                title: groupPayload.groupTitle,
-                                memberContactIds: [contact.id]
-                            )
-                        guard let groupContext = validatedGroupMessageContext(
-                            envelope.authenticatedContext,
-                            payload: groupPayload,
-                            sender: contact,
-                            knownGroup: group
-                        ) else {
-                            throw CryptoError.invalidPayload
-                        }
-                        if group.messages.isEmpty {
-                            group.messages = storedGroupMessages(profileId: profile.id, groupId: group.id)
-                        }
-                        if !groupPayload.groupTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            group.title = groupPayload.groupTitle
-                        }
-                        var memberIds = Set(group.memberContactIds)
-                        memberIds.insert(contact.id)
-                        for fingerprint in groupPayload.memberFingerprints {
-                            if let knownContact = profile.contacts.first(where: { $0.fingerprint == fingerprint }) {
-                                memberIds.insert(knownContact.id)
-                            }
-                        }
-                        group.memberContactIds = Array(memberIds)
-                        if (group.relayEpoch ?? 0) <= groupContext.epoch {
-                            group.relayEpoch = groupContext.epoch
-                            group.relayTranscriptHash = groupContext.transcriptHash
-                        }
-                        let message = Message(
-                            direction: .received,
-                            senderDisplayName: contact.displayName,
-                            body: groupPayload.body,
-                            timestamp: envelope.sentAt,
-                            counter: envelope.messageCounter
-                        )
-                        group.messages.append(message)
-                        if activeGroupId != group.id {
-                            group.unreadCount += 1
-                            notifier.notify(title: group.title, body: "\(contact.displayName): \(groupPayload.body)")
-                        }
-                        upsertGroup(group, in: &profile)
-                        lastInfo = "Received group message from \(contact.displayName)."
-                        appendedMessage = nil
-                    } else if case .attachment(let descriptor) = body {
+                    if case .attachment(let descriptor) = body {
                         let sessionId = envelope.sessionId ?? conversation.sessionId
                         let localFileName: String?
                         do {
@@ -2881,103 +2792,15 @@ final class ClientViewModel: ObservableObject {
             lastError = "Failed to prepare group security context: \(error.localizedDescription)"
             return
         }
-        if group.relayInboxId != nil, group.groupRatchetState != nil {
-            do {
-                try await sendRelayGroupRatchetMessage(trimmed, group: group)
-            } catch {
-                lastError = "Failed to send group message: \(error.localizedDescription)"
-            }
+        guard group.relayInboxId != nil, group.groupRatchetState != nil else {
+            lastError = "This group is missing relay-backed group ratchet state. Refresh the group before sending."
             return
         }
-        let members = group.memberContactIds.compactMap { id in
-            state.contacts.first(where: { $0.id == id })
-        }
-        guard !members.isEmpty else {
-            lastError = "This group has no valid members."
-            return
-        }
-        let authenticatedContext = MessageAuthenticatedContext.group(
-            groupId: group.id,
-            epoch: group.relayEpoch ?? 0,
-            senderFingerprint: state.identity.fingerprint,
-            transcriptHash: group.relayTranscriptHash ?? localGroupTranscriptHash(group)
-        )
-        let encodedBody: String
         do {
-            let memberFingerprints = members.map(\.fingerprint)
-            encodedBody = try encodeGroupPayload(
-                groupId: group.id,
-                groupTitle: group.title,
-                memberFingerprints: memberFingerprints,
-                body: trimmed
-            )
+            try await sendRelayGroupRatchetMessage(trimmed, group: group)
         } catch {
-            lastError = "Failed to prepare group message: \(error.localizedDescription)"
-            return
+            lastError = "Failed to send group message: \(error.localizedDescription)"
         }
-
-        var deliveredCount = 0
-        var firstError: String?
-        for contact in members {
-            do {
-                let prepared = try await prepareGroupPayloadEnvelope(
-                    encodedBody,
-                    authenticatedContext: authenticatedContext,
-                    to: contact,
-                    forceNewSession: false
-                )
-                state.upsert(conversation: prepared.conversation)
-                try await persistState()
-                try await deliverEnvelope(prepared.envelope, to: contact, preferredRelay: state.relay)
-                deliveredCount += 1
-            } catch {
-                loadConversationMessagesIntoRAM(contactId: contact.id)
-                if let existingConversation = state.conversation(for: contact.id) {
-                    _ = await attemptSilentSessionReset(
-                        contact: contact,
-                        existingConversation: existingConversation,
-                        identity: state.identity,
-                        preferredRelay: state.relay
-                    )
-                }
-                do {
-                    let prepared = try await prepareGroupPayloadEnvelope(
-                        encodedBody,
-                        authenticatedContext: authenticatedContext,
-                        to: contact,
-                        forceNewSession: true
-                    )
-                    state.upsert(conversation: prepared.conversation)
-                    try await persistState()
-                    try await deliverEnvelope(prepared.envelope, to: contact, preferredRelay: state.relay)
-                    deliveredCount += 1
-                } catch {
-                    if firstError == nil {
-                        firstError = error.localizedDescription
-                    }
-                }
-            }
-        }
-
-        guard deliveredCount > 0 else {
-            lastError = firstError ?? "Unable to send group message right now."
-            return
-        }
-
-        let nextCounter = (group.messages.last?.counter ?? 0) + 1
-        group.messages.append(
-            Message(
-                direction: .sent,
-                senderDisplayName: state.identity.displayName,
-                body: trimmed,
-                timestamp: Date(),
-                counter: nextCounter
-            )
-        )
-        state.upsert(group: group)
-        await save()
-
-        lastInfo = "Sent group message."
     }
 
     private func sendRelayGroupRatchetMessage(_ text: String, group: GroupConversation) async throws {
@@ -3022,30 +2845,6 @@ final class ClientViewModel: ObservableObject {
         lastInfo = "Sent group message."
     }
 
-    private func prepareGroupPayloadEnvelope(
-        _ payload: String,
-        authenticatedContext: MessageAuthenticatedContext,
-        to contact: Contact,
-        forceNewSession: Bool
-    ) async throws -> (conversation: Conversation, envelope: Envelope) {
-        let session = try await prepareOutboundSession(for: contact, forceNew: forceNewSession)
-        var conversation = session.conversation
-        let rootRatchet = prepareRootRatchetIfNeeded(conversation: conversation, contact: contact)
-        let envelope = try MessageEngine.encrypt(
-            body: .text(payload),
-            senderSigningKey: state.identity.signingKey,
-            senderFingerprint: state.identity.fingerprint,
-            conversation: &conversation,
-            kemCiphertext: session.kemCiphertext,
-            prekey: session.prekey,
-            rootRatchet: rootRatchet?.ratchet,
-            authenticatedContext: authenticatedContext
-        )
-        conversation.markMessageProcessed()
-        applyRootRatchetIfNeeded(rootRatchet, contact: contact, conversation: &conversation)
-        return (conversation, envelope)
-    }
-
     private func makeGroupAuthenticatedContext(forSending group: inout GroupConversation) async throws -> MessageAuthenticatedContext {
         if group.relayInboxId != nil,
            let descriptor = try await fetchRelayGroup(groupId: group.id, relay: state.relay) {
@@ -3061,45 +2860,18 @@ final class ClientViewModel: ObservableObject {
             )
             group.createdByFingerprint = descriptor.createdByFingerprint
         }
-        let epoch = group.relayEpoch ?? 0
-        let transcriptHash = group.relayTranscriptHash ?? localGroupTranscriptHash(group)
+        guard let epoch = group.relayEpoch,
+              let transcriptHash = group.relayTranscriptHash,
+              group.relayInboxId != nil,
+              group.groupRatchetState != nil else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
         return .group(
             groupId: group.id,
             epoch: epoch,
             senderFingerprint: state.identity.fingerprint,
             transcriptHash: transcriptHash
         )
-    }
-
-    private func validatedGroupMessageContext(
-        _ context: MessageAuthenticatedContext?,
-        payload: GroupTransportPayload,
-        sender: Contact,
-        knownGroup: GroupConversation?
-    ) -> GroupMessageAuthenticatedContext? {
-        guard context?.purpose == .group,
-              let groupContext = context?.group,
-              groupContext.groupId == payload.groupId,
-              groupContext.senderFingerprint == sender.fingerprint else {
-            return nil
-        }
-        if let knownGroup,
-           knownGroup.relayEpoch == groupContext.epoch,
-           let knownTranscriptHash = knownGroup.relayTranscriptHash,
-           knownTranscriptHash != groupContext.transcriptHash {
-            return nil
-        }
-        return groupContext
-    }
-
-    private func localGroupTranscriptHash(_ group: GroupConversation) -> Data {
-        var payload = Data("NOCTYRA-LOCAL-GROUP-TRANSCRIPT-V1".utf8)
-        payload.append(Data(group.id.uuidString.utf8))
-        payload.append(Data(group.title.utf8))
-        for memberId in group.memberContactIds.map(\.uuidString).sorted() {
-            payload.append(Data(memberId.utf8))
-        }
-        return Data(SHA256.hash(data: payload))
     }
 
     func removeContact(id: UUID) async {
@@ -4159,35 +3931,6 @@ final class ClientViewModel: ObservableObject {
         }
 
         throw CryptoError.invalidPayload
-    }
-
-    private func encodeGroupPayload(
-        groupId: UUID,
-        groupTitle: String,
-        memberFingerprints: [String],
-        body: String
-    ) throws -> String {
-        let payload = GroupTransportPayload(
-            groupId: groupId,
-            groupTitle: groupTitle,
-            memberFingerprints: memberFingerprints,
-            body: body,
-            sentAt: Date()
-        )
-        let data = try PICCPCoder.encode(payload)
-        return Self.groupPayloadPrefix + data.base64EncodedString()
-    }
-
-    private func decodeGroupPayload(from text: String) -> GroupTransportPayload? {
-        guard text.hasPrefix(Self.groupPayloadPrefix) else {
-            return nil
-        }
-        let encoded = String(text.dropFirst(Self.groupPayloadPrefix.count))
-        guard let data = Data(base64Encoded: encoded),
-              let payload = try? PICCPCoder.decode(GroupTransportPayload.self, from: data) else {
-            return nil
-        }
-        return payload
     }
 
     private func parseHostPort(_ value: String) -> RelayEndpoint? {
@@ -5419,13 +5162,6 @@ final class ClientViewModel: ObservableObject {
         return normalized.hasPrefix("127.")
     }
 
-    private func groupMemberFingerprints(for group: GroupConversation, profile: IdentityProfile) -> [String] {
-        let mapped = group.memberContactIds.compactMap { memberId in
-            profile.contacts.first(where: { $0.id == memberId })?.fingerprint
-        }
-        return Array(Set(mapped)).sorted()
-    }
-
     private func abbreviatedFingerprint(_ fingerprint: String) -> String {
         if fingerprint.count <= 12 {
             return fingerprint
@@ -6037,44 +5773,13 @@ final class ClientViewModel: ObservableObject {
             conversation.messages = storedDirectMessages(profileId: profile.id, contactId: contactId)
         }
         var directCandidates: [(timestamp: Date, payload: String)] = []
-        var groupCandidates: [(timestamp: Date, payload: String)] = []
 
         for message in conversation.messages where message.direction == .sent {
             guard message.attachment == nil else { continue }
             directCandidates.append((timestamp: message.timestamp, payload: message.body))
         }
 
-        let relatedGroups = profile.groups.filter { $0.memberContactIds.contains(contactId) }
-        for var group in relatedGroups {
-            if group.messages.isEmpty {
-                group.messages = storedGroupMessages(profileId: profile.id, groupId: group.id)
-            }
-            let memberFingerprints = groupMemberFingerprints(for: group, profile: profile)
-            guard !memberFingerprints.isEmpty else {
-                continue
-            }
-            for message in group.messages where message.direction == .sent {
-                guard message.attachment == nil else { continue }
-                guard let payload = try? encodeGroupPayload(
-                    groupId: group.id,
-                    groupTitle: group.title,
-                    memberFingerprints: memberFingerprints,
-                    body: message.body
-                ) else {
-                    continue
-                }
-                groupCandidates.append((timestamp: message.timestamp, payload: payload))
-            }
-        }
-
         let sortedDirect = directCandidates
-            .sorted { lhs, rhs in
-                if lhs.timestamp != rhs.timestamp {
-                    return lhs.timestamp > rhs.timestamp
-                }
-                return lhs.payload < rhs.payload
-            }
-        let sortedGroup = groupCandidates
             .sorted { lhs, rhs in
                 if lhs.timestamp != rhs.timestamp {
                     return lhs.timestamp > rhs.timestamp
@@ -6088,14 +5793,6 @@ final class ClientViewModel: ObservableObject {
             toResend.append(candidate.payload)
             if toResend.count == count {
                 break
-            }
-        }
-        if toResend.count < count {
-            for candidate in sortedGroup {
-                toResend.append(candidate.payload)
-                if toResend.count == count {
-                    break
-                }
             }
         }
 
