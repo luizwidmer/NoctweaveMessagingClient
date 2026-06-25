@@ -1658,6 +1658,13 @@ final class ClientViewModel: ObservableObject {
                     acknowledgedIds.insert(envelope.id)
                     continue
                 }
+                if envelope.epoch != ratchetState.epoch || envelope.transcriptHash != ratchetState.transcriptHash {
+                    if let recovered = groupRatchetState(from: descriptor, identity: profile.identity, existing: nil),
+                       recovered.epoch == envelope.epoch,
+                       recovered.transcriptHash == envelope.transcriptHash {
+                        ratchetState = recovered
+                    }
+                }
                 guard envelope.epoch == ratchetState.epoch,
                       envelope.transcriptHash == ratchetState.transcriptHash,
                       let sender = descriptor.members.first(where: { $0.fingerprint == envelope.senderFingerprint }),
@@ -1742,7 +1749,49 @@ final class ClientViewModel: ObservableObject {
                         acknowledgedIds.insert(envelope.id)
                     }
                 } catch {
-                    if envelope.epoch < ratchetState.epoch {
+                    if let recovered = groupRatchetState(from: descriptor, identity: profile.identity, existing: nil),
+                       recovered.epoch == envelope.epoch,
+                       recovered.transcriptHash == envelope.transcriptHash,
+                       let sender = descriptor.members.first(where: { $0.fingerprint == envelope.senderFingerprint }),
+                       let senderSigningKey = sender.signingPublicKey {
+                        var recoveryState = recovered
+                        do {
+                            let decrypted = try GroupRatchet.decryptWithKey(
+                                envelope: envelope,
+                                senderPublicSigningKey: senderSigningKey,
+                                state: &recoveryState
+                            )
+                            switch decrypted.body {
+                            case .text(let text):
+                                group.messages.append(
+                                    Message(
+                                        id: envelope.id,
+                                        direction: .received,
+                                        senderDisplayName: sender.displayName,
+                                        body: text,
+                                        timestamp: envelope.sentAt,
+                                        counter: envelope.messageCounter
+                                    )
+                                )
+                                if activeGroupId != group.id {
+                                    group.unreadCount += 1
+                                    notifier.notify(title: group.title, body: "\(sender.displayName ?? "Group member"): \(text)")
+                                }
+                                lastInfo = "Recovered group message."
+                                acknowledgedIds.insert(envelope.id)
+                                ratchetState = recoveryState
+                            case .attachment:
+                                lastError = "Group attachment recovery deferred until normal ratchet state is available."
+                            default:
+                                acknowledgedIds.insert(envelope.id)
+                                ratchetState = recoveryState
+                            }
+                        } catch {
+                            if envelope.epoch < ratchetState.epoch {
+                                acknowledgedIds.insert(envelope.id)
+                            }
+                        }
+                    } else if envelope.epoch < ratchetState.epoch {
                         acknowledgedIds.insert(envelope.id)
                     }
                 }
@@ -2438,6 +2487,20 @@ final class ClientViewModel: ObservableObject {
 
     func openConversation(contactId: UUID) async {
         loadConversationMessagesIntoRAM(contactId: contactId)
+    }
+
+    func latestDirectMessage(contactId: UUID) -> Message? {
+        if let message = state.conversation(for: contactId)?.messages.last {
+            return message
+        }
+        return storedDirectMessages(profileId: state.activeIdentityId, contactId: contactId).last
+    }
+
+    func latestGroupMessage(groupId: UUID) -> Message? {
+        if let message = state.group(for: groupId)?.messages.last {
+            return message
+        }
+        return storedGroupMessages(profileId: state.activeIdentityId, groupId: groupId).last
     }
 
     func closeConversation(contactId: UUID) async {

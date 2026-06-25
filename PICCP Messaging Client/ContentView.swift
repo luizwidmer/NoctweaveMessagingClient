@@ -474,7 +474,7 @@ struct ContentView: View {
                     ForEach(model.state.contacts) { contact in
                         MacSidebarRow(
                             title: contact.displayName,
-                            subtitle: model.state.conversation(for: contact.id)?.messages.last?.body,
+                            subtitle: contact.isTrusted ? "Verified contact" : "Verification pending",
                             systemImage: "person.circle",
                             unreadCount: unreadCount(for: contact),
                             isSelected: selection == .contact(contact.id)
@@ -516,7 +516,7 @@ struct ContentView: View {
                     ForEach(model.state.groups) { group in
                         MacSidebarRow(
                             title: group.title,
-                            subtitle: model.state.group(for: group.id)?.messages.last?.body,
+                            subtitle: "\(group.memberContactIds.count) members",
                             systemImage: "person.3.fill",
                             unreadCount: unreadCount(for: group),
                             isSelected: selection == .group(group.id)
@@ -1381,20 +1381,19 @@ private struct ChatsListView: View {
     }
 
     private func lastGroupTimestamp(for group: GroupConversation) -> Date? {
-        model.state.group(for: group.id)?.messages.last?.timestamp ?? group.messages.last?.timestamp
+        model.latestGroupMessage(groupId: group.id)?.timestamp
     }
 
     private func lastContactTimestamp(for contact: Contact) -> Date? {
-        model.state.conversation(for: contact.id)?.messages.last?.timestamp
+        model.latestDirectMessage(contactId: contact.id)?.timestamp
     }
 
     private func groupPreview(for group: GroupConversation) -> String {
-        let latest = model.state.group(for: group.id)?.messages.last ?? group.messages.last
-        return previewText(for: latest)
+        previewText(for: model.latestGroupMessage(groupId: group.id))
     }
 
     private func contactPreview(for contact: Contact) -> String {
-        previewText(for: model.state.conversation(for: contact.id)?.messages.last)
+        previewText(for: model.latestDirectMessage(contactId: contact.id))
     }
 
     private func previewText(for message: PICCPCore.Message?) -> String {
@@ -9294,9 +9293,6 @@ private struct ContactBookView: View {
                         .foregroundStyle(contact.isTrusted ? Color.green : Color.secondary)
                 }
                 Spacer()
-                if let unread = model.state.conversation(for: contact.id)?.unreadCount, unread > 0 {
-                    UnreadBadge(count: unread)
-                }
                 Button { onOpen(contact.id) } label: {
                     Image(systemName: "bubble.left.fill")
                         .font(.system(size: 14, weight: .semibold))
@@ -9398,9 +9394,6 @@ private struct ContactBookView: View {
                         .truncationMode(.tail)
                         .layoutPriority(1)
                     Spacer()
-                    if let unread = model.state.conversation(for: contact.id)?.unreadCount, unread > 0 {
-                        UnreadBadge(count: unread)
-                    }
                     #if os(iOS)
                     Button { onOpen(contact.id) } label: {
                         Image(systemName: "arrow.up.right.square")
