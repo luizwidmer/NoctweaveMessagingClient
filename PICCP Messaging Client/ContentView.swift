@@ -2410,12 +2410,20 @@ private struct GroupConversationView: View {
     @State private var revealMessages = false
     @State private var showingClearChatConfirm = false
     @State private var showingGroupDetails = false
+    @State private var showingVoiceRecorder = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
+    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var showingSecureCamera = false
+    @State private var showingInsecureCamera = false
+    @State private var showCameraChoiceAlert = false
+    @AppStorage("lattice.secureCameraPromptShown.v1") private var secureCameraPromptShown = false
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #else
+    @State private var showingAttachmentImporter = false
     #endif
     #if os(macOS)
     @FocusState private var isComposerFocused: Bool
@@ -2589,6 +2597,31 @@ private struct GroupConversationView: View {
 
             HStack(spacing: 8) {
                 #if os(iOS)
+                Button {
+                    handleCameraButtonTap()
+                } label: {
+                    Image(systemName: "camera")
+                        .font(.system(size: IOSControlMetrics.circleIconSize, weight: .semibold))
+                }
+                .accessibilityLabel("Capture Group Photo")
+                .glassCircleButton(diameter: IOSControlMetrics.circleButtonDiameter)
+                .hoverLift()
+                PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: IOSControlMetrics.circleIconSize, weight: .semibold))
+                }
+                .accessibilityLabel("Attach Group Image")
+                .glassCircleButton(diameter: IOSControlMetrics.circleButtonDiameter)
+                .hoverLift()
+                Button {
+                    showingVoiceRecorder = true
+                } label: {
+                    Image(systemName: "mic")
+                        .font(.system(size: IOSControlMetrics.circleIconSize, weight: .semibold))
+                }
+                .accessibilityLabel("Record Group Voice Message")
+                .glassCircleButton(diameter: IOSControlMetrics.circleButtonDiameter)
+                .hoverLift()
                 MessageInputField(
                     text: $messageText,
                     secureTypingEnabled: model.state.privacy.secureTypingEnabled,
@@ -2597,6 +2630,24 @@ private struct GroupConversationView: View {
                     sendMessage()
                 }
                 #else
+                Button {
+                    showingAttachmentImporter = true
+                } label: {
+                    Image(systemName: "paperclip")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .accessibilityLabel("Attach Group Image")
+                .glassCircleButton(diameter: 34)
+                .hoverLift()
+                Button {
+                    showingVoiceRecorder = true
+                } label: {
+                    Image(systemName: "mic")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .accessibilityLabel("Record Group Voice Message")
+                .glassCircleButton(diameter: 34)
+                .hoverLift()
                 TextField("Message", text: $messageText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .submitLabel(.send)
@@ -2667,6 +2718,106 @@ private struct GroupConversationView: View {
             GroupDetailsView(model: model, groupId: group.id)
                 .noctyraSheetPresentation()
         }
+        .sheet(isPresented: $showingVoiceRecorder) {
+            VoiceRecorderSheetView(
+                onRecorded: { data, fileName, mimeType in
+                    Task {
+                        await model.sendGroupAttachment(
+                            data: data,
+                            fileName: fileName,
+                            mimeType: mimeType,
+                            to: group.id
+                        )
+                    }
+                    showingVoiceRecorder = false
+                },
+                onError: { message in
+                    model.lastError = message
+                    showingVoiceRecorder = false
+                },
+                onCancel: {
+                    showingVoiceRecorder = false
+                }
+            )
+            .noctyraSheetPresentation()
+        }
+        #if os(iOS)
+        .onChange(of: selectedPhoto) { _, newItem in
+            guard let newItem else { return }
+            Task { await handlePickedPhoto(newItem) }
+        }
+        .sheet(isPresented: $showingSecureCamera) {
+            SecureCameraCaptureView(
+                onCapture: { data in
+                    Task {
+                        await model.sendGroupAttachment(
+                            data: data,
+                            fileName: "camera.jpg",
+                            mimeType: "image/jpeg",
+                            to: group.id
+                        )
+                    }
+                    showingSecureCamera = false
+                },
+                onCancel: {
+                    showingSecureCamera = false
+                }
+            )
+        }
+        .sheet(isPresented: $showingInsecureCamera) {
+            SystemCameraPickerView(
+                onCapture: { data in
+                    Task {
+                        await model.sendGroupAttachment(
+                            data: data,
+                            fileName: "camera.jpg",
+                            mimeType: "image/jpeg",
+                            to: group.id
+                        )
+                    }
+                    showingInsecureCamera = false
+                },
+                onCancel: {
+                    showingInsecureCamera = false
+                },
+                onError: { message in
+                    model.lastError = message
+                    showingInsecureCamera = false
+                }
+            )
+        }
+        .alert("Use secure camera capture?", isPresented: $showCameraChoiceAlert) {
+            Button("Use In-App Camera") {
+                secureCameraPromptShown = true
+                enableSecureCameraCapture()
+                showingSecureCamera = true
+            }
+            Button("Use System Camera") {
+                secureCameraPromptShown = true
+                openInsecureCamera()
+            }
+            Button("Cancel", role: .cancel) {
+                secureCameraPromptShown = true
+            }
+        } message: {
+            Text("In-app capture keeps images out of Photos. The system camera may save to Photos and is more exposed to OS-level access.")
+        }
+        #else
+        .fileImporter(
+            isPresented: $showingAttachmentImporter,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first {
+                    Task { await handleAttachmentURL(url) }
+                }
+            case .failure(let error):
+                model.lastError = "Failed to import attachment: \(error.localizedDescription)"
+            }
+        }
+        #endif
         .confirmationDialog("Clear group chat?", isPresented: $showingClearChatConfirm) {
             Button("Clear Chat", role: .destructive) {
                 Task { await model.clearGroupConversation(groupId: group.id) }
@@ -2734,6 +2885,68 @@ private struct GroupConversationView: View {
         Task { await model.sendGroupMessage(text: trimmed, to: group.id) }
         messageText = ""
     }
+
+    #if os(iOS)
+    private func handleCameraButtonTap() {
+        if model.state.privacy.useSecureCameraCapture {
+            showingSecureCamera = true
+            return
+        }
+        if !secureCameraPromptShown {
+            showCameraChoiceAlert = true
+            return
+        }
+        openInsecureCamera()
+    }
+
+    private func openInsecureCamera() {
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            model.lastError = "Camera is not available on this device."
+            return
+        }
+        showingInsecureCamera = true
+    }
+
+    private func enableSecureCameraCapture() {
+        var settings = model.state.privacy
+        settings.useSecureCameraCapture = true
+        Task { await model.updatePrivacy(settings) }
+    }
+
+    private func handlePickedPhoto(_ item: PhotosPickerItem) async {
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self) else { return }
+            let mimeType = item.supportedContentTypes.first?.preferredMIMEType ?? "image/jpeg"
+            await model.sendGroupAttachment(data: data, fileName: nil, mimeType: mimeType, to: group.id)
+        } catch {
+            await MainActor.run {
+                model.lastError = "Failed to load photo: \(error.localizedDescription)"
+            }
+        }
+        await MainActor.run {
+            selectedPhoto = nil
+        }
+    }
+    #else
+    private func handleAttachmentURL(_ url: URL) async {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        do {
+            let data = try readBoundedFile(url, maxBytes: 32 * 1024 * 1024)
+            let fileName = url.lastPathComponent
+            let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "image/jpeg"
+            await model.sendGroupAttachment(data: data, fileName: fileName, mimeType: mimeType, to: group.id)
+        } catch {
+            await MainActor.run {
+                model.lastError = "Failed to read attachment: \(error.localizedDescription)"
+            }
+        }
+    }
+    #endif
 
     private func scrollToBottom(_ messages: [PICCPCore.Message], proxy: ScrollViewProxy, animated: Bool) {
         guard let last = messages.last else { return }

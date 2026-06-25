@@ -1055,6 +1055,128 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
+    func sendGroupAttachment(data: Data, fileName: String?, mimeType: String, to groupId: UUID) async {
+        guard var group = state.group(for: groupId) else {
+            lastError = "Group not found."
+            return
+        }
+        guard !data.isEmpty else {
+            lastError = "Attachment is empty."
+            return
+        }
+        do {
+            let preparedPayload = try prepareAttachmentPayload(data: data, fileName: fileName, mimeType: mimeType)
+            guard preparedPayload.data.count <= maxAttachmentBytes else {
+                throw AttachmentTransferError.attachmentTooLarge(maxBytes: maxAttachmentBytes)
+            }
+            try validateAttachmentQuota(
+                bytes: preparedPayload.data.count,
+                contactId: group.id,
+                relay: state.relay,
+                direction: .outbound
+            )
+            group.messages = group.messages.isEmpty
+                ? storedGroupMessages(profileId: state.activeIdentityId, groupId: group.id)
+                : group.messages
+            _ = try await makeGroupAuthenticatedContext(forSending: &group)
+            guard let groupInboxId = group.relayInboxId,
+                  var ratchetState = group.groupRatchetState else {
+                throw RelayGroupRegistryError.invalidResponse
+            }
+            let prepared = try GroupRatchet.prepareMessageKey(
+                senderFingerprint: state.identity.fingerprint,
+                state: &ratchetState
+            )
+            let attachmentId = UUID()
+            let chunkSize = attachmentChunkSize
+            let chunkCount = Int(ceil(Double(preparedPayload.data.count) / Double(chunkSize)))
+            guard chunkCount > 0, chunkCount <= maxAttachmentChunkCount else {
+                throw AttachmentTransferError.invalidDescriptor
+            }
+            let descriptor = AttachmentDescriptor(
+                id: attachmentId,
+                fileName: preparedPayload.fileName,
+                mimeType: preparedPayload.mimeType,
+                byteCount: preparedPayload.data.count,
+                sha256: AttachmentCrypto.sha256(preparedPayload.data),
+                chunkCount: chunkCount,
+                chunkSize: chunkSize
+            )
+            let client = relayClient(for: state.relay)
+            for chunkIndex in 0..<chunkCount {
+                let start = chunkIndex * chunkSize
+                let end = min(start + chunkSize, preparedPayload.data.count)
+                let chunk = preparedPayload.data.subdata(in: start..<end)
+                let authenticatedData = groupAttachmentAuthenticatedData(
+                    groupId: group.id,
+                    epoch: ratchetState.epoch,
+                    transcriptHash: ratchetState.transcriptHash,
+                    messageCounter: prepared.counter,
+                    attachmentId: attachmentId,
+                    chunkIndex: chunkIndex,
+                    byteCount: chunk.count
+                )
+                let payload = try AttachmentCrypto.encryptChunk(
+                    plaintext: chunk,
+                    messageKey: prepared.key,
+                    attachmentId: attachmentId,
+                    chunkIndex: chunkIndex,
+                    authenticatedData: authenticatedData
+                )
+                let response = try await client.send(.uploadAttachment(UploadAttachmentRequest(
+                    attachmentId: attachmentId,
+                    chunkIndex: chunkIndex,
+                    payload: payload,
+                    ttlSeconds: attachmentUploadTTLSeconds
+                )))
+                guard response.type == .attachment else {
+                    throw AttachmentTransferError.uploadFailed(message: response.error ?? "Upload failed")
+                }
+            }
+            let envelope = try GroupRatchet.encrypt(
+                body: .attachment(descriptor),
+                senderSigningKey: state.identity.signingKey,
+                senderFingerprint: state.identity.fingerprint,
+                messageCounter: prepared.counter,
+                messageKey: prepared.key,
+                state: ratchetState
+            )
+            let response = try await client.send(.deliverGroupMessage(DeliverGroupMessageRequest(
+                groupId: group.id,
+                groupInboxId: groupInboxId,
+                envelope: envelope
+            )))
+            guard response.type == .delivered else {
+                throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected group attachment.")
+            }
+            let localFileName = try attachmentStore.saveAttachment(preparedPayload.data, descriptor: descriptor)
+            let title = attachmentDisplayTitle(descriptor, fallback: "Attachment")
+            group.groupRatchetState = ratchetState
+            group.messages.append(
+                Message(
+                    id: envelope.id,
+                    direction: .sent,
+                    senderDisplayName: state.identity.displayName,
+                    body: title,
+                    timestamp: envelope.sentAt,
+                    counter: envelope.messageCounter,
+                    attachment: AttachmentInfo(descriptor: descriptor, localFileName: localFileName)
+                )
+            )
+            state.upsert(group: group)
+            recordAttachmentQuotaUsage(
+                bytes: preparedPayload.data.count,
+                contactId: group.id,
+                relay: state.relay,
+                direction: .outbound
+            )
+            try await persistState()
+            lastInfo = "Sent group attachment."
+        } catch {
+            lastError = "Failed to send group attachment: \(error.localizedDescription)"
+        }
+    }
+
     func fetchMessages() async {
         if isSyncing {
             return
@@ -1632,11 +1754,12 @@ final class ClientViewModel: ObservableObject {
                     continue
                 }
                 do {
-                    let body = try GroupRatchet.decrypt(
+                    let decrypted = try GroupRatchet.decryptWithKey(
                         envelope: envelope,
                         senderPublicSigningKey: senderSigningKey,
                         state: &ratchetState
                     )
+                    let body = decrypted.body
                     switch body {
                     case .text(let text):
                         group.messages.append(
@@ -1656,6 +1779,36 @@ final class ClientViewModel: ObservableObject {
                         lastInfo = "Received group message."
                         acknowledgedIds.insert(envelope.id)
                     case .attachment(let descriptor):
+                        let localFileName: String?
+                        do {
+                            try validateInboundAttachmentDescriptor(descriptor)
+                            try validateAttachmentQuota(
+                                bytes: descriptor.byteCount,
+                                contactId: group.id,
+                                relay: profile.relay,
+                                direction: .inbound
+                            )
+                            localFileName = try await downloadGroupAttachment(
+                                descriptor: descriptor,
+                                groupId: group.id,
+                                epoch: envelope.epoch,
+                                transcriptHash: envelope.transcriptHash,
+                                messageCounter: envelope.messageCounter,
+                                messageKey: decrypted.messageKey,
+                                relay: profile.relay
+                            )
+                            if localFileName != nil {
+                                recordAttachmentQuotaUsage(
+                                    bytes: descriptor.byteCount,
+                                    contactId: group.id,
+                                    relay: profile.relay,
+                                    direction: .inbound
+                                )
+                            }
+                        } catch {
+                            localFileName = nil
+                            lastError = "Group attachment download failed: \(error.localizedDescription)"
+                        }
                         let title = attachmentDisplayTitle(descriptor, fallback: "Attachment received")
                         group.messages.append(
                             Message(
@@ -1665,7 +1818,7 @@ final class ClientViewModel: ObservableObject {
                                 body: title,
                                 timestamp: envelope.sentAt,
                                 counter: envelope.messageCounter,
-                                attachment: AttachmentInfo(descriptor: descriptor, localFileName: nil)
+                                attachment: AttachmentInfo(descriptor: descriptor, localFileName: localFileName)
                             )
                         )
                         if activeGroupId != group.id {
@@ -3590,6 +3743,84 @@ final class ClientViewModel: ObservableObject {
             throw AttachmentTransferError.invalidChecksum
         }
         return try attachmentStore.saveAttachment(data, descriptor: descriptor)
+    }
+
+    private func downloadGroupAttachment(
+        descriptor: AttachmentDescriptor,
+        groupId: UUID,
+        epoch: UInt64,
+        transcriptHash: Data,
+        messageCounter: UInt64,
+        messageKey: SymmetricKey,
+        relay: RelayEndpoint
+    ) async throws -> String? {
+        try validateInboundAttachmentDescriptor(descriptor)
+        let client = relayClient(for: relay)
+        var data = Data()
+        data.reserveCapacity(descriptor.byteCount)
+        for chunkIndex in 0..<descriptor.chunkCount {
+            let response = try await client.send(.fetchAttachment(FetchAttachmentRequest(
+                attachmentId: descriptor.id,
+                chunkIndex: chunkIndex
+            )))
+            guard response.type == .attachment, let chunk = response.attachment else {
+                throw AttachmentTransferError.missingChunk(chunkIndex)
+            }
+            let expectedCount = min(
+                descriptor.chunkSize,
+                max(0, descriptor.byteCount - (chunkIndex * descriptor.chunkSize))
+            )
+            let authenticatedData = groupAttachmentAuthenticatedData(
+                groupId: groupId,
+                epoch: epoch,
+                transcriptHash: transcriptHash,
+                messageCounter: messageCounter,
+                attachmentId: descriptor.id,
+                chunkIndex: chunkIndex,
+                byteCount: expectedCount
+            )
+            let plaintext = try AttachmentCrypto.decryptChunk(
+                payload: chunk.payload,
+                messageKey: messageKey,
+                attachmentId: descriptor.id,
+                chunkIndex: chunkIndex,
+                authenticatedData: authenticatedData
+            )
+            guard plaintext.count == expectedCount else {
+                throw AttachmentTransferError.invalidChunkSize
+            }
+            data.append(plaintext)
+        }
+        guard data.count == descriptor.byteCount else {
+            throw AttachmentTransferError.invalidSize
+        }
+        guard AttachmentCrypto.sha256(data) == descriptor.sha256 else {
+            throw AttachmentTransferError.invalidChecksum
+        }
+        return try attachmentStore.saveAttachment(data, descriptor: descriptor)
+    }
+
+    private func groupAttachmentAuthenticatedData(
+        groupId: UUID,
+        epoch: UInt64,
+        transcriptHash: Data,
+        messageCounter: UInt64,
+        attachmentId: UUID,
+        chunkIndex: Int,
+        byteCount: Int
+    ) -> Data {
+        AttachmentCrypto.authenticatedData(
+            conversationId: "group:\(groupId.uuidString)",
+            sessionId: groupAttachmentSessionId(epoch: epoch, transcriptHash: transcriptHash),
+            messageCounter: messageCounter,
+            attachmentId: attachmentId,
+            chunkIndex: chunkIndex,
+            byteCount: byteCount
+        )
+    }
+
+    private func groupAttachmentSessionId(epoch: UInt64, transcriptHash: Data) -> String {
+        "epoch:\(epoch):\(transcriptHash.base64EncodedString())"
     }
 
     func addRelayServer(
