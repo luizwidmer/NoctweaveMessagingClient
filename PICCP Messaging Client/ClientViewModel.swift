@@ -4326,10 +4326,42 @@ final class ClientViewModel: ObservableObject {
 
     private func approveRelayGroupJoin(groupId: UUID, joinRequestId: UUID) async throws -> RelayGroupDescriptor {
         let client = relayClient(for: state.relay)
+        guard let currentGroup = try await fetchRelayGroup(groupId: groupId, relay: state.relay) else {
+            throw RelayGroupRegistryError.rejected("Relay group not found.")
+        }
+        let pendingRequests = try await listRelayGroupJoinRequests(groupId: groupId)
+        guard let joinRequest = pendingRequests.first(where: { $0.id == joinRequestId }) else {
+            throw RelayGroupRegistryError.rejected("Join request not found.")
+        }
+        var groupCommit = SignedGroupCommit(
+            operation: .joinApprove,
+            groupId: groupId,
+            actorFingerprint: state.identity.fingerprint,
+            baseEpoch: currentGroup.epoch,
+            previousTranscriptHash: currentGroup.mlsEpochState.confirmedTranscriptHash,
+            addMemberFingerprints: [joinRequest.requester.fingerprint],
+            addMemberProfiles: [joinRequest.requester]
+        )
+        let groupCommitProof = try makeActiveIdentityActorProof { actorProof in
+            try groupCommit.signableData(for: actorProof)
+        }
+        groupCommit = SignedGroupCommit(
+            operation: groupCommit.operation,
+            groupId: groupCommit.groupId,
+            actorFingerprint: groupCommit.actorFingerprint,
+            baseEpoch: groupCommit.baseEpoch,
+            previousTranscriptHash: groupCommit.previousTranscriptHash,
+            title: groupCommit.title,
+            addMemberFingerprints: groupCommit.addMemberFingerprints,
+            addMemberProfiles: groupCommit.addMemberProfiles,
+            removeMemberFingerprints: groupCommit.removeMemberFingerprints,
+            actorProof: groupCommitProof
+        )
         var request = ApproveGroupJoinRequest(
             groupId: groupId,
             actorFingerprint: state.identity.fingerprint,
-            joinRequestId: joinRequestId
+            joinRequestId: joinRequestId,
+            groupCommit: groupCommit
         )
         let proof = try makeActiveIdentityActorProof { actorProof in
             try request.signableData(for: actorProof)
@@ -4338,6 +4370,7 @@ final class ClientViewModel: ObservableObject {
             groupId: request.groupId,
             actorFingerprint: request.actorFingerprint,
             joinRequestId: request.joinRequestId,
+            groupCommit: request.groupCommit,
             actorProof: proof
         )
         let response = try await client.send(
