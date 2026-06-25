@@ -2300,6 +2300,7 @@ final class ClientViewModel: ObservableObject {
             relayInboxId: relayGroup.inboxId,
             relayEpoch: relayGroup.epoch,
             relayTranscriptHash: relayGroup.mlsEpochState.confirmedTranscriptHash,
+            groupRatchetState: groupRatchetState(from: relayGroup, identity: state.identity),
             createdByFingerprint: relayGroup.createdByFingerprint
         )
         state.upsert(group: group)
@@ -2375,6 +2376,11 @@ final class ClientViewModel: ObservableObject {
                 group.relayInboxId = descriptor.inboxId
                 group.relayEpoch = descriptor.epoch
                 group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
+                group.groupRatchetState = groupRatchetState(
+                    from: descriptor,
+                    identity: state.identity,
+                    existing: group.groupRatchetState
+                )
                 group.createdByFingerprint = descriptor.createdByFingerprint
                 state.upsert(group: group)
                 await save()
@@ -2672,6 +2678,11 @@ final class ClientViewModel: ObservableObject {
             group.relayInboxId = descriptor.inboxId
             group.relayEpoch = descriptor.epoch
             group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
+            group.groupRatchetState = groupRatchetState(
+                from: descriptor,
+                identity: state.identity,
+                existing: group.groupRatchetState
+            )
             group.createdByFingerprint = descriptor.createdByFingerprint
         }
         let epoch = group.relayEpoch ?? 0
@@ -4074,22 +4085,35 @@ final class ClientViewModel: ObservableObject {
         memberProfiles: [RelayGroupMemberProfile]
     ) async throws -> RelayGroupDescriptor {
         let client = relayClient(for: state.relay)
+        let groupId = UUID()
+        let allProfiles = uniqueRelayGroupProfiles([relayGroupMemberProfileForActiveIdentity()] + memberProfiles)
+        let initialDistribution = try GroupRatchetEpochSecretDistribution.seal(
+            secret: freshGroupRatchetSecret(),
+            groupId: groupId,
+            epoch: 0,
+            operation: .create,
+            recipients: allProfiles
+        )
         var request = CreateGroupRequest(
+            groupId: groupId,
             title: title,
             creatorFingerprint: state.identity.fingerprint,
             memberFingerprints: memberFingerprints,
             creatorProfile: relayGroupMemberProfileForActiveIdentity(),
-            memberProfiles: memberProfiles
+            memberProfiles: memberProfiles,
+            initialRatchetSecretDistribution: initialDistribution
         )
         let proof = try makeActiveIdentityActorProof { actorProof in
             try request.signableData(for: actorProof)
         }
         request = CreateGroupRequest(
+            groupId: request.groupId,
             title: request.title,
             creatorFingerprint: request.creatorFingerprint,
             memberFingerprints: request.memberFingerprints,
             creatorProfile: request.creatorProfile,
             memberProfiles: request.memberProfiles,
+            initialRatchetSecretDistribution: request.initialRatchetSecretDistribution,
             creatorProof: proof
         )
         let response = try await client.send(
@@ -4191,12 +4215,25 @@ final class ClientViewModel: ObservableObject {
             addMemberProfiles: profiles,
             removeMemberFingerprints: removeFingerprints
         )
+        let operation = relayGroupCommitOperation(
+            request: request,
+            currentGroup: currentGroup,
+            actorFingerprint: actor
+        )
+        let targetProfiles = projectedRelayGroupProfiles(
+            currentMembers: currentGroup.members,
+            addProfiles: request.normalizedAddMemberProfiles,
+            removeFingerprints: request.normalizedRemoveMemberFingerprints
+        )
+        let ratchetDistribution = try GroupRatchetEpochSecretDistribution.seal(
+            secret: freshGroupRatchetSecret(),
+            groupId: groupId,
+            epoch: currentGroup.epoch + 1,
+            operation: operation,
+            recipients: targetProfiles
+        )
         var groupCommit = SignedGroupCommit(
-            operation: relayGroupCommitOperation(
-                request: request,
-                currentGroup: currentGroup,
-                actorFingerprint: actor
-            ),
+            operation: operation,
             groupId: groupId,
             actorFingerprint: actor,
             baseEpoch: currentGroup.epoch,
@@ -4204,7 +4241,8 @@ final class ClientViewModel: ObservableObject {
             title: request.normalizedTitle,
             addMemberFingerprints: request.normalizedAddMemberFingerprints,
             addMemberProfiles: request.normalizedAddMemberProfiles,
-            removeMemberFingerprints: request.normalizedRemoveMemberFingerprints
+            removeMemberFingerprints: request.normalizedRemoveMemberFingerprints,
+            ratchetSecretDistribution: ratchetDistribution
         )
         let groupCommitProof = try makeActorProof(
             fingerprint: actor,
@@ -4223,6 +4261,7 @@ final class ClientViewModel: ObservableObject {
             addMemberFingerprints: groupCommit.addMemberFingerprints,
             addMemberProfiles: groupCommit.addMemberProfiles,
             removeMemberFingerprints: groupCommit.removeMemberFingerprints,
+            ratchetSecretDistribution: groupCommit.ratchetSecretDistribution,
             actorProof: groupCommitProof
         )
         let proof = try makeActorProof(
@@ -4418,6 +4457,17 @@ final class ClientViewModel: ObservableObject {
         guard let joinRequest = pendingRequests.first(where: { $0.id == joinRequestId }) else {
             throw RelayGroupRegistryError.rejected("Join request not found.")
         }
+        let joinRatchetDistribution = try GroupRatchetEpochSecretDistribution.seal(
+            secret: freshGroupRatchetSecret(),
+            groupId: groupId,
+            epoch: currentGroup.epoch + 1,
+            operation: .joinApprove,
+            recipients: projectedRelayGroupProfiles(
+                currentMembers: currentGroup.members,
+                addProfiles: [joinRequest.requester],
+                removeFingerprints: []
+            )
+        )
         var groupCommit = SignedGroupCommit(
             operation: .joinApprove,
             groupId: groupId,
@@ -4425,7 +4475,8 @@ final class ClientViewModel: ObservableObject {
             baseEpoch: currentGroup.epoch,
             previousTranscriptHash: currentGroup.mlsEpochState.confirmedTranscriptHash,
             addMemberFingerprints: [joinRequest.requester.fingerprint],
-            addMemberProfiles: [joinRequest.requester]
+            addMemberProfiles: [joinRequest.requester],
+            ratchetSecretDistribution: joinRatchetDistribution
         )
         let groupCommitProof = try makeActiveIdentityActorProof { actorProof in
             try groupCommit.signableData(for: actorProof)
@@ -4440,6 +4491,7 @@ final class ClientViewModel: ObservableObject {
             addMemberFingerprints: groupCommit.addMemberFingerprints,
             addMemberProfiles: groupCommit.addMemberProfiles,
             removeMemberFingerprints: groupCommit.removeMemberFingerprints,
+            ratchetSecretDistribution: groupCommit.ratchetSecretDistribution,
             actorProof: groupCommitProof
         )
         var request = ApproveGroupJoinRequest(
@@ -4547,6 +4599,11 @@ final class ClientViewModel: ObservableObject {
             merged.relayInboxId = descriptor.inboxId
             merged.relayEpoch = descriptor.epoch
             merged.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
+            merged.groupRatchetState = groupRatchetState(
+                from: descriptor,
+                identity: profile.identity,
+                existing: merged.groupRatchetState
+            )
             merged.createdByFingerprint = descriptor.createdByFingerprint
             return merged
         }
@@ -4722,6 +4779,90 @@ final class ClientViewModel: ObservableObject {
             relay: contact.relay,
             signingPublicKey: contact.signingPublicKey,
             agreementPublicKey: contact.agreementPublicKey
+        )
+    }
+
+    private func relayGroupMemberProfile(for member: RelayGroupMember) -> RelayGroupMemberProfile {
+        RelayGroupMemberProfile(
+            fingerprint: member.fingerprint,
+            displayName: member.displayName,
+            inboxId: member.inboxId,
+            relay: member.relay,
+            signingPublicKey: member.signingPublicKey,
+            agreementPublicKey: member.agreementPublicKey
+        )
+    }
+
+    private func uniqueRelayGroupProfiles(_ profiles: [RelayGroupMemberProfile]) -> [RelayGroupMemberProfile] {
+        var byFingerprint: [String: RelayGroupMemberProfile] = [:]
+        for profile in profiles {
+            let fingerprint = profile.fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fingerprint.isEmpty else { continue }
+            byFingerprint[fingerprint] = RelayGroupMemberProfile(
+                fingerprint: fingerprint,
+                displayName: profile.displayName,
+                inboxId: profile.inboxId,
+                relay: profile.relay,
+                signingPublicKey: profile.signingPublicKey,
+                agreementPublicKey: profile.agreementPublicKey
+            )
+        }
+        return byFingerprint.values.sorted { $0.fingerprint < $1.fingerprint }
+    }
+
+    private func projectedRelayGroupProfiles(
+        currentMembers: [RelayGroupMember],
+        addProfiles: [RelayGroupMemberProfile],
+        removeFingerprints: [String]
+    ) -> [RelayGroupMemberProfile] {
+        var profiles = Dictionary(uniqueKeysWithValues: currentMembers.map {
+            ($0.fingerprint, relayGroupMemberProfile(for: $0))
+        })
+        for profile in addProfiles {
+            let fingerprint = profile.fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !fingerprint.isEmpty else { continue }
+            profiles[fingerprint] = profile
+        }
+        for fingerprint in removeFingerprints {
+            profiles.removeValue(forKey: fingerprint)
+        }
+        return uniqueRelayGroupProfiles(Array(profiles.values))
+    }
+
+    private func freshGroupRatchetSecret() -> Data {
+        var rng = SystemRandomNumberGenerator()
+        return Data((0..<32).map { _ in UInt8.random(in: UInt8.min...UInt8.max, using: &rng) })
+    }
+
+    private func groupRatchetState(
+        from descriptor: RelayGroupDescriptor,
+        identity: Identity,
+        existing: GroupRatchetState? = nil
+    ) -> GroupRatchetState? {
+        guard let distribution = descriptor.mlsEpochState.lastCommit.ratchetSecretDistribution,
+              distribution.epoch == descriptor.epoch,
+              let secret = try? distribution.openSecret(
+                recipientFingerprint: identity.fingerprint,
+                agreementKey: identity.agreementKey
+              ) else {
+            return existing
+        }
+        if var state = existing,
+           descriptor.epoch > state.epoch,
+           state.groupId == descriptor.id {
+            try? state.advanceEpoch(
+                to: descriptor.epoch,
+                transcriptHash: descriptor.mlsEpochState.confirmedTranscriptHash,
+                commitSecret: secret
+            )
+            return state
+        }
+        return GroupRatchetState.initialize(
+            groupId: descriptor.id,
+            epoch: descriptor.epoch,
+            transcriptHash: descriptor.mlsEpochState.confirmedTranscriptHash,
+            groupSecret: secret,
+            localSenderFingerprint: identity.fingerprint
         )
     }
 
