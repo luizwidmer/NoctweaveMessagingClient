@@ -120,6 +120,9 @@ final class ClientViewModel: ObservableObject {
     private let insecureRefreshInterval: TimeInterval = 20
     private var lastCoordinatorSyncAt: Date?
     private let coordinatorSyncInterval: TimeInterval = 45
+    private var wakeFailureCountsByProfile: [UUID: Int] = [:]
+    private let defaultActivePollSeconds = 8
+    private let maxActiveWakePollSeconds = 300
     private var insecureSelfTestToken: UUID?
     private var pendingOutboundPairRequestFingerprints: Set<String> = []
     private var lastInactiveAt: Date?
@@ -1147,8 +1150,10 @@ final class ClientViewModel: ObservableObject {
                 if let error = response.error {
                     lastError = "Relay error: \(error)"
                     profileSyncStatus[profileId] = .error(Date(), error)
+                    recordWakeSyncFailure(for: profileId)
                 } else {
                     profileSyncStatus[profileId] = .error(Date(), "Relay returned an unexpected response.")
+                    recordWakeSyncFailure(for: profileId)
                 }
                 return
             }
@@ -1518,9 +1523,11 @@ final class ClientViewModel: ObservableObject {
                 await ensurePrekeys(for: profileId)
             }
             profileSyncStatus[profileId] = .success(Date())
+            recordWakeSyncSuccess(for: profileId)
         } catch {
             lastError = "Failed to fetch messages: \(error.localizedDescription)"
             profileSyncStatus[profileId] = .error(Date(), error.localizedDescription)
+            recordWakeSyncFailure(for: profileId)
         }
     }
 
@@ -4747,12 +4754,58 @@ final class ClientViewModel: ObservableObject {
         autoFetchTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(8))
+                let delaySeconds = self.nextAutoFetchDelaySeconds()
+                try? await Task.sleep(for: .seconds(delaySeconds))
                 await self.fetchMessages()
                 await self.refreshInsecurePairingIfNeeded()
                 await self.refreshCoordinatorDirectoryIfNeeded()
             }
         }
+    }
+
+    private func nextAutoFetchDelaySeconds(now: Date = Date()) -> Int {
+        let activeProfiles = state.identityProfiles.filter { !$0.isArchived }
+        let advertisedDelays = activeProfiles.compactMap { profile -> Int? in
+            guard let support = wakeSupport(for: profile.relay) else {
+                return nil
+            }
+            let plan = DecentralizedWakePlanner.makePlan(
+                support: support,
+                identitySeed: wakeIdentitySeed(for: profile),
+                relayIdentifier: wakeRelayIdentifier(for: profile.relay),
+                failureCount: wakeFailureCountsByProfile[profile.id] ?? 0,
+                now: now
+            )
+            return plan.nextPollDelaySeconds
+        }
+        guard let policyDelay = advertisedDelays.min() else {
+            return defaultActivePollSeconds
+        }
+        return min(max(policyDelay, 5), maxActiveWakePollSeconds)
+    }
+
+    private func wakeSupport(for relay: RelayEndpoint) -> DecentralizedWakeSupport? {
+        state.relayServers.first(where: { $0.endpoint == relay })?.advertisedInfo?.wakeSupport
+    }
+
+    private func wakeIdentitySeed(for profile: IdentityProfile) -> Data {
+        if !profile.inboxId.isEmpty {
+            return Data(profile.inboxId.utf8)
+        }
+        return Data(profile.identity.fingerprint.utf8)
+    }
+
+    private func wakeRelayIdentifier(for relay: RelayEndpoint) -> String {
+        "\(relay.transport.rawValue):\(relay.useTLS ? "tls" : "plain"):\(quotaRelayKey(relay))"
+    }
+
+    private func recordWakeSyncSuccess(for profileId: UUID) {
+        wakeFailureCountsByProfile[profileId] = nil
+    }
+
+    private func recordWakeSyncFailure(for profileId: UUID) {
+        let current = wakeFailureCountsByProfile[profileId] ?? 0
+        wakeFailureCountsByProfile[profileId] = min(current + 1, 6)
     }
 
     private func startAutoFetchIfEligible() {
