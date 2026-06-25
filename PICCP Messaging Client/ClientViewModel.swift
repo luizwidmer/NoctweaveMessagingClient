@@ -2496,11 +2496,25 @@ final class ClientViewModel: ObservableObject {
         return storedDirectMessages(profileId: state.activeIdentityId, contactId: contactId).last
     }
 
+    func directMessagesForDisplay(contactId: UUID) -> [Message] {
+        if let messages = state.conversation(for: contactId)?.messages, !messages.isEmpty {
+            return messages
+        }
+        return storedDirectMessages(profileId: state.activeIdentityId, contactId: contactId)
+    }
+
     func latestGroupMessage(groupId: UUID) -> Message? {
         if let message = state.group(for: groupId)?.messages.last {
             return message
         }
         return storedGroupMessages(profileId: state.activeIdentityId, groupId: groupId).last
+    }
+
+    func groupMessagesForDisplay(groupId: UUID) -> [Message] {
+        if let messages = state.group(for: groupId)?.messages, !messages.isEmpty {
+            return messages
+        }
+        return storedGroupMessages(profileId: state.activeIdentityId, groupId: groupId)
     }
 
     func closeConversation(contactId: UUID) async {

@@ -1881,8 +1881,7 @@ private struct ConversationView: View {
     }
 
     var body: some View {
-        let conversation = model.state.conversation(for: contact.id)
-        let messages = conversation?.messages ?? []
+        let messages = model.directMessagesForDisplay(contactId: contact.id)
         let isSensitiveHidden = screenProtection.isSensitiveHidden
         let isRevealed = revealMessages && !isSensitiveHidden
         VStack(spacing: 0) {
@@ -2241,24 +2240,24 @@ private struct ConversationView: View {
         } message: {
             Text("This removes messages from this device only and does not affect encryption or your contact.")
         }
+        .task(id: contact.id) {
+            await activateConversation(contact.id)
+        }
+        .onChange(of: contact.id) { oldValue, _ in
+            Task { await deactivateConversation(oldValue) }
+        }
         .onAppear {
-            model.activeContactId = contact.id
-            model.activeGroupId = nil
             revealMessages = false
             screenProtection.refresh()
             #if os(macOS)
             updateSecureInput()
             #endif
-            Task {
-                await model.openConversation(contactId: contact.id)
-                await model.markConversationRead(contactId: contact.id)
-            }
         }
         .onDisappear {
             if model.activeContactId == contact.id {
                 model.activeContactId = nil
             }
-            Task { await model.closeConversation(contactId: contact.id) }
+            Task { await deactivateConversation(contact.id) }
             revealMessages = false
             #if os(macOS)
             SecureEventInputController.shared.setEnabled(false)
@@ -2272,10 +2271,7 @@ private struct ConversationView: View {
                 SecureEventInputController.shared.setEnabled(false)
                 #endif
             } else if newPhase == .active {
-                Task {
-                    await model.openConversation(contactId: contact.id)
-                    await model.markConversationRead(contactId: contact.id)
-                }
+                Task { await activateConversation(contact.id) }
             }
         }
         .onChange(of: screenProtection.isSensitiveHidden) { _, newValue in
@@ -2400,6 +2396,20 @@ private struct ConversationView: View {
             }
         }
     }
+
+    private func activateConversation(_ contactId: UUID) async {
+        model.activeContactId = contactId
+        model.activeGroupId = nil
+        await model.openConversation(contactId: contactId)
+        await model.markConversationRead(contactId: contactId)
+    }
+
+    private func deactivateConversation(_ contactId: UUID) async {
+        await model.closeConversation(contactId: contactId)
+        if model.activeContactId == contactId {
+            model.activeContactId = nil
+        }
+    }
 }
 
 private struct GroupConversationView: View {
@@ -2437,7 +2447,7 @@ private struct GroupConversationView: View {
     }
 
     private var groupMessages: [PICCPCore.Message] {
-        resolvedGroup?.messages ?? group.messages
+        model.groupMessagesForDisplay(groupId: group.id)
     }
 
     private var memberCount: Int {
@@ -2824,21 +2834,21 @@ private struct GroupConversationView: View {
         } message: {
             Text("This removes local group messages from this device only.")
         }
+        .task(id: group.id) {
+            await activateGroup(group.id)
+        }
+        .onChange(of: group.id) { oldValue, _ in
+            Task { await deactivateGroup(oldValue) }
+        }
         .onAppear {
-            model.activeContactId = nil
-            model.activeGroupId = group.id
             revealMessages = false
             screenProtection.refresh()
-            Task {
-                await model.openGroupConversation(groupId: group.id)
-                await model.markGroupRead(groupId: group.id)
-            }
         }
         .onDisappear {
             if model.activeGroupId == group.id {
                 model.activeGroupId = nil
             }
-            Task { await model.closeGroupConversation(groupId: group.id) }
+            Task { await deactivateGroup(group.id) }
             revealMessages = false
         }
         .onChange(of: screenProtection.isSensitiveHidden) { _, newValue in
@@ -2852,10 +2862,7 @@ private struct GroupConversationView: View {
                 Task { await model.closeGroupConversation(groupId: group.id) }
                 revealMessages = false
             } else if newValue == .active {
-                Task {
-                    await model.openGroupConversation(groupId: group.id)
-                    await model.markGroupRead(groupId: group.id)
-                }
+                Task { await activateGroup(group.id) }
             }
         }
     }
@@ -2957,6 +2964,20 @@ private struct GroupConversationView: View {
             } else {
                 proxy.scrollTo(last.id, anchor: .bottom)
             }
+        }
+    }
+
+    private func activateGroup(_ groupId: UUID) async {
+        model.activeContactId = nil
+        model.activeGroupId = groupId
+        await model.openGroupConversation(groupId: groupId)
+        await model.markGroupRead(groupId: groupId)
+    }
+
+    private func deactivateGroup(_ groupId: UUID) async {
+        await model.closeGroupConversation(groupId: groupId)
+        if model.activeGroupId == groupId {
+            model.activeGroupId = nil
         }
     }
 }
