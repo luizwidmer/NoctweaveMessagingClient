@@ -4007,17 +4007,37 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func fetchRelayGroup(groupId: UUID, relay: RelayEndpoint) async throws -> RelayGroupDescriptor? {
+        try await fetchRelayGroup(
+            groupId: groupId,
+            relay: relay,
+            memberFingerprint: state.identity.fingerprint,
+            signingKey: state.identity.signingKey,
+            publicSigningKey: state.identity.signingKey.publicKeyData
+        )
+    }
+
+    private func fetchRelayGroup(
+        groupId: UUID,
+        relay: RelayEndpoint,
+        memberFingerprint: String,
+        signingKey: SigningKeyPair,
+        publicSigningKey: Data
+    ) async throws -> RelayGroupDescriptor? {
         let client = relayClient(for: relay)
         var request = GetGroupRequest(
             groupId: groupId,
-            memberFingerprint: state.identity.fingerprint
+            memberFingerprint: memberFingerprint
         )
-        let proof = try makeActiveIdentityActorProof { actorProof in
+        let proof = try makeActorProof(
+            fingerprint: memberFingerprint,
+            signingKey: signingKey,
+            publicSigningKey: publicSigningKey
+        ) { actorProof in
             try request.signableData(for: actorProof)
         }
         request = GetGroupRequest(
             groupId: groupId,
-            memberFingerprint: state.identity.fingerprint,
+            memberFingerprint: memberFingerprint,
             memberProof: proof
         )
         let response = try await client.send(.getGroup(request))
@@ -4045,13 +4065,66 @@ final class ClientViewModel: ObservableObject {
         let signerKey = actorSigningKey ?? state.identity.signingKey
         let signerPublicKey = actorSigningKey?.publicKeyData ?? state.identity.signingKey.publicKeyData
         let client = relayClient(for: targetRelay)
+        guard let currentGroup = try await fetchRelayGroup(
+            groupId: groupId,
+            relay: targetRelay,
+            memberFingerprint: actor,
+            signingKey: signerKey,
+            publicSigningKey: signerPublicKey
+        ) else {
+            throw RelayGroupRegistryError.rejected("Relay group not found.")
+        }
+        let normalizedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let addFingerprints = Array(Set(addMemberFingerprints.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty })).sorted()
+        let removeFingerprints = Array(Set(removeMemberFingerprints.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty })).sorted()
+        let profiles = addMemberProfiles
+            .filter { !$0.fingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted { $0.fingerprint < $1.fingerprint }
         var request = UpdateGroupRequest(
             groupId: groupId,
             actorFingerprint: actor,
-            title: title,
-            addMemberFingerprints: Array(Set(addMemberFingerprints)),
-            addMemberProfiles: addMemberProfiles,
-            removeMemberFingerprints: Array(Set(removeMemberFingerprints))
+            title: normalizedTitle?.isEmpty == false ? normalizedTitle : nil,
+            addMemberFingerprints: addFingerprints,
+            addMemberProfiles: profiles,
+            removeMemberFingerprints: removeFingerprints
+        )
+        var groupCommit = SignedGroupCommit(
+            operation: relayGroupCommitOperation(
+                request: request,
+                currentGroup: currentGroup,
+                actorFingerprint: actor
+            ),
+            groupId: groupId,
+            actorFingerprint: actor,
+            baseEpoch: currentGroup.epoch,
+            previousTranscriptHash: currentGroup.mlsEpochState.confirmedTranscriptHash,
+            title: request.normalizedTitle,
+            addMemberFingerprints: request.normalizedAddMemberFingerprints,
+            addMemberProfiles: request.normalizedAddMemberProfiles,
+            removeMemberFingerprints: request.normalizedRemoveMemberFingerprints
+        )
+        let groupCommitProof = try makeActorProof(
+            fingerprint: actor,
+            signingKey: signerKey,
+            publicSigningKey: signerPublicKey
+        ) { actorProof in
+            try groupCommit.signableData(for: actorProof)
+        }
+        groupCommit = SignedGroupCommit(
+            operation: groupCommit.operation,
+            groupId: groupCommit.groupId,
+            actorFingerprint: groupCommit.actorFingerprint,
+            baseEpoch: groupCommit.baseEpoch,
+            previousTranscriptHash: groupCommit.previousTranscriptHash,
+            title: groupCommit.title,
+            addMemberFingerprints: groupCommit.addMemberFingerprints,
+            addMemberProfiles: groupCommit.addMemberProfiles,
+            removeMemberFingerprints: groupCommit.removeMemberFingerprints,
+            actorProof: groupCommitProof
         )
         let proof = try makeActorProof(
             fingerprint: actor,
@@ -4067,7 +4140,8 @@ final class ClientViewModel: ObservableObject {
             addMemberFingerprints: request.addMemberFingerprints,
             addMemberProfiles: request.addMemberProfiles,
             removeMemberFingerprints: request.removeMemberFingerprints,
-            actorProof: proof
+            actorProof: proof,
+            groupCommit: groupCommit
         )
         let response = try await client.send(
             .updateGroup(request)
@@ -4080,6 +4154,29 @@ final class ClientViewModel: ObservableObject {
             throw RelayGroupRegistryError.invalidResponse
         }
         return group
+    }
+
+    private func relayGroupCommitOperation(
+        request: UpdateGroupRequest,
+        currentGroup: RelayGroupDescriptor,
+        actorFingerprint: String
+    ) -> MLSGroupCommitOperation {
+        let isCreator = actorFingerprint == currentGroup.createdByFingerprint
+        if !isCreator,
+           !request.normalizedRemoveMemberFingerprints.isEmpty,
+           Set(request.normalizedRemoveMemberFingerprints).isSubset(of: [actorFingerprint]) {
+            return .selfLeave
+        }
+        let hasTitleChange = request.normalizedTitle != nil
+        let hasAdds = !request.normalizedAddMemberFingerprints.isEmpty || !request.normalizedAddMemberProfiles.isEmpty
+        let hasRemoves = !request.normalizedRemoveMemberFingerprints.isEmpty
+        if hasAdds {
+            return hasRemoves || hasTitleChange ? .update : .addMembers
+        }
+        if hasRemoves {
+            return hasTitleChange ? .update : .removeMembers
+        }
+        return .update
     }
 
     private func deleteRelayGroupRegistry(
