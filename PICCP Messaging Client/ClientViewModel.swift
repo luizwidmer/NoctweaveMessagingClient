@@ -1541,6 +1541,7 @@ final class ClientViewModel: ObservableObject {
             for (contactId, count) in pendingResends {
                 await resendRecentMessages(contactId: contactId, count: count, profile: &profile)
             }
+            mergeCurrentThreadMessages(into: &profile)
             state.updateIdentityProfile(profile)
             try await persistState()
             let acknowledgementIds = envelopes.map(\.id).filter { acknowledgedEnvelopeIds.contains($0) }
@@ -1572,6 +1573,7 @@ final class ClientViewModel: ObservableObject {
                 }
             }
             try await fetchRelayGroupMessages(for: &profile)
+            mergeCurrentThreadMessages(into: &profile)
             state.updateIdentityProfile(profile)
             try await persistState()
             if profile.prekeys.oneTimePrekeys.count < prekeyMinimumCount {
@@ -2492,31 +2494,25 @@ final class ClientViewModel: ObservableObject {
     }
 
     func latestDirectMessage(contactId: UUID) -> Message? {
-        if let message = state.conversation(for: contactId)?.messages.last {
-            return message
-        }
-        return storedDirectMessages(profileId: state.activeIdentityId, contactId: contactId).last
+        directMessagesForDisplay(contactId: contactId).last
     }
 
     func directMessagesForDisplay(contactId: UUID) -> [Message] {
-        if let messages = state.conversation(for: contactId)?.messages, !messages.isEmpty {
-            return messages
-        }
-        return storedDirectMessages(profileId: state.activeIdentityId, contactId: contactId)
+        mergedMessages(
+            storedDirectMessages(profileId: state.activeIdentityId, contactId: contactId),
+            state.conversation(for: contactId)?.messages ?? []
+        )
     }
 
     func latestGroupMessage(groupId: UUID) -> Message? {
-        if let message = state.group(for: groupId)?.messages.last {
-            return message
-        }
-        return storedGroupMessages(profileId: state.activeIdentityId, groupId: groupId).last
+        groupMessagesForDisplay(groupId: groupId).last
     }
 
     func groupMessagesForDisplay(groupId: UUID) -> [Message] {
-        if let messages = state.group(for: groupId)?.messages, !messages.isEmpty {
-            return messages
-        }
-        return storedGroupMessages(profileId: state.activeIdentityId, groupId: groupId)
+        mergedMessages(
+            storedGroupMessages(profileId: state.activeIdentityId, groupId: groupId),
+            state.group(for: groupId)?.messages ?? []
+        )
     }
 
     func closeConversation(contactId: UUID) async {
@@ -4907,6 +4903,7 @@ final class ClientViewModel: ObservableObject {
 
         if mergedGroups != profile.groups || didMaterializeContacts {
             profile.groups = mergedGroups
+            mergeCurrentThreadMessages(into: &profile)
             state.updateIdentityProfile(profile)
             if profileId == state.activeIdentityId,
                let activeGroupId,
@@ -7013,6 +7010,88 @@ final class ClientViewModel: ObservableObject {
                     groupId: group.id
                 )
             }
+        }
+    }
+
+    private func mergeCurrentThreadMessages(into profile: inout IdentityProfile) {
+        guard let current = state.identityProfile(id: profile.id) else {
+            return
+        }
+
+        var conversationsByContact: [UUID: Conversation] = [:]
+        for conversation in profile.conversations {
+            if var existing = conversationsByContact[conversation.contactId] {
+                existing.messages = mergedMessages(existing.messages, conversation.messages)
+                existing.unreadCount = max(existing.unreadCount, conversation.unreadCount)
+                conversationsByContact[conversation.contactId] = existing
+            } else {
+                conversationsByContact[conversation.contactId] = conversation
+            }
+        }
+        for conversation in current.conversations {
+            var merged = conversationsByContact[conversation.contactId] ?? conversation
+            merged.messages = mergedMessages(
+                storedDirectMessages(profileId: profile.id, contactId: conversation.contactId),
+                conversation.messages,
+                merged.messages
+            )
+            merged.unreadCount = max(merged.unreadCount, conversation.unreadCount)
+            conversationsByContact[conversation.contactId] = merged
+        }
+        profile.conversations = conversationsByContact.values.sorted { lhs, rhs in
+            let leftDate = lhs.messages.last?.timestamp ?? Date.distantPast
+            let rightDate = rhs.messages.last?.timestamp ?? Date.distantPast
+            if leftDate != rightDate {
+                return leftDate > rightDate
+            }
+            return lhs.contactId.uuidString < rhs.contactId.uuidString
+        }
+
+        var groupsById: [UUID: GroupConversation] = [:]
+        for group in profile.groups {
+            if var existing = groupsById[group.id] {
+                existing.messages = mergedMessages(existing.messages, group.messages)
+                existing.unreadCount = max(existing.unreadCount, group.unreadCount)
+                groupsById[group.id] = existing
+            } else {
+                groupsById[group.id] = group
+            }
+        }
+        for group in current.groups {
+            var merged = groupsById[group.id] ?? group
+            merged.messages = mergedMessages(
+                storedGroupMessages(profileId: profile.id, groupId: group.id),
+                group.messages,
+                merged.messages
+            )
+            merged.unreadCount = max(merged.unreadCount, group.unreadCount)
+            groupsById[group.id] = merged
+        }
+        profile.groups = groupsById.values.sorted { lhs, rhs in
+            let leftDate = lhs.messages.last?.timestamp ?? lhs.createdAt
+            let rightDate = rhs.messages.last?.timestamp ?? rhs.createdAt
+            if leftDate != rightDate {
+                return leftDate > rightDate
+            }
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        }
+    }
+
+    private func mergedMessages(_ messageSets: [Message]...) -> [Message] {
+        var byId: [UUID: Message] = [:]
+        for messages in messageSets {
+            for message in messages {
+                byId[message.id] = message
+            }
+        }
+        return byId.values.sorted { lhs, rhs in
+            if lhs.timestamp != rhs.timestamp {
+                return lhs.timestamp < rhs.timestamp
+            }
+            if lhs.counter != rhs.counter {
+                return lhs.counter < rhs.counter
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
         }
     }
 
