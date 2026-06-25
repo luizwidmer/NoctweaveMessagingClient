@@ -5203,23 +5203,20 @@ final class ClientViewModel: ObservableObject {
 
     private func nextAutoFetchDelaySeconds(now: Date = Date()) -> Int {
         let activeProfiles = state.identityProfiles.filter { !$0.isArchived }
-        let advertisedDelays = activeProfiles.compactMap { profile -> Int? in
-            guard let support = wakeSupport(for: profile.relay) else {
-                return nil
-            }
-            let plan = DecentralizedWakePlanner.makePlan(
-                support: support,
+        let wakeProfiles = activeProfiles.map { profile in
+            DecentralizedWakeProfile(
+                support: wakeSupport(for: profile.relay),
                 identitySeed: wakeIdentitySeed(for: profile),
                 relayIdentifier: wakeRelayIdentifier(for: profile.relay),
-                failureCount: wakeFailureCountsByProfile[profile.id] ?? 0,
-                now: now
+                failureCount: wakeFailureCountsByProfile[profile.id] ?? 0
             )
-            return plan.nextPollDelaySeconds
         }
-        guard let policyDelay = advertisedDelays.min() else {
-            return defaultActivePollSeconds
-        }
-        return min(max(policyDelay, 5), maxActiveWakePollSeconds)
+        return DecentralizedWakePlanner.nextPollDelaySeconds(
+            for: wakeProfiles,
+            defaultDelaySeconds: defaultActivePollSeconds,
+            maxDelaySeconds: maxActiveWakePollSeconds,
+            now: now
+        )
     }
 
     private func wakeSupport(for relay: RelayEndpoint) -> DecentralizedWakeSupport? {
