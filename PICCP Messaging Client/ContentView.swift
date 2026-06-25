@@ -3761,11 +3761,13 @@ private struct UIKitMessageInput: UIViewRepresentable {
         view.returnKeyType = .send
         view.keyboardDismissMode = .interactive
         applyPrivacyTraits(to: view)
+        context.coordinator.configureKeyboard(for: view, secureTypingEnabled: secureTypingEnabled)
         view.text = text
         return view
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
+        context.coordinator.parent = self
         if uiView.text != text {
             uiView.text = text
         }
@@ -3773,17 +3775,21 @@ private struct UIKitMessageInput: UIViewRepresentable {
             ? UIFont.systemFont(ofSize: 24, weight: .regular)
             : UIFont.preferredFont(forTextStyle: .body)
         applyPrivacyTraits(to: uiView)
+        context.coordinator.configureKeyboard(for: uiView, secureTypingEnabled: secureTypingEnabled)
         uiView.setNeedsLayout()
     }
 
     private func applyPrivacyTraits(to view: UITextView) {
-        view.isSecureTextEntry = secureTypingEnabled
+        // `isSecureTextEntry` makes iOS classify the composer as a password field,
+        // which surfaces the Passwords shortcut. Keep typing private by disabling
+        // learning helpers without opting into password-field behavior.
+        view.isSecureTextEntry = false
         view.autocorrectionType = secureTypingEnabled ? .no : .default
         view.spellCheckingType = secureTypingEnabled ? .no : .default
         view.autocapitalizationType = secureTypingEnabled ? .none : .sentences
         view.smartQuotesType = secureTypingEnabled ? .no : .default
         view.smartDashesType = secureTypingEnabled ? .no : .default
-        view.textContentType = secureTypingEnabled ? .oneTimeCode : nil
+        view.textContentType = secureTypingEnabled ? .none : nil
         view.passwordRules = nil
         view.inputAssistantItem.leadingBarButtonGroups = []
         view.inputAssistantItem.trailingBarButtonGroups = []
@@ -3794,10 +3800,34 @@ private struct UIKitMessageInput: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
-        private let parent: UIKitMessageInput
+        fileprivate var parent: UIKitMessageInput
+        private var secureKeyboard: SecureComposerKeyboard?
 
         init(_ parent: UIKitMessageInput) {
             self.parent = parent
+        }
+
+        func configureKeyboard(for textView: UITextView, secureTypingEnabled: Bool) {
+            if secureTypingEnabled {
+                let keyboard = secureKeyboard ?? SecureComposerKeyboard()
+                keyboard.textView = textView
+                keyboard.onSend = { [weak self, weak textView] in
+                    guard let self, let textView else { return }
+                    self.parent.text = textView.text
+                    let trimmed = textView.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        self.parent.onSubmit()
+                    }
+                }
+                secureKeyboard = keyboard
+                if textView.inputView !== keyboard {
+                    textView.inputView = keyboard
+                    textView.reloadInputViews()
+                }
+            } else if textView.inputView != nil {
+                textView.inputView = nil
+                textView.reloadInputViews()
+            }
         }
 
         func textViewDidChange(_ textView: UITextView) {
@@ -3813,6 +3843,171 @@ private struct UIKitMessageInput: UIViewRepresentable {
             }
             return false
         }
+    }
+}
+
+private final class SecureComposerKeyboard: UIInputView {
+    weak var textView: UITextView?
+    var onSend: (() -> Void)?
+
+    private var letterButtons: [UIButton] = []
+    private var isShifted = false
+
+    init() {
+        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 260), inputViewStyle: .keyboard)
+        allowsSelfSizing = true
+        setup()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func setup() {
+        backgroundColor = UIColor.systemBackground.withAlphaComponent(0.98)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 8
+        stack.alignment = .fill
+        stack.distribution = .fillEqually
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 252),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            stack.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -8)
+        ])
+
+        addRow(["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"], to: stack)
+        addRow(["a", "s", "d", "f", "g", "h", "j", "k", "l"], to: stack, sideInset: 18)
+        addRow(["shift", "z", "x", "c", "v", "b", "n", "m", "delete"], to: stack)
+        addRow([".", ",", "?", "!", "space", "send"], to: stack)
+    }
+
+    private func addRow(_ keys: [String], to stack: UIStackView, sideInset: CGFloat = 0) {
+        let row = UIStackView()
+        row.axis = .horizontal
+        row.spacing = 6
+        row.alignment = .fill
+        row.distribution = .fillProportionally
+
+        if sideInset > 0 {
+            row.addArrangedSubview(spacer(width: sideInset))
+        }
+
+        for key in keys {
+            let button = makeButton(for: key)
+            row.addArrangedSubview(button)
+        }
+
+        if sideInset > 0 {
+            row.addArrangedSubview(spacer(width: sideInset))
+        }
+
+        stack.addArrangedSubview(row)
+    }
+
+    private func spacer(width: CGFloat) -> UIView {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.widthAnchor.constraint(equalToConstant: width).isActive = true
+        return view
+    }
+
+    private func makeButton(for key: String) -> UIButton {
+        var configuration = UIButton.Configuration.filled()
+        configuration.baseForegroundColor = .label
+        configuration.baseBackgroundColor = key == "send"
+            ? UIColor.tintColor.withAlphaComponent(0.92)
+            : UIColor.secondarySystemBackground
+        configuration.cornerStyle = .medium
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 7, bottom: 7, trailing: 7)
+
+        let button = UIButton(configuration: configuration)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
+        button.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        button.accessibilityLabel = accessibilityLabel(for: key)
+
+        switch key {
+        case "shift":
+            button.setImage(UIImage(systemName: "shift"), for: .normal)
+            button.widthAnchor.constraint(equalToConstant: 54).isActive = true
+        case "delete":
+            button.setImage(UIImage(systemName: "delete.left"), for: .normal)
+            button.widthAnchor.constraint(equalToConstant: 54).isActive = true
+        case "space":
+            button.setTitle("space", for: .normal)
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+        case "send":
+            button.setImage(UIImage(systemName: "paperplane.fill"), for: .normal)
+            button.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        default:
+            button.setTitle(key, for: .normal)
+            button.titleLabel?.font = .systemFont(ofSize: 20, weight: .regular)
+            if key.count == 1, key.rangeOfCharacter(from: .letters) != nil {
+                letterButtons.append(button)
+            }
+        }
+
+        button.addAction(UIAction { [weak self] _ in
+            self?.handle(key)
+        }, for: .touchUpInside)
+
+        return button
+    }
+
+    private func accessibilityLabel(for key: String) -> String {
+        switch key {
+        case "shift": "Shift"
+        case "delete": "Delete"
+        case "space": "Space"
+        case "send": "Send"
+        default: key
+        }
+    }
+
+    private func handle(_ key: String) {
+        guard let textView else { return }
+        switch key {
+        case "shift":
+            isShifted.toggle()
+            refreshLetterCase()
+        case "delete":
+            textView.deleteBackward()
+            notifyChanged(textView)
+        case "space":
+            textView.insertText(" ")
+            notifyChanged(textView)
+        case "send":
+            onSend?()
+        default:
+            let value = isShifted ? key.uppercased() : key
+            textView.insertText(value)
+            notifyChanged(textView)
+            if isShifted {
+                isShifted = false
+                refreshLetterCase()
+            }
+        }
+    }
+
+    private func refreshLetterCase() {
+        for button in letterButtons {
+            guard let title = button.title(for: .normal) else { continue }
+            button.setTitle(isShifted ? title.uppercased() : title.lowercased(), for: .normal)
+        }
+    }
+
+    private func notifyChanged(_ textView: UITextView) {
+        textView.delegate?.textViewDidChange?(textView)
     }
 }
 
