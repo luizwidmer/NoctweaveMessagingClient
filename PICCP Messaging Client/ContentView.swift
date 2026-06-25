@@ -3881,12 +3881,36 @@ private final class SecureComposerKeyboard: UIInputView {
         case emoji
     }
 
+    private enum EmojiCategory: String, CaseIterable {
+        case recent = "🕘"
+        case faces = "🙂"
+        case hands = "👍"
+        case symbols = "❤️"
+        case objects = "🔐"
+
+        var values: [String] {
+            switch self {
+            case .recent:
+                return ["😀", "😂", "😊", "😍", "😎", "😭", "👍", "🙏", "🔥", "❤️", "✅", "🔐"]
+            case .faces:
+                return ["😀", "😃", "😄", "😁", "😂", "🤣", "😊", "🙂", "😉", "😍", "😘", "😎", "🤔", "😐", "😬", "😭", "😡", "😴"]
+            case .hands:
+                return ["👍", "👎", "👏", "🙏", "🤝", "👌", "✌️", "🤞", "👊", "✋", "👋", "🫡", "💪", "🙌", "🫶", "👀", "🗣️", "🧠"]
+            case .symbols:
+                return ["❤️", "🖤", "💜", "💯", "✅", "❌", "⚠️", "❗️", "❓", "✨", "🔥", "⭐️", "🔴", "🟢", "🔵", "⬆️", "⬇️", "➡️"]
+            case .objects:
+                return ["🔐", "🛡️", "📎", "📷", "🎙️", "📁", "📄", "🔑", "💬", "📡", "🧬", "💎", "🧊", "🧵", "🚀", "🌐", "🧭", "🕯️"]
+            }
+        }
+    }
+
     private struct Key {
         enum Action {
             case input(String)
             case shift
             case delete
             case mode(KeyboardMode)
+            case emojiCategory(EmojiCategory)
             case space
             case send
         }
@@ -3930,6 +3954,7 @@ private final class SecureComposerKeyboard: UIInputView {
     private var isShifted = false
     private var isCapsLocked = false
     private var mode: KeyboardMode = .letters
+    private var emojiCategory: EmojiCategory = .recent
     private var lastShiftTap: Date?
 
     init() {
@@ -4034,10 +4059,13 @@ private final class SecureComposerKeyboard: UIInputView {
                 ]
             ]
         case .emoji:
+            let emojiRows = Array(emojiCategory.values.chunked(into: 6).prefix(2)).map { row in
+                row.map { Key($0) }
+            }
             return [
-                ["😀", "😂", "😊", "😍", "😎", "😭", "😡", "👍"].map { Key($0) },
-                ["🙏", "👏", "🔥", "✨", "❤️", "💯", "✅", "⚠️"].map { Key($0) },
-                ["👀", "🤝", "🔐", "🛡️", "📎", "📷", "🎙️", "🚀"].map { Key($0) },
+                emojiRows[safe: 0] ?? [],
+                emojiRows[safe: 1] ?? [],
+                emojiCategoryRow(),
                 [
                     Key("ABC", action: .mode(.letters), weight: 1.35),
                     Key("123", action: .mode(.numbers), weight: 1.15),
@@ -4047,6 +4075,17 @@ private final class SecureComposerKeyboard: UIInputView {
                 ]
             ]
         }
+    }
+
+    private func emojiCategoryRow() -> [Key] {
+        EmojiCategory.allCases.map { category in
+            Key(
+                category.rawValue,
+                action: .emojiCategory(category),
+                weight: 1,
+                isAccent: category == emojiCategory
+            )
+        } + [Key(imageName: "delete.left", action: .delete, weight: 1.2)]
     }
 
     private var shiftImageName: String {
@@ -4103,9 +4142,20 @@ private final class SecureComposerKeyboard: UIInputView {
             modeButtons.append(button)
         }
 
+        if case .emojiCategory = key.action {
+            modeButtons.append(button)
+        }
+
+        button.addAction(UIAction { [weak self, weak button] _ in
+            guard let self else { return }
+            self.pressFeedback(on: button)
+        }, for: .touchDown)
         button.addAction(UIAction { [weak self] _ in
             self?.handle(key.action)
         }, for: .touchUpInside)
+        button.addAction(UIAction { [weak self, weak button] _ in
+            self?.releaseFeedback(on: button)
+        }, for: [.touchCancel, .touchUpOutside, .touchDragExit])
 
         return button
     }
@@ -4115,7 +4165,7 @@ private final class SecureComposerKeyboard: UIInputView {
             return UIColor.tintColor.withAlphaComponent(0.92)
         }
         switch key.action {
-        case .shift, .delete, .mode:
+        case .shift, .delete, .mode, .emojiCategory:
             return UIColor.tertiarySystemFill
         case .space:
             return UIColor.secondarySystemBackground
@@ -4132,6 +4182,8 @@ private final class SecureComposerKeyboard: UIInputView {
         switch key.action {
         case .mode, .space:
             return .systemFont(ofSize: 15, weight: .semibold)
+        case .emojiCategory:
+            return .systemFont(ofSize: 21, weight: .regular)
         default:
             return .systemFont(ofSize: 20, weight: .regular)
         }
@@ -4154,6 +4206,14 @@ private final class SecureComposerKeyboard: UIInputView {
             case .symbols: return "Symbols"
             case .emoji: return "Emoji"
             }
+        case .emojiCategory(let category):
+            switch category {
+            case .recent: return "Recent emoji"
+            case .faces: return "Faces emoji"
+            case .hands: return "Hands emoji"
+            case .symbols: return "Symbols emoji"
+            case .objects: return "Objects emoji"
+            }
         case .input(let value):
             return value
         }
@@ -4173,6 +4233,9 @@ private final class SecureComposerKeyboard: UIInputView {
                 isShifted = false
                 isCapsLocked = false
             }
+            render()
+        case .emojiCategory(let category):
+            emojiCategory = category
             render()
         case .space:
             textView.insertText(" ")
@@ -4227,12 +4290,29 @@ private final class SecureComposerKeyboard: UIInputView {
                 isCurrent = true
             case ("😀", .emoji):
                 isCurrent = true
+            case (emojiCategory.rawValue, .emoji):
+                isCurrent = true
             default:
                 isCurrent = false
             }
             button.configuration?.baseBackgroundColor = isCurrent
                 ? UIColor.tintColor.withAlphaComponent(0.22)
                 : UIColor.tertiarySystemFill
+        }
+    }
+
+    private func pressFeedback(on button: UIButton?) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        UIView.animate(withDuration: 0.06, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            button?.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
+            button?.alpha = 0.82
+        }
+    }
+
+    private func releaseFeedback(on button: UIButton?) {
+        UIView.animate(withDuration: 0.14, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            button?.transform = .identity
+            button?.alpha = 1
         }
     }
 
@@ -4244,7 +4324,19 @@ private final class SecureComposerKeyboard: UIInputView {
 private extension String {
     var containsEmoji: Bool {
         unicodeScalars.contains { scalar in
-            scalar.properties.isEmojiPresentation || scalar.properties.isEmoji
+            scalar.properties.isEmojiPresentation || scalar.value > 0x238C && scalar.properties.isEmoji
+        }
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+
+    func chunked(into size: Int) -> [[Element]] {
+        stride(from: 0, to: count, by: size).map {
+            Array(self[$0..<Swift.min($0 + size, count)])
         }
     }
 }
