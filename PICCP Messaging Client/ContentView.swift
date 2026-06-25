@@ -224,13 +224,35 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         #else
-        // Custom iOS bottom bar to avoid TabView's "More" behavior and keep 6 tabs stable.
-        VStack(spacing: 0) {
-            iosMainContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            IOSBottomBar(selectedTab: iosTabSelection) { tab in
-                iosTabSelection.wrappedValue = tab
+        GeometryReader { proxy in
+            let size = proxy.size
+            let useSideRail = IOSControlMetrics.prefersSideRail(for: size)
+
+            Group {
+                if useSideRail {
+                    HStack(spacing: 0) {
+                        IOSSideRail(selectedTab: iosTabSelection, availableHeight: size.height) { tab in
+                            iosTabSelection.wrappedValue = tab
+                        }
+                        Rectangle()
+                            .fill(Color.white.opacity(0.06))
+                            .frame(width: 0.5)
+                            .ignoresSafeArea(.container, edges: .vertical)
+                        iosMainContent
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                } else {
+                    // Custom iOS bottom bar to avoid TabView's "More" behavior and keep 6 tabs stable.
+                    VStack(spacing: 0) {
+                        iosMainContent
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        IOSBottomBar(selectedTab: iosTabSelection) { tab in
+                            iosTabSelection.wrappedValue = tab
+                        }
+                    }
+                }
             }
+            .frame(width: size.width, height: size.height)
         }
         #endif
     }
@@ -254,38 +276,32 @@ struct ContentView: View {
                     showingCreateGroup = true
                 }
             }
-            .adaptiveReadableContent(maxWidth: 880)
         case .contacts:
             NavigationStack {
                 ContactBookTabView(model: model) {
                     showingAddContact = true
                 }
             }
-            .adaptiveReadableContent(maxWidth: 880)
         case .myCode:
             NavigationStack {
                 MyCodeView(model: model)
             }
             .hideSheetNavigationBar()
-            .adaptiveReadableContent(maxWidth: 880)
         case .relays:
             NavigationStack {
                 RelaysView(model: model)
             }
             .hideSheetNavigationBar()
-            .adaptiveReadableContent(maxWidth: 880)
         case .identity:
             NavigationStack {
                 IdentityManagementView(model: model)
             }
             .hideSheetNavigationBar()
-            .adaptiveReadableContent(maxWidth: 880)
         case .settings:
             NavigationStack {
                 SettingsView(model: model)
             }
             .toolbar(.hidden, for: .navigationBar)
-            .adaptiveReadableContent(maxWidth: 880)
         }
     }
 #endif
@@ -814,6 +830,98 @@ private struct IOSBottomBar: View {
     }
 }
 
+private struct IOSSideRail: View {
+    let selectedTab: Binding<IOSMainTab>
+    let availableHeight: CGFloat
+    let onSelect: (IOSMainTab) -> Void
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var isDark: Bool { colorScheme == .dark }
+    private var compactHeight: Bool { availableHeight < 760 }
+    private var logoSize: CGFloat { compactHeight ? 28 : 42 }
+    private var itemSpacing: CGFloat { compactHeight ? 6 : 10 }
+    private var itemVerticalPadding: CGFloat { compactHeight ? 8 : 12 }
+    private var labelSize: CGFloat { compactHeight ? 13 : 14 }
+    private var iconSize: CGFloat { compactHeight ? 16 : 17 }
+    private var railWidth: CGFloat { compactHeight ? 160 : 176 }
+
+    private var tabs: [(IOSMainTab, String, String)] {
+        [
+            (.chats, "Chats", "message"),
+            (.contacts, "Contacts", "book.closed"),
+            (.myCode, "Code", "qrcode"),
+            (.relays, "Relays", "antenna.radiowaves.left.and.right"),
+            (.identity, "Identity", "person.badge.shield.checkmark"),
+            (.settings, "Settings", "gearshape")
+        ]
+    }
+
+    var body: some View {
+        VStack(spacing: itemSpacing) {
+            Image("Rhombus")
+                .resizable()
+                .scaledToFit()
+                .frame(width: logoSize, height: logoSize)
+                .padding(.bottom, compactHeight ? 2 : 8)
+
+            ForEach(tabs, id: \.0.rawValue) { tab, title, icon in
+                Button {
+                    guard selectedTab.wrappedValue != tab else { return }
+                    onSelect(tab)
+                    FeedbackGenerator.light()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: icon)
+                            .font(.system(size: iconSize, weight: .semibold))
+                            .frame(width: 22)
+                        Text(title)
+                            .font(.system(size: labelSize, weight: .semibold, design: .rounded))
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(selectedTab.wrappedValue == tab ? theme.accent : Color.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, itemVerticalPadding)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(selectedTab.wrappedValue == tab ? theme.accent.opacity(isDark ? 0.18 : 0.12) : Color.clear)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("tab-\(tab.rawValue)")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, compactHeight ? 10 : 12)
+        .padding(.top, compactHeight ? 16 : 24)
+        .padding(.bottom, compactHeight ? 10 : 16)
+        .frame(width: railWidth)
+        .frame(maxHeight: .infinity)
+        .background(
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    Rectangle()
+                        .fill(Color.black.opacity(isDark ? 0.20 : 0.06))
+                )
+                .overlay(
+                    LinearGradient(
+                        colors: [
+                            theme.accent.opacity(isDark ? 0.08 : 0.05),
+                            Color.clear
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .ignoresSafeArea(.container, edges: .vertical)
+        )
+    }
+}
+
 private struct ChatsListView: View {
     private enum ChatSortMode: String, CaseIterable, Identifiable {
         case unread
@@ -917,7 +1025,6 @@ private struct ChatsListView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
                 .padding(.bottom, 6)
-                .adaptiveReadableContent(maxWidth: 860)
 
             if screenProtection.isSensitiveHidden {
                 SensitiveContentPlaceholder(
@@ -1006,7 +1113,6 @@ private struct ChatsListView: View {
                     .padding(.horizontal, 12)
                     .padding(.top, 8)
                     .padding(.bottom, 24)
-                    .adaptiveReadableContent(maxWidth: 860)
                 }
                 .privacySensitive()
             }
@@ -1499,11 +1605,11 @@ private struct ChatTopBar: View {
     private var isRegularWidth: Bool { horizontalSizeClass == .regular }
     private var isPad: Bool { IOSControlMetrics.isPad }
     private var buttonDiameter: CGFloat { isPad ? IOSControlMetrics.circleButtonDiameter : (isRegularWidth ? 58 : 34) }
-    private var titleSize: CGFloat { isPad ? 34 : (isRegularWidth ? 28 : 18) }
-    private var statusSize: CGFloat { isPad ? 20 : (isRegularWidth ? 17 : 12) }
-    private var horizontalPadding: CGFloat { isPad ? 32 : (isRegularWidth ? 24 : 12) }
-    private var verticalPadding: CGFloat { isPad ? 18 : (isRegularWidth ? 14 : 8) }
-    private var barMinHeight: CGFloat { isPad ? 104 : (isRegularWidth ? 84 : 52) }
+    private var titleSize: CGFloat { isPad ? 27 : (isRegularWidth ? 28 : 18) }
+    private var statusSize: CGFloat { isPad ? 15 : (isRegularWidth ? 17 : 12) }
+    private var horizontalPadding: CGFloat { isPad ? 22 : (isRegularWidth ? 24 : 12) }
+    private var verticalPadding: CGFloat { isPad ? 12 : (isRegularWidth ? 14 : 8) }
+    private var barMinHeight: CGFloat { isPad ? 76 : (isRegularWidth ? 84 : 52) }
 
     var body: some View {
         HStack(spacing: isRegularWidth ? 12 : 9) {

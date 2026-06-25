@@ -272,7 +272,7 @@ private struct AdaptiveReadableContentModifier: ViewModifier {
     func body(content: Content) -> some View {
         #if os(iOS)
         ZStack {
-            if availableWidth > 700 {
+            if IOSControlMetrics.isPad && availableWidth > 700 {
                 content
                     .frame(width: min(maxWidth, availableWidth), alignment: alignment)
             } else {

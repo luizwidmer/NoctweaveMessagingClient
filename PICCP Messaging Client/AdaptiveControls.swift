@@ -4,12 +4,16 @@ import SwiftUI
 import UIKit
 
 enum IOSControlMetrics {
-    static let padControlScale: CGFloat = 2.0
-    static let padTextScale: CGFloat = 2.0
-    static let padInsetScale: CGFloat = 2.0
+    static let padControlScale: CGFloat = 1.35
+    static let padTextScale: CGFloat = 1.25
+    static let padInsetScale: CGFloat = 1.35
 
     static var isPad: Bool {
         UIDevice.current.userInterfaceIdiom == .pad
+    }
+
+    static func prefersSideRail(for size: CGSize) -> Bool {
+        isPad && size.width >= 900 && size.width > size.height
     }
 
     static var circleButtonDiameter: CGFloat {
@@ -25,7 +29,7 @@ enum IOSControlMetrics {
     }
 
     static var composerHeight: CGFloat {
-        isPad ? 84 : 42
+        isPad ? 58 : 42
     }
 
     static var tabIconSize: CGFloat {

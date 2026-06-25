@@ -14,6 +14,10 @@ import AppKit
 
 @main
 struct PICCP_Messaging_ClientApp: App {
+    #if os(iOS)
+    @UIApplicationDelegateAdaptor(NoctyraIOSAppDelegate.self) private var appDelegate
+    #endif
+
     #if os(macOS)
     // macOS: create a truly borderless window (no titlebar strip, no traffic lights).
     @NSApplicationDelegateAdaptor(NoctyraAppDelegate.self) private var appDelegate
