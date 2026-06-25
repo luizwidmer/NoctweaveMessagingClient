@@ -1126,9 +1126,14 @@ final class ClientViewModel: ObservableObject {
                     registrationResponse.error ?? "Inbox registration failed."
                 )
             }
+            let wakePolicy = wakeSupport(for: profile.relay)
+            let longPollTimeoutSeconds = wakePolicy?.mode == .longPoll
+                ? wakePolicy?.longPollTimeoutSeconds
+                : nil
             var fetchRequest = FetchRequest(
                 inboxId: profile.inboxId,
-                routingToken: profile.inboxId
+                routingToken: profile.inboxId,
+                longPollTimeoutSeconds: longPollTimeoutSeconds
             )
             let fetchProof = try makeActorProof(
                 fingerprint: CryptoBox.fingerprint(for: inboxAccessKey.publicKeyData),
@@ -1141,10 +1146,12 @@ final class ClientViewModel: ObservableObject {
             fetchRequest = FetchRequest(
                 inboxId: profile.inboxId,
                 routingToken: profile.inboxId,
+                longPollTimeoutSeconds: longPollTimeoutSeconds,
                 accessProof: fetchProof
             )
             let response = try await client.send(
-                .fetch(fetchRequest)
+                .fetch(fetchRequest),
+                timeout: relayFetchTimeoutSeconds(longPollTimeoutSeconds: longPollTimeoutSeconds)
             )
             guard response.type == .messages else {
                 if let error = response.error {
@@ -4797,6 +4804,10 @@ final class ClientViewModel: ObservableObject {
 
     private func wakeRelayIdentifier(for relay: RelayEndpoint) -> String {
         "\(relay.transport.rawValue):\(relay.useTLS ? "tls" : "plain"):\(quotaRelayKey(relay))"
+    }
+
+    private func relayFetchTimeoutSeconds(longPollTimeoutSeconds: Int?) -> TimeInterval {
+        RelayClient.defaultTimeout + TimeInterval(max(0, longPollTimeoutSeconds ?? 0))
     }
 
     private func recordWakeSyncSuccess(for profileId: UUID) {
