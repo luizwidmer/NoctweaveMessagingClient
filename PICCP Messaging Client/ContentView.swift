@@ -3783,7 +3783,10 @@ private struct UIKitMessageInput: UIViewRepresentable {
         view.autocapitalizationType = secureTypingEnabled ? .none : .sentences
         view.smartQuotesType = secureTypingEnabled ? .no : .default
         view.smartDashesType = secureTypingEnabled ? .no : .default
-        view.textContentType = secureTypingEnabled ? .none : nil
+        view.textContentType = secureTypingEnabled ? .oneTimeCode : nil
+        view.passwordRules = nil
+        view.inputAssistantItem.leadingBarButtonGroups = []
+        view.inputAssistantItem.trailingBarButtonGroups = []
     }
 
     func makeCoordinator() -> Coordinator {

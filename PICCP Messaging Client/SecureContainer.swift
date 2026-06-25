@@ -212,6 +212,14 @@ private final class SecureContainerController<Content: View>: UIViewController {
         secureField.tintColor = .clear
         secureField.backgroundColor = .clear
         secureField.borderStyle = .none
+        secureField.textContentType = .oneTimeCode
+        secureField.autocorrectionType = .no
+        secureField.spellCheckingType = .no
+        secureField.autocapitalizationType = .none
+        secureField.smartQuotesType = .no
+        secureField.smartDashesType = .no
+        secureField.inputAssistantItem.leadingBarButtonGroups = []
+        secureField.inputAssistantItem.trailingBarButtonGroups = []
         secureField.isOpaque = false
         secureField.accessibilityElementsHidden = true
         secureField.isUserInteractionEnabled = true
