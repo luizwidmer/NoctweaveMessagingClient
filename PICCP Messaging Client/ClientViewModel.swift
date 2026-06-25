@@ -5036,75 +5036,10 @@ final class ClientViewModel: ObservableObject {
         identity: Identity,
         existing: GroupRatchetState? = nil
     ) -> GroupRatchetState? {
-        let history = descriptor.mlsEpochHistory
-            .sorted { $0.epoch < $1.epoch }
-            .filter { $0.ratchetSecretDistribution != nil }
-        if var state = existing,
-           state.groupId == descriptor.id {
-            for commit in history where commit.epoch > state.epoch {
-                guard let distribution = commit.ratchetSecretDistribution,
-                      let secret = try? distribution.openSecret(
-                        recipientFingerprint: identity.fingerprint,
-                        agreementKey: identity.agreementKey
-                      ),
-                      (try? state.advanceEpoch(
-                        to: commit.epoch,
-                        transcriptHash: commit.transcriptHash,
-                        commitSecret: secret
-                      )) != nil else {
-                    return state.epoch == descriptor.epoch ? state : existing
-                }
-            }
-            return state.epoch == descriptor.epoch ? state : existing
-        }
-
-        if let first = history.first,
-           first.epoch == 0,
-           let distribution = first.ratchetSecretDistribution,
-           let secret = try? distribution.openSecret(
-            recipientFingerprint: identity.fingerprint,
-            agreementKey: identity.agreementKey
-           ) {
-            var state = GroupRatchetState.initialize(
-                groupId: descriptor.id,
-                epoch: first.epoch,
-                transcriptHash: first.transcriptHash,
-                groupSecret: secret,
-                localSenderFingerprint: identity.fingerprint
-            )
-            for commit in history.dropFirst() {
-                guard let distribution = commit.ratchetSecretDistribution,
-                      let secret = try? distribution.openSecret(
-                        recipientFingerprint: identity.fingerprint,
-                        agreementKey: identity.agreementKey
-                      ),
-                      (try? state.advanceEpoch(
-                        to: commit.epoch,
-                        transcriptHash: commit.transcriptHash,
-                        commitSecret: secret
-                      )) != nil else {
-                    return nil
-                }
-            }
-            if state.epoch == descriptor.epoch {
-                return state
-            }
-        }
-
-        guard let distribution = descriptor.mlsEpochState.lastCommit.ratchetSecretDistribution,
-              distribution.epoch == descriptor.epoch,
-              let secret = try? distribution.openSecret(
-                recipientFingerprint: identity.fingerprint,
-                agreementKey: identity.agreementKey
-              ) else {
-            return existing
-        }
-        return GroupRatchetState.initialize(
-            groupId: descriptor.id,
-            epoch: descriptor.epoch,
-            transcriptHash: descriptor.mlsEpochState.confirmedTranscriptHash,
-            groupSecret: secret,
-            localSenderFingerprint: identity.fingerprint
+        GroupRatchetRecovery.state(
+            from: descriptor,
+            identity: identity,
+            existing: existing
         )
     }
 
