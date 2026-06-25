@@ -9729,6 +9729,16 @@ private struct RelayServerRow: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+            if let wakeSupport = info.wakeSupport {
+                Text("Wake policy: \(wakePolicyLabel(wakeSupport))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            } else {
+                Text("Wake policy: local polling defaults")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             if info.attachmentsEnabled == false {
                 Text("Media policy: text-only")
                     .font(.caption2)
@@ -9971,6 +9981,34 @@ private struct RelayServerRow: View {
         case .disabled:
             return "Disabled"
         }
+    }
+
+    private func wakePolicyLabel(_ support: DecentralizedWakeSupport) -> String {
+        let interval = "\(formatWakeDuration(support.minPollIntervalSeconds))-\(formatWakeDuration(support.maxPollIntervalSeconds))"
+        let jitter = support.jitterPermille == 0
+            ? "no jitter"
+            : "\(support.jitterPermille / 10)% jitter"
+        switch support.mode {
+        case .pullOnly:
+            return "pull-only, \(interval), \(jitter)"
+        case .longPoll:
+            let timeout = support.longPollTimeoutSeconds.map(formatWakeDuration) ?? "default timeout"
+            return "long-poll, \(interval), timeout \(timeout), \(jitter)"
+        }
+    }
+
+    private func formatWakeDuration(_ seconds: Int) -> String {
+        if seconds < 60 {
+            return "\(seconds)s"
+        }
+        if seconds < 3600 {
+            return seconds % 60 == 0
+                ? "\(seconds / 60)m"
+                : String(format: "%.1fm", Double(seconds) / 60.0)
+        }
+        return seconds % 3600 == 0
+            ? "\(seconds / 3600)h"
+            : String(format: "%.1fh", Double(seconds) / 3600.0)
     }
 
     private func formatBucket(_ seconds: Int) -> String {
