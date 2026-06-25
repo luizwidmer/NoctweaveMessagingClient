@@ -1282,6 +1282,14 @@ final class ClientViewModel: ObservableObject {
                                 title: groupPayload.groupTitle,
                                 memberContactIds: [contact.id]
                             )
+                        guard let groupContext = validatedGroupMessageContext(
+                            envelope.authenticatedContext,
+                            payload: groupPayload,
+                            sender: contact,
+                            knownGroup: group
+                        ) else {
+                            throw CryptoError.invalidPayload
+                        }
                         if group.messages.isEmpty {
                             group.messages = storedGroupMessages(profileId: profile.id, groupId: group.id)
                         }
@@ -1296,6 +1304,10 @@ final class ClientViewModel: ObservableObject {
                             }
                         }
                         group.memberContactIds = Array(memberIds)
+                        if (group.relayEpoch ?? 0) <= groupContext.epoch {
+                            group.relayEpoch = groupContext.epoch
+                            group.relayTranscriptHash = groupContext.transcriptHash
+                        }
                         let message = Message(
                             direction: .received,
                             senderDisplayName: contact.displayName,
@@ -1635,6 +1647,7 @@ final class ClientViewModel: ObservableObject {
                     merged.memberContactIds = contactIds(for: descriptor.members.map { $0.fingerprint })
                     merged.relayInboxId = descriptor.inboxId
                     merged.relayEpoch = descriptor.epoch
+                    merged.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
                     merged.createdByFingerprint = descriptor.createdByFingerprint
                     state.upsert(group: merged)
                 } else {
@@ -2286,6 +2299,7 @@ final class ClientViewModel: ObservableObject {
             memberContactIds: validMembers,
             relayInboxId: relayGroup.inboxId,
             relayEpoch: relayGroup.epoch,
+            relayTranscriptHash: relayGroup.mlsEpochState.confirmedTranscriptHash,
             createdByFingerprint: relayGroup.createdByFingerprint
         )
         state.upsert(group: group)
@@ -2360,6 +2374,7 @@ final class ClientViewModel: ObservableObject {
                 group.memberContactIds = contactIds(for: descriptor.members.map(\.fingerprint))
                 group.relayInboxId = descriptor.inboxId
                 group.relayEpoch = descriptor.epoch
+                group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
                 group.createdByFingerprint = descriptor.createdByFingerprint
                 state.upsert(group: group)
                 await save()
@@ -2540,6 +2555,13 @@ final class ClientViewModel: ObservableObject {
             lastError = "This group has no valid members."
             return
         }
+        let authenticatedContext: MessageAuthenticatedContext
+        do {
+            authenticatedContext = try await makeGroupAuthenticatedContext(forSending: &group)
+        } catch {
+            lastError = "Failed to prepare group security context: \(error.localizedDescription)"
+            return
+        }
         let encodedBody: String
         do {
             let memberFingerprints = members.map(\.fingerprint)
@@ -2558,7 +2580,12 @@ final class ClientViewModel: ObservableObject {
         var firstError: String?
         for contact in members {
             do {
-                let prepared = try await prepareGroupPayloadEnvelope(encodedBody, to: contact, forceNewSession: false)
+                let prepared = try await prepareGroupPayloadEnvelope(
+                    encodedBody,
+                    authenticatedContext: authenticatedContext,
+                    to: contact,
+                    forceNewSession: false
+                )
                 state.upsert(conversation: prepared.conversation)
                 try await persistState()
                 try await deliverEnvelope(prepared.envelope, to: contact, preferredRelay: state.relay)
@@ -2574,7 +2601,12 @@ final class ClientViewModel: ObservableObject {
                     )
                 }
                 do {
-                    let prepared = try await prepareGroupPayloadEnvelope(encodedBody, to: contact, forceNewSession: true)
+                    let prepared = try await prepareGroupPayloadEnvelope(
+                        encodedBody,
+                        authenticatedContext: authenticatedContext,
+                        to: contact,
+                        forceNewSession: true
+                    )
                     state.upsert(conversation: prepared.conversation)
                     try await persistState()
                     try await deliverEnvelope(prepared.envelope, to: contact, preferredRelay: state.relay)
@@ -2610,6 +2642,7 @@ final class ClientViewModel: ObservableObject {
 
     private func prepareGroupPayloadEnvelope(
         _ payload: String,
+        authenticatedContext: MessageAuthenticatedContext,
         to contact: Contact,
         forceNewSession: Bool
     ) async throws -> (conversation: Conversation, envelope: Envelope) {
@@ -2623,11 +2656,63 @@ final class ClientViewModel: ObservableObject {
             conversation: &conversation,
             kemCiphertext: session.kemCiphertext,
             prekey: session.prekey,
-            rootRatchet: rootRatchet?.ratchet
+            rootRatchet: rootRatchet?.ratchet,
+            authenticatedContext: authenticatedContext
         )
         conversation.markMessageProcessed()
         applyRootRatchetIfNeeded(rootRatchet, contact: contact, conversation: &conversation)
         return (conversation, envelope)
+    }
+
+    private func makeGroupAuthenticatedContext(forSending group: inout GroupConversation) async throws -> MessageAuthenticatedContext {
+        if group.relayInboxId != nil,
+           let descriptor = try await fetchRelayGroup(groupId: group.id, relay: state.relay) {
+            group.title = descriptor.title
+            group.memberContactIds = contactIds(for: descriptor.members.map(\.fingerprint))
+            group.relayInboxId = descriptor.inboxId
+            group.relayEpoch = descriptor.epoch
+            group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
+            group.createdByFingerprint = descriptor.createdByFingerprint
+        }
+        let epoch = group.relayEpoch ?? 0
+        let transcriptHash = group.relayTranscriptHash ?? localGroupTranscriptHash(group)
+        return .group(
+            groupId: group.id,
+            epoch: epoch,
+            senderFingerprint: state.identity.fingerprint,
+            transcriptHash: transcriptHash
+        )
+    }
+
+    private func validatedGroupMessageContext(
+        _ context: MessageAuthenticatedContext?,
+        payload: GroupTransportPayload,
+        sender: Contact,
+        knownGroup: GroupConversation?
+    ) -> GroupMessageAuthenticatedContext? {
+        guard context?.purpose == .group,
+              let groupContext = context?.group,
+              groupContext.groupId == payload.groupId,
+              groupContext.senderFingerprint == sender.fingerprint else {
+            return nil
+        }
+        if let knownGroup,
+           knownGroup.relayEpoch == groupContext.epoch,
+           let knownTranscriptHash = knownGroup.relayTranscriptHash,
+           knownTranscriptHash != groupContext.transcriptHash {
+            return nil
+        }
+        return groupContext
+    }
+
+    private func localGroupTranscriptHash(_ group: GroupConversation) -> Data {
+        var payload = Data("NOCTYRA-LOCAL-GROUP-TRANSCRIPT-V1".utf8)
+        payload.append(Data(group.id.uuidString.utf8))
+        payload.append(Data(group.title.utf8))
+        for memberId in group.memberContactIds.map(\.uuidString).sorted() {
+            payload.append(Data(memberId.utf8))
+        }
+        return Data(SHA256.hash(data: payload))
     }
 
     func removeContact(id: UUID) async {
@@ -4453,6 +4538,7 @@ final class ClientViewModel: ObservableObject {
                 memberContactIds: contactIds(for: memberFingerprints, contacts: profile.contacts),
                 relayInboxId: descriptor.inboxId,
                 relayEpoch: descriptor.epoch,
+                relayTranscriptHash: descriptor.mlsEpochState.confirmedTranscriptHash,
                 createdByFingerprint: descriptor.createdByFingerprint,
                 createdAt: descriptor.createdAt
             )
@@ -4460,6 +4546,7 @@ final class ClientViewModel: ObservableObject {
             merged.memberContactIds = contactIds(for: memberFingerprints, contacts: profile.contacts)
             merged.relayInboxId = descriptor.inboxId
             merged.relayEpoch = descriptor.epoch
+            merged.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
             merged.createdByFingerprint = descriptor.createdByFingerprint
             return merged
         }
