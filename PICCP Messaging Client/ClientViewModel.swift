@@ -1572,6 +1572,8 @@ final class ClientViewModel: ObservableObject {
                 }
             }
             try await fetchRelayGroupMessages(for: &profile)
+            state.updateIdentityProfile(profile)
+            try await persistState()
             if profile.prekeys.oneTimePrekeys.count < prekeyMinimumCount {
                 await ensurePrekeys(for: profileId)
             }
@@ -2910,6 +2912,7 @@ final class ClientViewModel: ObservableObject {
         updatedGroup.groupRatchetState = ratchetState
         updatedGroup.messages.append(
             Message(
+                id: envelope.id,
                 direction: .sent,
                 senderDisplayName: state.identity.displayName,
                 body: text,

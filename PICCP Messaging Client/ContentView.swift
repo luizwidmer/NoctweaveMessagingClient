@@ -474,7 +474,7 @@ struct ContentView: View {
                     ForEach(model.state.contacts) { contact in
                         MacSidebarRow(
                             title: contact.displayName,
-                            subtitle: contact.isTrusted ? "Verified contact" : "Verification pending",
+                            subtitle: "Secure chat",
                             systemImage: "person.circle",
                             unreadCount: unreadCount(for: contact),
                             isSelected: selection == .contact(contact.id)
@@ -1399,14 +1399,12 @@ private struct ChatsListView: View {
     private func previewText(for message: PICCPCore.Message?) -> String {
         guard let message else { return "No messages yet" }
         if message.isMismatch {
-            return "Mismatch detected"
+            return "Delivery sync pending"
         }
         if message.attachment != nil {
-            return message.direction == .sent ? "You sent an attachment" : "Attachment received"
+            return message.direction == .sent ? "Attachment sent" : "Attachment received"
         }
-        let trimmed = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "Empty message" }
-        return trimmed
+        return message.direction == .sent ? "Message sent" : "Message received"
     }
 
     private static let chatTimeFormatter: DateFormatter = {
