@@ -1538,6 +1538,7 @@ final class ClientViewModel: ObservableObject {
                     )
                 }
             }
+            try await fetchRelayGroupMessages(for: &profile)
             if profile.prekeys.oneTimePrekeys.count < prekeyMinimumCount {
                 await ensurePrekeys(for: profileId)
             }
@@ -1547,6 +1548,173 @@ final class ClientViewModel: ObservableObject {
             lastError = "Failed to fetch messages: \(error.localizedDescription)"
             profileSyncStatus[profileId] = .error(Date(), error.localizedDescription)
             recordWakeSyncFailure(for: profileId)
+        }
+    }
+
+    private func fetchRelayGroupMessages(for profile: inout IdentityProfile) async throws {
+        for index in profile.groups.indices {
+            var group = profile.groups[index]
+            guard let groupInboxId = group.relayInboxId else {
+                continue
+            }
+            guard let descriptor = try await fetchRelayGroup(
+                groupId: group.id,
+                relay: profile.relay,
+                memberFingerprint: profile.identity.fingerprint,
+                signingKey: profile.identity.signingKey,
+                publicSigningKey: profile.identity.signingKey.publicKeyData
+            ) else {
+                continue
+            }
+            group.title = descriptor.title
+            group.memberContactIds = contactIds(for: descriptor.members.map(\.fingerprint), contacts: profile.contacts)
+            group.relayInboxId = descriptor.inboxId
+            group.relayEpoch = descriptor.epoch
+            group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
+            group.createdByFingerprint = descriptor.createdByFingerprint
+            group.groupRatchetState = groupRatchetState(
+                from: descriptor,
+                identity: profile.identity,
+                existing: group.groupRatchetState
+            )
+            guard group.relayInboxId == groupInboxId,
+                  var ratchetState = group.groupRatchetState else {
+                profile.groups[index] = group
+                continue
+            }
+            if group.messages.isEmpty {
+                group.messages = storedGroupMessages(profileId: profile.id, groupId: group.id)
+            }
+            var fetchRequest = FetchGroupMessagesRequest(
+                groupId: group.id,
+                groupInboxId: groupInboxId,
+                actorFingerprint: profile.identity.fingerprint
+            )
+            let fetchProof = try makeActorProof(
+                fingerprint: profile.identity.fingerprint,
+                signingKey: profile.identity.signingKey,
+                publicSigningKey: profile.identity.signingKey.publicKeyData
+            ) { proof in
+                try fetchRequest.signableData(for: proof)
+            }
+            fetchRequest = FetchGroupMessagesRequest(
+                groupId: group.id,
+                groupInboxId: groupInboxId,
+                actorFingerprint: profile.identity.fingerprint,
+                actorProof: fetchProof
+            )
+            let response = try await relayClient(for: profile.relay).send(.fetchGroupMessages(fetchRequest))
+            guard response.type == .groupMessages else {
+                if let error = response.error {
+                    lastError = "Relay group message error: \(error)"
+                }
+                profile.groups[index] = group
+                continue
+            }
+            var acknowledgedIds = Set<UUID>()
+            for envelope in response.groupMessages ?? [] {
+                if envelope.senderFingerprint == profile.identity.fingerprint {
+                    acknowledgedIds.insert(envelope.id)
+                    continue
+                }
+                if group.messages.contains(where: { $0.id == envelope.id }) {
+                    acknowledgedIds.insert(envelope.id)
+                    continue
+                }
+                if envelope.epoch < ratchetState.epoch {
+                    acknowledgedIds.insert(envelope.id)
+                    continue
+                }
+                guard envelope.epoch == ratchetState.epoch,
+                      envelope.transcriptHash == ratchetState.transcriptHash,
+                      let sender = descriptor.members.first(where: { $0.fingerprint == envelope.senderFingerprint }),
+                      let senderSigningKey = sender.signingPublicKey else {
+                    continue
+                }
+                do {
+                    let body = try GroupRatchet.decrypt(
+                        envelope: envelope,
+                        senderPublicSigningKey: senderSigningKey,
+                        state: &ratchetState
+                    )
+                    switch body {
+                    case .text(let text):
+                        group.messages.append(
+                            Message(
+                                id: envelope.id,
+                                direction: .received,
+                                senderDisplayName: sender.displayName,
+                                body: text,
+                                timestamp: envelope.sentAt,
+                                counter: envelope.messageCounter
+                            )
+                        )
+                        if activeGroupId != group.id {
+                            group.unreadCount += 1
+                            notifier.notify(title: group.title, body: "\(sender.displayName ?? "Group member"): \(text)")
+                        }
+                        lastInfo = "Received group message."
+                        acknowledgedIds.insert(envelope.id)
+                    case .attachment(let descriptor):
+                        let title = attachmentDisplayTitle(descriptor, fallback: "Attachment received")
+                        group.messages.append(
+                            Message(
+                                id: envelope.id,
+                                direction: .received,
+                                senderDisplayName: sender.displayName,
+                                body: title,
+                                timestamp: envelope.sentAt,
+                                counter: envelope.messageCounter,
+                                attachment: AttachmentInfo(descriptor: descriptor, localFileName: nil)
+                            )
+                        )
+                        if activeGroupId != group.id {
+                            group.unreadCount += 1
+                            notifier.notify(title: group.title, body: "\(sender.displayName ?? "Group member"): \(title)")
+                        }
+                        lastInfo = "Received group attachment."
+                        acknowledgedIds.insert(envelope.id)
+                    default:
+                        acknowledgedIds.insert(envelope.id)
+                    }
+                } catch {
+                    if envelope.epoch < ratchetState.epoch {
+                        acknowledgedIds.insert(envelope.id)
+                    }
+                }
+            }
+            group.groupRatchetState = ratchetState
+            profile.groups[index] = group
+            if !acknowledgedIds.isEmpty {
+                var acknowledgement = AcknowledgeGroupMessagesRequest(
+                    groupId: group.id,
+                    groupInboxId: groupInboxId,
+                    messageIds: Array(acknowledgedIds),
+                    actorFingerprint: profile.identity.fingerprint
+                )
+                let ackProof = try makeActorProof(
+                    fingerprint: profile.identity.fingerprint,
+                    signingKey: profile.identity.signingKey,
+                    publicSigningKey: profile.identity.signingKey.publicKeyData
+                ) { proof in
+                    try acknowledgement.signableData(for: proof)
+                }
+                acknowledgement = AcknowledgeGroupMessagesRequest(
+                    groupId: group.id,
+                    groupInboxId: groupInboxId,
+                    messageIds: Array(acknowledgedIds),
+                    actorFingerprint: profile.identity.fingerprint,
+                    actorProof: ackProof
+                )
+                let acknowledgementResponse = try await relayClient(for: profile.relay).send(
+                    .acknowledgeGroupMessages(acknowledgement)
+                )
+                guard acknowledgementResponse.type == .ok else {
+                    throw RelayMailboxError.rejected(
+                        acknowledgementResponse.error ?? "Group message acknowledgement failed."
+                    )
+                }
+            }
         }
     }
 
@@ -2554,6 +2722,20 @@ final class ClientViewModel: ObservableObject {
             lastError = "Group not found."
             return
         }
+        do {
+            _ = try await makeGroupAuthenticatedContext(forSending: &group)
+        } catch {
+            lastError = "Failed to prepare group security context: \(error.localizedDescription)"
+            return
+        }
+        if group.relayInboxId != nil, group.groupRatchetState != nil {
+            do {
+                try await sendRelayGroupRatchetMessage(trimmed, group: group)
+            } catch {
+                lastError = "Failed to send group message: \(error.localizedDescription)"
+            }
+            return
+        }
         let members = group.memberContactIds.compactMap { id in
             state.contacts.first(where: { $0.id == id })
         }
@@ -2561,13 +2743,12 @@ final class ClientViewModel: ObservableObject {
             lastError = "This group has no valid members."
             return
         }
-        let authenticatedContext: MessageAuthenticatedContext
-        do {
-            authenticatedContext = try await makeGroupAuthenticatedContext(forSending: &group)
-        } catch {
-            lastError = "Failed to prepare group security context: \(error.localizedDescription)"
-            return
-        }
+        let authenticatedContext = MessageAuthenticatedContext.group(
+            groupId: group.id,
+            epoch: group.relayEpoch ?? 0,
+            senderFingerprint: state.identity.fingerprint,
+            transcriptHash: group.relayTranscriptHash ?? localGroupTranscriptHash(group)
+        )
         let encodedBody: String
         do {
             let memberFingerprints = members.map(\.fingerprint)
@@ -2643,6 +2824,48 @@ final class ClientViewModel: ObservableObject {
         state.upsert(group: group)
         await save()
 
+        lastInfo = "Sent group message."
+    }
+
+    private func sendRelayGroupRatchetMessage(_ text: String, group: GroupConversation) async throws {
+        guard let groupInboxId = group.relayInboxId,
+              var ratchetState = group.groupRatchetState else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+        let envelope = try GroupRatchet.encrypt(
+            body: .text(text),
+            senderSigningKey: state.identity.signingKey,
+            senderFingerprint: state.identity.fingerprint,
+            state: &ratchetState
+        )
+        let response = try await relayClient(for: state.relay).send(
+            .deliverGroupMessage(
+                DeliverGroupMessageRequest(
+                    groupId: group.id,
+                    groupInboxId: groupInboxId,
+                    envelope: envelope
+                )
+            )
+        )
+        guard response.type == .delivered else {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected group message.")
+        }
+        var updatedGroup = group
+        if updatedGroup.messages.isEmpty {
+            updatedGroup.messages = storedGroupMessages(profileId: state.activeIdentityId, groupId: group.id)
+        }
+        updatedGroup.groupRatchetState = ratchetState
+        updatedGroup.messages.append(
+            Message(
+                direction: .sent,
+                senderDisplayName: state.identity.displayName,
+                body: text,
+                timestamp: envelope.sentAt,
+                counter: envelope.messageCounter
+            )
+        )
+        state.upsert(group: updatedGroup)
+        await save()
         lastInfo = "Sent group message."
     }
 
