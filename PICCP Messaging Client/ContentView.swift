@@ -135,10 +135,7 @@ struct ContentView: View {
                 .padding(.top, 12)
         }
         #endif
-        // Noir is meant to be a privacy-forward baseline even if the system is in Light mode.
-        .applyIf(model.state.appearance.theme == .noir) { view in
-            view.preferredColorScheme(.dark)
-        }
+        .preferredColorScheme(themeStyle.preferredColorScheme)
         .environment(\.appTheme, themeStyle)
         .tint(themeStyle.accent)
         .environmentObject(screenProtection)
@@ -10461,9 +10458,9 @@ private struct GlassCardBacking: View {
         let isDark = (colorScheme == .dark)
         let opacity: Double = {
             if isDark {
-                return theme.palette == .noir ? 0.28 : 0.18
+                return theme.basePalette == .noir ? 0.28 : 0.18
             }
-            return theme.palette == .noir ? 0.12 : 0.06
+            return theme.basePalette == .noir ? 0.12 : 0.06
         }()
         return RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             .fill(Color.black.opacity(opacity))

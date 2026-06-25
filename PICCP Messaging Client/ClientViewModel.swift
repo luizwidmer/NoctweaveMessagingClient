@@ -1589,6 +1589,7 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func fetchRelayGroupMessages(for profile: inout IdentityProfile) async throws {
+        var missingRelayGroupIds = Set<UUID>()
         for index in profile.groups.indices {
             var group = profile.groups[index]
             guard let groupInboxId = group.relayInboxId else {
@@ -1601,6 +1602,7 @@ final class ClientViewModel: ObservableObject {
                 signingKey: profile.identity.signingKey,
                 publicSigningKey: profile.identity.signingKey.publicKeyData
             ) else {
+                missingRelayGroupIds.insert(group.id)
                 continue
             }
             group.title = descriptor.title
@@ -1832,6 +1834,22 @@ final class ClientViewModel: ObservableObject {
                     )
                 }
             }
+        }
+        if !missingRelayGroupIds.isEmpty {
+            for group in profile.groups where missingRelayGroupIds.contains(group.id) {
+                let messages = group.messages.isEmpty
+                    ? storedGroupMessages(profileId: profile.id, groupId: group.id)
+                    : group.messages
+                removeAttachmentFiles(from: messages)
+                try? threadMessageStore.deleteGroupMessages(profileId: profile.id, groupId: group.id)
+            }
+            profile.groups.removeAll { missingRelayGroupIds.contains($0.id) }
+            if profile.id == state.activeIdentityId,
+               let activeGroupId,
+               missingRelayGroupIds.contains(activeGroupId) {
+                self.activeGroupId = nil
+            }
+            lastInfo = "Removed deleted relay group."
         }
     }
 
@@ -4849,8 +4867,15 @@ final class ClientViewModel: ObservableObject {
         let localOnlyGroups = profile.groups.filter { $0.relayInboxId == nil }
         let existingById = Dictionary(uniqueKeysWithValues: profile.groups.map { ($0.id, $0) })
         let descriptorIds = Set(descriptors.map(\.id))
-        let preservedRelayGroups = profile.groups.filter { group in
+        let staleRelayGroups = profile.groups.filter { group in
             group.relayInboxId != nil && !descriptorIds.contains(group.id)
+        }
+        for group in staleRelayGroups {
+            let messages = group.messages.isEmpty
+                ? storedGroupMessages(profileId: profile.id, groupId: group.id)
+                : group.messages
+            removeAttachmentFiles(from: messages)
+            try? threadMessageStore.deleteGroupMessages(profileId: profile.id, groupId: group.id)
         }
         let relayBackedGroups = descriptors.map { descriptor -> GroupConversation in
             let memberFingerprints = normalizedRelayMemberFingerprints(
@@ -4883,9 +4908,6 @@ final class ClientViewModel: ObservableObject {
 
         var mergedById: [UUID: GroupConversation] = [:]
         for group in localOnlyGroups {
-            mergedById[group.id] = group
-        }
-        for group in preservedRelayGroups {
             mergedById[group.id] = group
         }
         for group in relayBackedGroups {

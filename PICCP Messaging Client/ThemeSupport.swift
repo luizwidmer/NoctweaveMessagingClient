@@ -3,6 +3,9 @@ import PICCPCore
 
 struct ThemeStyle: Equatable {
     let palette: ThemePalette
+    let family: ThemePaletteFamily
+    let basePalette: ThemePalette
+    let preferredColorScheme: ColorScheme
     let backgroundTint: Color
     let glowPrimary: Color
     let glowSecondary: Color
@@ -13,7 +16,10 @@ struct ThemeStyle: Equatable {
 
     init(palette: ThemePalette) {
         self.palette = palette
-        switch palette {
+        self.family = palette.family
+        self.basePalette = palette.basePalette
+        self.preferredColorScheme = palette.isDarkVariant ? .dark : .light
+        switch palette.family {
         case .glacier:
             backgroundTint = Color.blue.opacity(0.12)
             glowPrimary = Color.cyan
@@ -227,7 +233,7 @@ struct GlassBackground: View {
             GlowSpec(color: color, size: size, blur: blur, x: x, y: y, opacity: opacity)
         }
 
-        switch theme.palette {
+        switch theme.family {
         case .glacier:
             return BackgroundRecipe(
                 stops: baseStops + [Color.white.opacity(isDarkMode ? 0.04 : 0.02)],

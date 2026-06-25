@@ -14,9 +14,9 @@ private enum GlassBacking {
         let isDark = (colorScheme == .dark)
         let baseOpacity: Double = {
             if isDark {
-                return theme.palette == .noir ? 0.36 : 0.24
+                return theme.basePalette == .noir ? 0.36 : 0.24
             }
-            return theme.palette == .noir ? 0.15 : 0.09
+            return theme.basePalette == .noir ? 0.15 : 0.09
         }()
         return Color.black.opacity(baseOpacity)
     }
@@ -33,7 +33,7 @@ struct GlassButtonStyle: ButtonStyle {
     private var verticalPadding: CGFloat {
         let base: CGFloat = size == .compact ? 6 : 8
         #if os(iOS)
-        return IOSControlMetrics.isPad ? base * IOSControlMetrics.padInsetScale : base
+        return IOSControlMetrics.isPad ? base * 1.15 : base
         #else
         return base
         #endif
@@ -42,14 +42,14 @@ struct GlassButtonStyle: ButtonStyle {
     private var horizontalPadding: CGFloat {
         let base: CGFloat = size == .compact ? 12 : 14
         #if os(iOS)
-        return IOSControlMetrics.isPad ? base * IOSControlMetrics.padInsetScale : base
+        return IOSControlMetrics.isPad ? base * 1.2 : base
         #else
         return base
         #endif
     }
 
     private var ipadLabelFontSize: CGFloat {
-        size == .compact ? 24 : 28
+        size == .compact ? 18 : 20
     }
 
     func makeBody(configuration: Configuration) -> some View {
@@ -59,6 +59,9 @@ struct GlassButtonStyle: ButtonStyle {
             #if os(iOS)
             .font(IOSControlMetrics.isPad ? .system(size: ipadLabelFontSize, weight: .semibold, design: .rounded) : nil)
             #endif
+            .lineLimit(1)
+            .minimumScaleFactor(0.72)
+            .multilineTextAlignment(.center)
             .padding(.vertical, verticalPadding)
             .padding(.horizontal, horizontalPadding)
             .background(
