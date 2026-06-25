@@ -3956,6 +3956,8 @@ private final class SecureComposerKeyboard: UIInputView {
     private var mode: KeyboardMode = .letters
     private var emojiCategory: EmojiCategory = .recent
     private var lastShiftTap: Date?
+    private var deleteRepeatTimer: Timer?
+    private weak var keyPreviewView: UIView?
 
     init() {
         super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 292), inputViewStyle: .keyboard)
@@ -4147,11 +4149,17 @@ private final class SecureComposerKeyboard: UIInputView {
         }
 
         button.addAction(UIAction { [weak self, weak button] _ in
-            guard let self else { return }
-            self.pressFeedback(on: button)
+            guard let self, let button else { return }
+            self.pressFeedback(on: button, key: key)
         }, for: .touchDown)
-        button.addAction(UIAction { [weak self] _ in
-            self?.handle(key.action)
+        button.addAction(UIAction { [weak self, weak button] _ in
+            guard let self else { return }
+            if case .delete = key.action {
+                self.stopDeleteRepeat()
+            } else {
+                self.handle(key.action)
+            }
+            self.releaseFeedback(on: button)
         }, for: .touchUpInside)
         button.addAction(UIAction { [weak self, weak button] _ in
             self?.releaseFeedback(on: button)
@@ -4225,8 +4233,7 @@ private final class SecureComposerKeyboard: UIInputView {
         case .shift:
             handleShift()
         case .delete:
-            textView.deleteBackward()
-            notifyChanged(textView)
+            deleteBackward()
         case .mode(let newMode):
             mode = newMode
             if mode != .letters {
@@ -4253,6 +4260,12 @@ private final class SecureComposerKeyboard: UIInputView {
                 refreshModeButtons()
             }
         }
+    }
+
+    private func deleteBackward() {
+        guard let textView else { return }
+        textView.deleteBackward()
+        notifyChanged(textView)
     }
 
     private func handleShift() {
@@ -4301,18 +4314,97 @@ private final class SecureComposerKeyboard: UIInputView {
         }
     }
 
-    private func pressFeedback(on button: UIButton?) {
+    private func pressFeedback(on button: UIButton, key: Key) {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        showKeyPreview(for: key, from: button)
+        if case .delete = key.action {
+            deleteBackward()
+            startDeleteRepeat()
+        }
         UIView.animate(withDuration: 0.06, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
-            button?.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
-            button?.alpha = 0.82
+            button.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
+            button.alpha = 0.82
         }
     }
 
     private func releaseFeedback(on button: UIButton?) {
+        stopDeleteRepeat()
+        dismissKeyPreview()
         UIView.animate(withDuration: 0.14, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
             button?.transform = .identity
             button?.alpha = 1
+        }
+    }
+
+    private func startDeleteRepeat() {
+        stopDeleteRepeat()
+        deleteRepeatTimer = Timer.scheduledTimer(withTimeInterval: 0.42, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.deleteRepeatTimer = Timer.scheduledTimer(withTimeInterval: 0.065, repeats: true) { [weak self] _ in
+                self?.deleteBackward()
+            }
+        }
+    }
+
+    private func stopDeleteRepeat() {
+        deleteRepeatTimer?.invalidate()
+        deleteRepeatTimer = nil
+    }
+
+    private func showKeyPreview(for key: Key, from button: UIButton) {
+        guard let title = previewTitle(for: key) else { return }
+        dismissKeyPreview()
+
+        let preview = UILabel()
+        preview.text = title
+        preview.textAlignment = .center
+        preview.font = title.containsEmoji
+            ? .systemFont(ofSize: 30, weight: .regular)
+            : .systemFont(ofSize: 28, weight: .medium)
+        preview.textColor = .label
+        preview.backgroundColor = UIColor.secondarySystemBackground.withAlphaComponent(0.98)
+        preview.layer.cornerRadius = 12
+        preview.layer.cornerCurve = .continuous
+        preview.layer.masksToBounds = false
+        preview.layer.shadowColor = UIColor.black.cgColor
+        preview.layer.shadowOpacity = 0.18
+        preview.layer.shadowRadius = 10
+        preview.layer.shadowOffset = CGSize(width: 0, height: 4)
+        preview.alpha = 0
+
+        let buttonFrame = button.convert(button.bounds, to: self)
+        let width = max(46, buttonFrame.width + 16)
+        let height: CGFloat = 54
+        let x = min(max(buttonFrame.midX - width / 2, 4), max(bounds.width - width - 4, 4))
+        let y = max(buttonFrame.minY - height - 8, 4)
+        preview.frame = CGRect(x: x, y: y, width: width, height: height)
+
+        addSubview(preview)
+        keyPreviewView = preview
+        UIView.animate(withDuration: 0.08, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            preview.alpha = 1
+            preview.transform = CGAffineTransform(translationX: 0, y: -2)
+        }
+    }
+
+    private func previewTitle(for key: Key) -> String? {
+        switch key.action {
+        case .input(let value):
+            if value == " " { return nil }
+            return shouldCapitalize(value) ? value.uppercased() : value
+        default:
+            return nil
+        }
+    }
+
+    private func dismissKeyPreview() {
+        guard let preview = keyPreviewView else { return }
+        keyPreviewView = nil
+        UIView.animate(withDuration: 0.08, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            preview.alpha = 0
+            preview.transform = CGAffineTransform(translationX: 0, y: 4)
+        } completion: { _ in
+            preview.removeFromSuperview()
         }
     }
 
