@@ -39,9 +39,7 @@ struct CiphertextPrefetchRunner {
                 let status = NoctyraPrefetchStatus(
                     lastAttemptAt: startedAt,
                     lastSuccessAt: nil,
-                    lastResult: "No prefetch profiles are configured.",
-                    lastFetchedEnvelopeCount: 0,
-                    pendingEnvelopeCount: (try? store.loadStatus().pendingEnvelopeCount) ?? 0
+                    lastResult: "No prefetch profiles are configured."
                 )
                 try? store.saveStatus(status)
                 return CiphertextPrefetchResult(fetchedEnvelopeCount: 0, profileCount: 0, failures: [status.lastResult ?? "No profiles."])
@@ -68,17 +66,14 @@ struct CiphertextPrefetchRunner {
                 }
             }
 
-            let pendingCount = (try? store.loadStatus().pendingEnvelopeCount) ?? 0
             let resultText = failures.isEmpty
-                ? "Fetched \(fetchedCount) encrypted envelope(s)."
-                : "Fetched \(fetchedCount) encrypted envelope(s); \(failures.count) profile(s) failed."
+                ? "Encrypted ciphertext prefetch completed."
+                : "Encrypted ciphertext prefetch completed with limited profile failures."
             try? store.saveStatus(
                 NoctyraPrefetchStatus(
                     lastAttemptAt: startedAt,
                     lastSuccessAt: failures.isEmpty ? Date() : nil,
-                    lastResult: resultText,
-                    lastFetchedEnvelopeCount: fetchedCount,
-                    pendingEnvelopeCount: pendingCount
+                    lastResult: resultText
                 )
             )
             return CiphertextPrefetchResult(
@@ -91,9 +86,7 @@ struct CiphertextPrefetchRunner {
                 NoctyraPrefetchStatus(
                     lastAttemptAt: startedAt,
                     lastSuccessAt: nil,
-                    lastResult: error.localizedDescription,
-                    lastFetchedEnvelopeCount: 0,
-                    pendingEnvelopeCount: 0
+                    lastResult: "Encrypted ciphertext prefetch failed."
                 )
             )
             return CiphertextPrefetchResult(fetchedEnvelopeCount: 0, profileCount: 0, failures: [error.localizedDescription])

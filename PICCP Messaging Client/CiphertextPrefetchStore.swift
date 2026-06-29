@@ -9,15 +9,11 @@ struct NoctyraPrefetchStatus: Codable, Equatable {
     var lastAttemptAt: Date?
     var lastSuccessAt: Date?
     var lastResult: String?
-    var lastFetchedEnvelopeCount: Int
-    var pendingEnvelopeCount: Int
 
     static let empty = NoctyraPrefetchStatus(
         lastAttemptAt: nil,
         lastSuccessAt: nil,
-        lastResult: nil,
-        lastFetchedEnvelopeCount: 0,
-        pendingEnvelopeCount: 0
+        lastResult: nil
     )
 }
 
@@ -102,7 +98,13 @@ final class CiphertextPrefetchStore {
     }
 
     func loadStatus() throws -> NoctyraPrefetchStatus {
-        try read(NoctyraPrefetchStatus.self, from: statusURL) ?? .empty
+        guard let payload = try readPayload(from: statusURL) else { return .empty }
+        let decoded = try PICCPCoder.decode(NoctyraPrefetchStatus.self, from: payload)
+        let status = sanitizedPrefetchStatus(decoded)
+        if prefetchStatusPayloadNeedsSanitization(payload) || status != decoded {
+            try saveStatus(status)
+        }
+        return status
     }
 
     func appendDirectEnvelopes(_ records: [PrefetchedDirectEnvelopeRecord]) throws {
@@ -123,9 +125,6 @@ final class CiphertextPrefetchStore {
         }
         existing = cappedPrefetchRecords(Array(byId.values))
         try writePrefetchRecords(existing)
-        var status = try loadStatus()
-        status.pendingEnvelopeCount = existing.count
-        try saveStatus(status)
     }
 
     func appendGroupEnvelopes(_ records: [PrefetchedGroupEnvelopeRecord]) throws {
@@ -146,9 +145,6 @@ final class CiphertextPrefetchStore {
         }
         existing = cappedPrefetchRecords(Array(byId.values))
         try writePrefetchRecords(existing)
-        var status = try loadStatus()
-        status.pendingEnvelopeCount = existing.count
-        try saveStatus(status)
     }
 
     func directEnvelopeRecords(profileId: UUID) throws -> [PrefetchedDirectEnvelopeRecord] {
@@ -201,9 +197,6 @@ final class CiphertextPrefetchStore {
             record.kind != .directMessage || record.inboxId != profileInboxId || !ids.contains(record.id)
         }
         try writePrefetchRecords(remaining)
-        var status = try loadStatus()
-        status.pendingEnvelopeCount = remaining.count
-        try saveStatus(status)
     }
 
     func removeGroupEnvelopeIds(_ ids: Set<UUID>, profileId: UUID, groupId: UUID) throws {
@@ -215,9 +208,6 @@ final class CiphertextPrefetchStore {
             record.kind != .groupMessage || record.groupId != groupId || !ids.contains(record.id)
         }
         try writePrefetchRecords(remaining)
-        var status = try loadStatus()
-        status.pendingEnvelopeCount = remaining.count
-        try saveStatus(status)
     }
 
     private func loadPrefetchRecords() throws -> [DecentralizedPrefetchRecord] {
@@ -299,6 +289,33 @@ final class CiphertextPrefetchStore {
         ]
         return forbiddenKeys.contains { key in
             payload.range(of: Data("\"\(key)\"".utf8)) != nil
+        }
+    }
+
+    private func sanitizedPrefetchStatus(_ status: NoctyraPrefetchStatus) -> NoctyraPrefetchStatus {
+        var sanitized = status
+        if let result = status.lastResult {
+            let hasCountBearingResult =
+                result.range(of: "Fetched", options: .caseInsensitive) != nil ||
+                result.range(of: "profile(s) failed", options: .caseInsensitive) != nil
+            if hasCountBearingResult {
+                sanitized.lastResult = status.lastSuccessAt == nil
+                    ? "Encrypted ciphertext prefetch failed."
+                    : "Encrypted ciphertext prefetch completed."
+            }
+        }
+        return sanitized
+    }
+
+    private func prefetchStatusPayloadNeedsSanitization(_ payload: Data) -> Bool {
+        let forbiddenFragments = [
+            "lastFetchedEnvelopeCount",
+            "pendingEnvelopeCount",
+            "Fetched",
+            "profile(s) failed"
+        ]
+        return forbiddenFragments.contains { fragment in
+            payload.range(of: Data(fragment.utf8)) != nil
         }
     }
 
