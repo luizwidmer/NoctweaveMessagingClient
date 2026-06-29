@@ -628,10 +628,22 @@ final class ClientViewModel: ObservableObject {
             return NoctyraPrefetchProfile(
                 id: profile.id,
                 displayName: profile.identity.displayName,
+                identityFingerprint: profile.identity.fingerprint,
+                identitySigningKey: profile.identity.signingKey,
                 inboxId: profile.inboxId,
                 inboxAccessKey: inboxAccessKey,
                 relay: profile.relay,
-                relayAuthToken: relayAuthToken(for: profile.relay)
+                relayAuthToken: relayAuthToken(for: profile.relay),
+                groups: profile.groups.compactMap { group in
+                    guard let groupInboxId = group.relayInboxId else {
+                        return nil
+                    }
+                    return NoctyraPrefetchGroup(
+                        id: group.id,
+                        title: group.title,
+                        groupInboxId: groupInboxId
+                    )
+                }
             )
         }
         let config = NoctyraPrefetchConfig(updatedAt: Date(), profiles: profiles)
@@ -1697,8 +1709,13 @@ final class ClientViewModel: ObservableObject {
                 profile.groups[index] = group
                 continue
             }
+            let prefetchedRecords = prefetchedGroupEnvelopeRecords(profileId: profile.id, groupId: group.id)
+            let envelopes = mergedGroupEnvelopeBatch(
+                live: response.groupMessages ?? [],
+                prefetched: prefetchedRecords.map(\.envelope)
+            )
             var acknowledgedIds = Set<UUID>()
-            for envelope in response.groupMessages ?? [] {
+            for envelope in envelopes {
                 if envelope.senderFingerprint == profile.identity.fingerprint {
                     acknowledgedIds.insert(envelope.id)
                     continue
@@ -1880,6 +1897,7 @@ final class ClientViewModel: ObservableObject {
                         acknowledgementResponse.error ?? "Group message acknowledgement failed."
                     )
                 }
+                removePrefetchedGroupEnvelopeIds(acknowledgedIds, profileId: profile.id, groupId: group.id)
             }
         }
         if !missingRelayGroupIds.isEmpty {
@@ -5369,9 +5387,41 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
+    private func prefetchedGroupEnvelopeRecords(profileId: UUID, groupId: UUID) -> [PrefetchedGroupEnvelopeRecord] {
+        do {
+            return try ciphertextPrefetchStore.groupEnvelopeRecords(profileId: profileId, groupId: groupId)
+        } catch {
+            lastError = "Failed to load prefetched group ciphertext: \(error.localizedDescription)"
+            return []
+        }
+    }
+
+    private func removePrefetchedGroupEnvelopeIds(_ ids: Set<UUID>, profileId: UUID, groupId: UUID) {
+        do {
+            try ciphertextPrefetchStore.removeGroupEnvelopeIds(ids, profileId: profileId, groupId: groupId)
+        } catch {
+            lastError = "Failed to clear prefetched group ciphertext: \(error.localizedDescription)"
+        }
+    }
+
     private func mergedEnvelopeBatch(live: [Envelope], prefetched: [Envelope]) -> [Envelope] {
         var seen = Set<UUID>()
         var merged: [Envelope] = []
+        for envelope in live + prefetched {
+            guard seen.insert(envelope.id).inserted else {
+                continue
+            }
+            merged.append(envelope)
+        }
+        return merged.sorted { $0.sentAt < $1.sentAt }
+    }
+
+    private func mergedGroupEnvelopeBatch(
+        live: [GroupRatchetEnvelope],
+        prefetched: [GroupRatchetEnvelope]
+    ) -> [GroupRatchetEnvelope] {
+        var seen = Set<UUID>()
+        var merged: [GroupRatchetEnvelope] = []
         for envelope in live + prefetched {
             guard seen.insert(envelope.id).inserted else {
                 continue

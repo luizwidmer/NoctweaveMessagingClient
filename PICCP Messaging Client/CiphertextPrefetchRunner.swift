@@ -58,6 +58,25 @@ struct CiphertextPrefetchRunner {
                 } catch {
                     failures.append("\(profile.displayName): \(error.localizedDescription)")
                 }
+                for group in profile.groups {
+                    do {
+                        let envelopes = try await fetchGroupEnvelopes(group, for: profile)
+                        let records = envelopes.map {
+                            PrefetchedGroupEnvelopeRecord(
+                                profileId: profile.id,
+                                groupId: group.id,
+                                groupInboxId: group.groupInboxId,
+                                relay: profile.relay,
+                                fetchedAt: Date(),
+                                envelope: $0
+                            )
+                        }
+                        try store.appendGroupEnvelopes(records)
+                        fetchedCount += records.count
+                    } catch {
+                        failures.append("\(profile.displayName)/\(group.title): \(error.localizedDescription)")
+                    }
+                }
             }
 
             let pendingCount = (try? store.loadStatus().pendingEnvelopeCount) ?? 0
@@ -123,6 +142,42 @@ struct CiphertextPrefetchRunner {
             )
         }
         return response.messages ?? []
+    }
+
+    private func fetchGroupEnvelopes(
+        _ group: NoctyraPrefetchGroup,
+        for profile: NoctyraPrefetchProfile
+    ) async throws -> [GroupRatchetEnvelope] {
+        var request = FetchGroupMessagesRequest(
+            groupId: group.id,
+            groupInboxId: group.groupInboxId,
+            maxCount: maxEnvelopeCountPerProfile,
+            actorFingerprint: profile.identityFingerprint
+        )
+        let publicKey = profile.identitySigningKey.publicKeyData
+        let proof = try makeActorProof(
+            signingKey: profile.identitySigningKey,
+            publicSigningKey: publicKey
+        ) { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = FetchGroupMessagesRequest(
+            groupId: group.id,
+            groupInboxId: group.groupInboxId,
+            maxCount: maxEnvelopeCountPerProfile,
+            actorFingerprint: profile.identityFingerprint,
+            actorProof: proof
+        )
+        let response = try await RelayClient(endpoint: profile.relay, authToken: profile.relayAuthToken)
+            .send(.fetchGroupMessages(request), timeout: 8)
+        guard response.type == .groupMessages else {
+            throw NSError(
+                domain: "Noctyra.CiphertextPrefetch",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: response.error ?? "Relay did not return encrypted group messages."]
+            )
+        }
+        return response.groupMessages ?? []
     }
 
     private func makeActorProof(
