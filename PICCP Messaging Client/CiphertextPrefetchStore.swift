@@ -88,7 +88,12 @@ final class CiphertextPrefetchStore {
     }
 
     func loadConfig() throws -> NoctyraPrefetchConfig? {
-        try read(NoctyraPrefetchConfig.self, from: configURL)
+        guard let payload = try readPayload(from: configURL) else { return nil }
+        let config = try PICCPCoder.decode(NoctyraPrefetchConfig.self, from: payload)
+        if prefetchConfigPayloadNeedsSanitization(payload) {
+            try saveConfig(config)
+        }
+        return config
     }
 
     func saveStatus(_ status: NoctyraPrefetchStatus) throws {
@@ -244,6 +249,11 @@ final class CiphertextPrefetchStore {
     }
 
     private func read<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
+        guard let payload = try readPayload(from: url) else { return nil }
+        return try PICCPCoder.decode(type, from: payload)
+    }
+
+    private func readPayload(from url: URL) throws -> Data? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         if let size = attributes[.size] as? NSNumber,
@@ -254,8 +264,18 @@ final class CiphertextPrefetchStore {
         guard data.count <= Self.maxEncryptedFileBytes else {
             throw CiphertextPrefetchStoreError.fileTooLarge
         }
-        let payload = try decrypt(data)
-        return try PICCPCoder.decode(type, from: payload)
+        return try decrypt(data)
+    }
+
+    private func prefetchConfigPayloadNeedsSanitization(_ payload: Data) -> Bool {
+        let forbiddenKeys = [
+            "identity" + "SigningKey",
+            "groups",
+            "groupInboxId"
+        ]
+        return forbiddenKeys.contains { key in
+            payload.range(of: Data("\"\(key)\"".utf8)) != nil
+        }
     }
 
     private func write<T: Encodable>(
