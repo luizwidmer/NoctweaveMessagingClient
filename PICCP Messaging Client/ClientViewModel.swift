@@ -632,8 +632,7 @@ final class ClientViewModel: ObservableObject {
                 inboxId: profile.inboxId,
                 inboxAccessKey: inboxAccessKey,
                 relay: profile.relay,
-                relayAuthToken: relayAuthToken(for: profile.relay),
-                groups: []
+                relayAuthToken: relayAuthToken(for: profile.relay)
             )
         }
         let config = NoctyraPrefetchConfig(updatedAt: Date(), profiles: profiles)

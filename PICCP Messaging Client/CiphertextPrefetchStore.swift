@@ -34,13 +34,6 @@ struct NoctyraPrefetchProfile: Codable, Identifiable {
     var inboxAccessKey: SigningKeyPair
     var relay: RelayEndpoint
     var relayAuthToken: String?
-    var groups: [NoctyraPrefetchGroup]
-}
-
-struct NoctyraPrefetchGroup: Codable, Identifiable {
-    var id: UUID
-    var title: String
-    var groupInboxId: String
 }
 
 struct PrefetchedDirectEnvelopeRecord: Codable, Identifiable {
@@ -174,15 +167,12 @@ final class CiphertextPrefetchStore {
     }
 
     func groupEnvelopeRecords(profileId: UUID, groupId: UUID) throws -> [PrefetchedGroupEnvelopeRecord] {
-        guard let profile = try loadConfig()?.profiles.first(where: { $0.id == profileId }),
-              let group = profile.groups.first(where: { $0.id == groupId })
-        else {
+        guard let profile = try loadConfig()?.profiles.first(where: { $0.id == profileId }) else {
             return []
         }
         return try loadPrefetchRecords().compactMap { record in
             guard record.kind == .groupMessage,
                   record.groupId == groupId,
-                  record.inboxId == group.groupInboxId,
                   let envelope = try? PICCPCoder.decode(GroupRatchetEnvelope.self, from: record.sealedEnvelope)
             else {
                 return nil
@@ -212,13 +202,11 @@ final class CiphertextPrefetchStore {
 
     func removeGroupEnvelopeIds(_ ids: Set<UUID>, profileId: UUID, groupId: UUID) throws {
         guard !ids.isEmpty else { return }
-        let groupInboxId = try loadConfig()?.profiles
-            .first(where: { $0.id == profileId })?
-            .groups
-            .first(where: { $0.id == groupId })?
-            .groupInboxId
+        guard try loadConfig()?.profiles.contains(where: { $0.id == profileId }) == true else {
+            return
+        }
         let remaining = try loadPrefetchRecords().filter { record in
-            record.kind != .groupMessage || record.groupId != groupId || record.inboxId != groupInboxId || !ids.contains(record.id)
+            record.kind != .groupMessage || record.groupId != groupId || !ids.contains(record.id)
         }
         try writePrefetchRecords(remaining)
         var status = try loadStatus()
