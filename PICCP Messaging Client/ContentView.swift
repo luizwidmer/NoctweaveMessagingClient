@@ -9897,6 +9897,12 @@ private struct RelayServerRow: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+            if let attachmentStorageBackend = info.attachmentStorageBackend,
+               !attachmentStorageBackend.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("Attachment storage: \(attachmentStorageBackend.uppercased())")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             if let wakeSupport = info.wakeSupport {
                 Text("Wake policy: \(wakePolicyLabel(wakeSupport))")
                     .font(.caption2)
