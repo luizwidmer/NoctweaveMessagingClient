@@ -71,15 +71,14 @@ final class CiphertextPrefetchStore {
     private let directory: URL
     private let configURL: URL
     private let statusURL: URL
-    private let directEnvelopeURL: URL
-    private let groupEnvelopeURL: URL
+    private let batchURL: URL
 
     init(directory: URL = CiphertextPrefetchStore.defaultDirectory()) {
         self.directory = directory
         self.configURL = directory.appendingPathComponent("prefetch-config.json")
         self.statusURL = directory.appendingPathComponent("prefetch-status.json")
-        self.directEnvelopeURL = directory.appendingPathComponent("prefetched-direct-envelopes.json")
-        self.groupEnvelopeURL = directory.appendingPathComponent("prefetched-group-envelopes.json")
+        self.batchURL = directory.appendingPathComponent("prefetched-ciphertext-batch.bin")
+        removePreReleaseEnvelopeFiles()
     }
 
     nonisolated static func defaultDirectory() -> URL {
@@ -110,77 +109,151 @@ final class CiphertextPrefetchStore {
 
     func appendDirectEnvelopes(_ records: [PrefetchedDirectEnvelopeRecord]) throws {
         guard !records.isEmpty else { return }
-        var existing = try loadDirectEnvelopeRecords()
-        var byId = Dictionary(uniqueKeysWithValues: existing.map { ($0.envelope.id, $0) })
+        var existing = try loadPrefetchRecords()
+        var byId = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
         for record in records {
-            byId[record.envelope.id] = record
+            byId[record.envelope.id] = try DecentralizedPrefetchRecord(
+                id: record.envelope.id,
+                kind: .directMessage,
+                relayIdentifier: relayIdentifier(for: record.relay),
+                inboxId: record.inboxId,
+                groupId: nil,
+                stagedAt: record.fetchedAt,
+                sealedEnvelope: PICCPCoder.encode(record.envelope),
+                acknowledgementDeferred: true
+            )
         }
-        existing = byId.values.sorted { $0.fetchedAt < $1.fetchedAt }
-        try write(existing, to: directEnvelopeURL, protection: .completeUntilFirstUserAuthentication)
+        existing = byId.values.sorted { $0.stagedAt < $1.stagedAt }
+        try writePrefetchRecords(existing)
         var status = try loadStatus()
-        status.pendingEnvelopeCount = try pendingEnvelopeCount(directRecords: existing)
+        status.pendingEnvelopeCount = existing.count
         try saveStatus(status)
     }
 
     func appendGroupEnvelopes(_ records: [PrefetchedGroupEnvelopeRecord]) throws {
         guard !records.isEmpty else { return }
-        var existing = try loadGroupEnvelopeRecords()
-        var byId = Dictionary(uniqueKeysWithValues: existing.map { ($0.envelope.id, $0) })
+        var existing = try loadPrefetchRecords()
+        var byId = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
         for record in records {
-            byId[record.envelope.id] = record
+            byId[record.envelope.id] = try DecentralizedPrefetchRecord(
+                id: record.envelope.id,
+                kind: .groupMessage,
+                relayIdentifier: relayIdentifier(for: record.relay),
+                inboxId: record.groupInboxId,
+                groupId: record.groupId,
+                stagedAt: record.fetchedAt,
+                sealedEnvelope: PICCPCoder.encode(record.envelope),
+                acknowledgementDeferred: true
+            )
         }
-        existing = byId.values.sorted { $0.fetchedAt < $1.fetchedAt }
-        try write(existing, to: groupEnvelopeURL, protection: .completeUntilFirstUserAuthentication)
+        existing = byId.values.sorted { $0.stagedAt < $1.stagedAt }
+        try writePrefetchRecords(existing)
         var status = try loadStatus()
-        status.pendingEnvelopeCount = try pendingEnvelopeCount(groupRecords: existing)
+        status.pendingEnvelopeCount = existing.count
         try saveStatus(status)
     }
 
     func directEnvelopeRecords(profileId: UUID) throws -> [PrefetchedDirectEnvelopeRecord] {
-        try loadDirectEnvelopeRecords().filter { $0.profileId == profileId }
+        guard let profile = try loadConfig()?.profiles.first(where: { $0.id == profileId }) else {
+            return []
+        }
+        return try loadPrefetchRecords().compactMap { record in
+            guard record.kind == .directMessage,
+                  record.inboxId == profile.inboxId,
+                  let envelope = try? PICCPCoder.decode(Envelope.self, from: record.sealedEnvelope)
+            else {
+                return nil
+            }
+            return PrefetchedDirectEnvelopeRecord(
+                profileId: profile.id,
+                inboxId: record.inboxId,
+                relay: profile.relay,
+                fetchedAt: record.stagedAt,
+                envelope: envelope
+            )
+        }
     }
 
     func groupEnvelopeRecords(profileId: UUID, groupId: UUID) throws -> [PrefetchedGroupEnvelopeRecord] {
-        try loadGroupEnvelopeRecords().filter { $0.profileId == profileId && $0.groupId == groupId }
+        guard let profile = try loadConfig()?.profiles.first(where: { $0.id == profileId }),
+              let group = profile.groups.first(where: { $0.id == groupId })
+        else {
+            return []
+        }
+        return try loadPrefetchRecords().compactMap { record in
+            guard record.kind == .groupMessage,
+                  record.groupId == groupId,
+                  record.inboxId == group.groupInboxId,
+                  let envelope = try? PICCPCoder.decode(GroupRatchetEnvelope.self, from: record.sealedEnvelope)
+            else {
+                return nil
+            }
+            return PrefetchedGroupEnvelopeRecord(
+                profileId: profile.id,
+                groupId: groupId,
+                groupInboxId: record.inboxId,
+                relay: profile.relay,
+                fetchedAt: record.stagedAt,
+                envelope: envelope
+            )
+        }
     }
 
     func removeDirectEnvelopeIds(_ ids: Set<UUID>, profileId: UUID) throws {
         guard !ids.isEmpty else { return }
-        let remaining = try loadDirectEnvelopeRecords().filter { record in
-            record.profileId != profileId || !ids.contains(record.envelope.id)
+        let profileInboxId = try loadConfig()?.profiles.first(where: { $0.id == profileId })?.inboxId
+        let remaining = try loadPrefetchRecords().filter { record in
+            record.kind != .directMessage || record.inboxId != profileInboxId || !ids.contains(record.id)
         }
-        try write(remaining, to: directEnvelopeURL, protection: .completeUntilFirstUserAuthentication)
+        try writePrefetchRecords(remaining)
         var status = try loadStatus()
-        status.pendingEnvelopeCount = try pendingEnvelopeCount(directRecords: remaining)
+        status.pendingEnvelopeCount = remaining.count
         try saveStatus(status)
     }
 
     func removeGroupEnvelopeIds(_ ids: Set<UUID>, profileId: UUID, groupId: UUID) throws {
         guard !ids.isEmpty else { return }
-        let remaining = try loadGroupEnvelopeRecords().filter { record in
-            record.profileId != profileId || record.groupId != groupId || !ids.contains(record.envelope.id)
+        let groupInboxId = try loadConfig()?.profiles
+            .first(where: { $0.id == profileId })?
+            .groups
+            .first(where: { $0.id == groupId })?
+            .groupInboxId
+        let remaining = try loadPrefetchRecords().filter { record in
+            record.kind != .groupMessage || record.groupId != groupId || record.inboxId != groupInboxId || !ids.contains(record.id)
         }
-        try write(remaining, to: groupEnvelopeURL, protection: .completeUntilFirstUserAuthentication)
+        try writePrefetchRecords(remaining)
         var status = try loadStatus()
-        status.pendingEnvelopeCount = try pendingEnvelopeCount(groupRecords: remaining)
+        status.pendingEnvelopeCount = remaining.count
         try saveStatus(status)
     }
 
-    private func loadDirectEnvelopeRecords() throws -> [PrefetchedDirectEnvelopeRecord] {
-        try read([PrefetchedDirectEnvelopeRecord].self, from: directEnvelopeURL) ?? []
+    private func loadPrefetchRecords() throws -> [DecentralizedPrefetchRecord] {
+        try read(DecentralizedPrefetchBatch.self, from: batchURL)?.records ?? []
     }
 
-    private func loadGroupEnvelopeRecords() throws -> [PrefetchedGroupEnvelopeRecord] {
-        try read([PrefetchedGroupEnvelopeRecord].self, from: groupEnvelopeURL) ?? []
+    private func writePrefetchRecords(_ records: [DecentralizedPrefetchRecord]) throws {
+        if records.isEmpty {
+            if FileManager.default.fileExists(atPath: batchURL.path) {
+                try FileManager.default.removeItem(at: batchURL)
+            }
+            return
+        }
+        let batch = DecentralizedPrefetchBatch(records: records, stagedAt: records.map(\.stagedAt).max() ?? Date())
+        guard batch.isCiphertextOnly else {
+            throw CiphertextPrefetchStoreError.invalidBatch
+        }
+        try write(batch, to: batchURL, protection: .completeUntilFirstUserAuthentication)
     }
 
-    private func pendingEnvelopeCount(
-        directRecords: [PrefetchedDirectEnvelopeRecord]? = nil,
-        groupRecords: [PrefetchedGroupEnvelopeRecord]? = nil
-    ) throws -> Int {
-        let directCount = try directRecords?.count ?? loadDirectEnvelopeRecords().count
-        let groupCount = try groupRecords?.count ?? loadGroupEnvelopeRecords().count
-        return directCount + groupCount
+    private func relayIdentifier(for relay: RelayEndpoint) -> String {
+        "\(relay.transport.rawValue):\(relay.useTLS ? "tls" : "plain"):\(relay.host):\(relay.port)"
+    }
+
+    private func removePreReleaseEnvelopeFiles() {
+        for name in ["prefetched-direct-envelopes.json", "prefetched-group-envelopes.json"] {
+            let url = directory.appendingPathComponent(name)
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     private func read<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
@@ -256,6 +329,7 @@ private struct CiphertextPrefetchFileEnvelope: Codable {
 private enum CiphertextPrefetchStoreError: Error {
     case encryptionFailed
     case fileTooLarge
+    case invalidBatch
 }
 
 #if canImport(Security)
