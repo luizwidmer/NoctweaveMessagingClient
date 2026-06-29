@@ -873,6 +873,7 @@ final class ClientViewModel: ObservableObject {
         loadConversationMessagesIntoRAM(contactId: contactId)
         do {
             let contact = normalizedContact(state.contacts[contactIndex], preferredRelay: state.relay)
+            let metadataBucketSeconds = metadataBucketSeconds(for: contact.relay, preferredRelay: state.relay)
             let session = try await prepareOutboundSession(for: contact)
             var conversation = session.conversation
             let rootRatchet = prepareRootRatchetIfNeeded(conversation: conversation, contact: contact)
@@ -883,7 +884,8 @@ final class ClientViewModel: ObservableObject {
                 conversation: &conversation,
                 kemCiphertext: session.kemCiphertext,
                 prekey: session.prekey,
-                rootRatchet: rootRatchet?.ratchet
+                rootRatchet: rootRatchet?.ratchet,
+                metadataBucketSeconds: metadataBucketSeconds
             )
             _ = MessageEngine.appendMessage(
                 body: .text(text),
@@ -919,6 +921,7 @@ final class ClientViewModel: ObservableObject {
                 throw AttachmentTransferError.attachmentTooLarge(maxBytes: maxAttachmentBytes)
             }
             let contact = normalizedContact(state.contacts[contactIndex], preferredRelay: state.relay)
+            let metadataBucketSeconds = metadataBucketSeconds(for: contact.relay, preferredRelay: state.relay)
             try validateAttachmentQuota(
                 bytes: preparedPayload.data.count,
                 contactId: contact.id,
@@ -986,7 +989,8 @@ final class ClientViewModel: ObservableObject {
                 messageKey: prepared.key,
                 kemCiphertext: session.kemCiphertext,
                 prekey: session.prekey,
-                rootRatchet: rootRatchet?.ratchet
+                rootRatchet: rootRatchet?.ratchet,
+                metadataBucketSeconds: metadataBucketSeconds
             )
             let localFileName = try attachmentStore.saveAttachment(preparedPayload.data, descriptor: descriptor)
             let title = attachmentDisplayTitle(descriptor, fallback: "Attachment")
@@ -1099,7 +1103,8 @@ final class ClientViewModel: ObservableObject {
                 senderFingerprint: state.identity.fingerprint,
                 messageCounter: prepared.counter,
                 messageKey: prepared.key,
-                state: ratchetState
+                state: ratchetState,
+                metadataBucketSeconds: metadataBucketSeconds(for: state.relay, preferredRelay: state.relay)
             )
             let response = try await client.send(.deliverGroupMessage(DeliverGroupMessageRequest(
                 groupId: group.id,
@@ -1875,6 +1880,7 @@ final class ClientViewModel: ObservableObject {
             var failedContacts: [String] = []
             for rawContact in state.contacts {
                 let contact = normalizedContact(rawContact, preferredRelay: state.relay)
+                let metadataBucketSeconds = metadataBucketSeconds(for: contact.relay, preferredRelay: state.relay)
                 loadConversationMessagesIntoRAM(contactId: contact.id)
                 let existingConversation = state.conversation(for: contact.id)
                 do {
@@ -1886,7 +1892,8 @@ final class ClientViewModel: ObservableObject {
                         senderFingerprint: oldFingerprint,
                         conversation: &bootstrapConversation,
                         kemCiphertext: bootstrapSession.kemCiphertext,
-                        prekey: nil
+                        prekey: nil,
+                        metadataBucketSeconds: metadataBucketSeconds
                     )
                     bootstrapConversation.markMessageProcessed()
                     try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
@@ -2012,13 +2019,15 @@ final class ClientViewModel: ObservableObject {
                 )
                 let reset = try IdentityReset.create(newOffer: newOffer, signingKey: oldSigningKey)
                 let session = try await prepareOutboundSession(for: contact, forceNew: true)
+                let metadataBucketSeconds = metadataBucketSeconds(for: contact.relay, preferredRelay: state.relay)
                 let envelope = try MessageEngine.encrypt(
                     body: .identityReset(reset),
                     senderSigningKey: oldSigningKey,
                     senderFingerprint: oldFingerprint,
                     conversation: &conversation,
                     kemCiphertext: session.kemCiphertext,
-                    prekey: session.prekey
+                    prekey: session.prekey,
+                    metadataBucketSeconds: metadataBucketSeconds
                 )
                 conversation.markMessageProcessed()
                 try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
@@ -2905,7 +2914,8 @@ final class ClientViewModel: ObservableObject {
             body: .text(text),
             senderSigningKey: state.identity.signingKey,
             senderFingerprint: state.identity.fingerprint,
-            state: &ratchetState
+            state: &ratchetState,
+            metadataBucketSeconds: metadataBucketSeconds(for: state.relay, preferredRelay: state.relay)
         )
         let response = try await relayClient(for: state.relay).send(
             .deliverGroupMessage(
@@ -5322,6 +5332,17 @@ final class ClientViewModel: ObservableObject {
         state.relayServers.first(where: { $0.endpoint == relay })?.advertisedInfo?.wakeSupport
     }
 
+    private func metadataBucketSeconds(for relay: RelayEndpoint, preferredRelay: RelayEndpoint) -> Int? {
+        let reachableRelay = reachableRelayEndpoint(relay, preferredRelay: preferredRelay)
+        let info = state.relayServers.first(where: { $0.endpoint == reachableRelay })?.advertisedInfo
+            ?? state.relayServers.first(where: { $0.endpoint == relay })?.advertisedInfo
+            ?? state.relayServers.first(where: { $0.endpoint == preferredRelay })?.advertisedInfo
+        guard let info else { return nil }
+        let schedule = info.temporalBucketScheduleSeconds ?? []
+        let candidates = ([info.temporalBucketSeconds] + schedule).filter { $0 > 1 }
+        return candidates.max()
+    }
+
     private func wakeIdentitySeed(for profile: IdentityProfile) -> Data {
         if !profile.inboxId.isEmpty {
             return Data(profile.inboxId.utf8)
@@ -5876,12 +5897,14 @@ final class ClientViewModel: ObservableObject {
 
         for payload in toResend {
             do {
+                let metadataBucketSeconds = metadataBucketSeconds(for: contact.relay, preferredRelay: profile.relay)
                 let envelope = try MessageEngine.encrypt(
                     body: .text(payload),
                     senderSigningKey: profile.identity.signingKey,
                     senderFingerprint: profile.identity.fingerprint,
                     conversation: &conversation,
-                    kemCiphertext: nil
+                    kemCiphertext: nil,
+                    metadataBucketSeconds: metadataBucketSeconds
                 )
                 conversation.markMessageProcessed()
                 try await deliverEnvelope(envelope, to: contact, preferredRelay: profile.relay)
