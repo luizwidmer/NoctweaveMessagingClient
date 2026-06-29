@@ -629,21 +629,11 @@ final class ClientViewModel: ObservableObject {
                 id: profile.id,
                 displayName: profile.identity.displayName,
                 identityFingerprint: profile.identity.fingerprint,
-                identitySigningKey: profile.identity.signingKey,
                 inboxId: profile.inboxId,
                 inboxAccessKey: inboxAccessKey,
                 relay: profile.relay,
                 relayAuthToken: relayAuthToken(for: profile.relay),
-                groups: profile.groups.compactMap { group in
-                    guard let groupInboxId = group.relayInboxId else {
-                        return nil
-                    }
-                    return NoctyraPrefetchGroup(
-                        id: group.id,
-                        title: group.title,
-                        groupInboxId: groupInboxId
-                    )
-                }
+                groups: []
             )
         }
         let config = NoctyraPrefetchConfig(updatedAt: Date(), profiles: profiles)

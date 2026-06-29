@@ -30,7 +30,6 @@ struct NoctyraPrefetchProfile: Codable, Identifiable {
     var id: UUID
     var displayName: String
     var identityFingerprint: String
-    var identitySigningKey: SigningKeyPair
     var inboxId: String
     var inboxAccessKey: SigningKeyPair
     var relay: RelayEndpoint
