@@ -59,6 +59,8 @@ struct PrefetchedGroupEnvelopeRecord: Codable, Identifiable {
 final class CiphertextPrefetchStore {
     nonisolated static let appGroupIdentifier = "group.com.noctyra.client"
     private static let maxEncryptedFileBytes = 2_000_000
+    private static let maxPrefetchProfiles = 64
+    private static let maxPrefetchedRecords = 512
 
     private let directory: URL
     private let configURL: URL
@@ -84,13 +86,14 @@ final class CiphertextPrefetchStore {
     }
 
     func saveConfig(_ config: NoctyraPrefetchConfig) throws {
-        try write(config, to: configURL, protection: .completeUntilFirstUserAuthentication)
+        try write(sanitizedPrefetchConfig(config), to: configURL, protection: .completeUntilFirstUserAuthentication)
     }
 
     func loadConfig() throws -> NoctyraPrefetchConfig? {
         guard let payload = try readPayload(from: configURL) else { return nil }
-        let config = try PICCPCoder.decode(NoctyraPrefetchConfig.self, from: payload)
-        if prefetchConfigPayloadNeedsSanitization(payload) {
+        let decoded = try PICCPCoder.decode(NoctyraPrefetchConfig.self, from: payload)
+        let config = sanitizedPrefetchConfig(decoded)
+        if prefetchConfigPayloadNeedsSanitization(payload) || decoded.profiles.count != config.profiles.count {
             try saveConfig(config)
         }
         return config
@@ -120,7 +123,7 @@ final class CiphertextPrefetchStore {
                 acknowledgementDeferred: true
             )
         }
-        existing = byId.values.sorted { $0.stagedAt < $1.stagedAt }
+        existing = cappedPrefetchRecords(Array(byId.values))
         try writePrefetchRecords(existing)
         var status = try loadStatus()
         status.pendingEnvelopeCount = existing.count
@@ -143,7 +146,7 @@ final class CiphertextPrefetchStore {
                 acknowledgementDeferred: true
             )
         }
-        existing = byId.values.sorted { $0.stagedAt < $1.stagedAt }
+        existing = cappedPrefetchRecords(Array(byId.values))
         try writePrefetchRecords(existing)
         var status = try loadStatus()
         status.pendingEnvelopeCount = existing.count
@@ -230,7 +233,8 @@ final class CiphertextPrefetchStore {
             }
             return
         }
-        let batch = DecentralizedPrefetchBatch(records: records, stagedAt: records.map(\.stagedAt).max() ?? Date())
+        let cappedRecords = cappedPrefetchRecords(records)
+        let batch = DecentralizedPrefetchBatch(records: cappedRecords, stagedAt: cappedRecords.map(\.stagedAt).max() ?? Date())
         guard batch.isCiphertextOnly else {
             throw CiphertextPrefetchStoreError.invalidBatch
         }
@@ -246,6 +250,26 @@ final class CiphertextPrefetchStore {
             let url = directory.appendingPathComponent(name)
             try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    private func sanitizedPrefetchConfig(_ config: NoctyraPrefetchConfig) -> NoctyraPrefetchConfig {
+        NoctyraPrefetchConfig(
+            updatedAt: config.updatedAt,
+            profiles: Array(config.profiles.prefix(Self.maxPrefetchProfiles))
+        )
+    }
+
+    private func cappedPrefetchRecords(_ records: [DecentralizedPrefetchRecord]) -> [DecentralizedPrefetchRecord] {
+        Array(
+            records
+                .sorted { lhs, rhs in
+                    if lhs.stagedAt == rhs.stagedAt {
+                        return lhs.id.uuidString < rhs.id.uuidString
+                    }
+                    return lhs.stagedAt < rhs.stagedAt
+                }
+                .suffix(Self.maxPrefetchedRecords)
+        )
     }
 
     private func read<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
@@ -286,6 +310,9 @@ final class CiphertextPrefetchStore {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let payload = try PICCPCoder.encode(value, sortedKeys: true)
         let data = try encrypt(payload)
+        guard data.count <= Self.maxEncryptedFileBytes else {
+            throw CiphertextPrefetchStoreError.fileTooLarge
+        }
         try data.write(to: url, options: [.atomic])
         #if os(iOS)
         try FileManager.default.setAttributes([.protectionKey: protection], ofItemAtPath: url.path)
