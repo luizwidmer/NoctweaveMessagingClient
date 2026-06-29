@@ -96,6 +96,7 @@ final class ClientViewModel: ObservableObject {
     private var store: ClientStateStore
     private var attachmentStore: AttachmentStore
     private var threadMessageStore: ThreadMessageStore
+    private let ciphertextPrefetchStore: CiphertextPrefetchStore
     private let notifier = NotificationManager()
     private var autoFetchTask: Task<Void, Never>?
     private var sessionResetCooldown = SessionRecovery.Cooldown(interval: 30)
@@ -239,6 +240,7 @@ final class ClientViewModel: ObservableObject {
         self.store = ClientStateStore(fileURL: fileURL, useEncryption: useEncryption)
         self.attachmentStore = AttachmentStore(directory: attachmentDirectory, useEncryption: useEncryption)
         self.threadMessageStore = ThreadMessageStore(directory: threadMessageDirectory, useEncryption: useEncryption)
+        self.ciphertextPrefetchStore = CiphertextPrefetchStore()
         self.storageProtectionMode = resolvedMode ?? .keychain
         self.requiresStorageChoice = !isUITest && resolvedMode == nil
         self.biometricsAvailable = ClientViewModel.detectBiometricAvailability()
@@ -318,6 +320,7 @@ final class ClientViewModel: ObservableObject {
             await ensureRelaySelection()
             await ensurePrekeysForActiveProfiles()
             await syncRelayGroupsForActiveProfiles()
+            publishCiphertextPrefetchConfig()
             isLocked = shouldLockImmediately()
             isReady = true
             if !isLocked {
@@ -612,7 +615,41 @@ final class ClientViewModel: ObservableObject {
         try persistAllThreadMessagesFromState(state)
         let sanitized = strippedStateForPersistence(state)
         try await store.save(sanitized)
+        publishCiphertextPrefetchConfig(from: sanitized)
         evictInactiveThreadMessagesFromRAM()
+    }
+
+    private func publishCiphertextPrefetchConfig(from snapshot: ClientState? = nil) {
+        let source = snapshot ?? state
+        let profiles = source.identityProfiles.compactMap { profile -> NoctyraPrefetchProfile? in
+            guard !profile.isArchived, let inboxAccessKey = profile.inboxAccessKey else {
+                return nil
+            }
+            return NoctyraPrefetchProfile(
+                id: profile.id,
+                displayName: profile.identity.displayName,
+                inboxId: profile.inboxId,
+                inboxAccessKey: inboxAccessKey,
+                relay: profile.relay,
+                relayAuthToken: relayAuthToken(for: profile.relay)
+            )
+        }
+        let config = NoctyraPrefetchConfig(updatedAt: Date(), profiles: profiles)
+        do {
+            try ciphertextPrefetchStore.saveConfig(config)
+        } catch {
+            lastError = "Failed to publish prefetch config: \(error.localizedDescription)"
+        }
+    }
+
+    func prefetchCiphertextNow() async {
+        publishCiphertextPrefetchConfig()
+        let result = await CiphertextPrefetchRunner(store: ciphertextPrefetchStore).run()
+        if result.failures.isEmpty {
+            lastInfo = "Fetched \(result.fetchedEnvelopeCount) encrypted envelope(s)."
+        } else {
+            lastError = result.failures.joined(separator: "\n")
+        }
     }
 
     private func recordContinuityEvent(
@@ -1251,7 +1288,11 @@ final class ClientViewModel: ObservableObject {
                 }
                 return
             }
-            let envelopes = response.messages ?? []
+            let prefetchedRecords = prefetchedDirectEnvelopeRecords(for: profile.id)
+            let envelopes = mergedEnvelopeBatch(
+                live: response.messages ?? [],
+                prefetched: prefetchedRecords.map(\.envelope)
+            )
             var pendingResends: [UUID: Int] = [:]
             var acknowledgedEnvelopeIds = Set<UUID>()
             for envelope in envelopes {
@@ -1576,6 +1617,7 @@ final class ClientViewModel: ObservableObject {
                         acknowledgementResponse.error ?? "Message acknowledgement failed."
                     )
                 }
+                removePrefetchedDirectEnvelopeIds(Set(acknowledgementIds), profileId: profile.id)
             }
             try await fetchRelayGroupMessages(for: &profile)
             mergeCurrentThreadMessages(into: &profile)
@@ -5308,6 +5350,35 @@ final class ClientViewModel: ObservableObject {
                 await self.refreshCoordinatorDirectoryIfNeeded()
             }
         }
+    }
+
+    private func prefetchedDirectEnvelopeRecords(for profileId: UUID) -> [PrefetchedDirectEnvelopeRecord] {
+        do {
+            return try ciphertextPrefetchStore.directEnvelopeRecords(profileId: profileId)
+        } catch {
+            lastError = "Failed to load prefetched ciphertext: \(error.localizedDescription)"
+            return []
+        }
+    }
+
+    private func removePrefetchedDirectEnvelopeIds(_ ids: Set<UUID>, profileId: UUID) {
+        do {
+            try ciphertextPrefetchStore.removeDirectEnvelopeIds(ids, profileId: profileId)
+        } catch {
+            lastError = "Failed to clear prefetched ciphertext: \(error.localizedDescription)"
+        }
+    }
+
+    private func mergedEnvelopeBatch(live: [Envelope], prefetched: [Envelope]) -> [Envelope] {
+        var seen = Set<UUID>()
+        var merged: [Envelope] = []
+        for envelope in live + prefetched {
+            guard seen.insert(envelope.id).inserted else {
+                continue
+            }
+            merged.append(envelope)
+        }
+        return merged.sorted { $0.sentAt < $1.sentAt }
     }
 
     private func nextAutoFetchDelaySeconds(now: Date = Date()) -> Int {
