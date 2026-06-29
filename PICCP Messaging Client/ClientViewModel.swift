@@ -627,8 +627,6 @@ final class ClientViewModel: ObservableObject {
             }
             return NoctyraPrefetchProfile(
                 id: profile.id,
-                displayName: profile.identity.displayName,
-                identityFingerprint: profile.identity.fingerprint,
                 inboxId: profile.inboxId,
                 inboxAccessKey: inboxAccessKey,
                 relay: profile.relay,

@@ -64,7 +64,7 @@ struct CiphertextPrefetchRunner {
                     try store.appendDirectEnvelopes(records)
                     fetchedCount += records.count
                 } catch {
-                    failures.append("\(profile.displayName): \(error.localizedDescription)")
+                    failures.append("\(profileLabel(for: profile)): \(error.localizedDescription)")
                 }
             }
 
@@ -131,6 +131,10 @@ struct CiphertextPrefetchRunner {
             )
         }
         return Array((response.messages ?? []).prefix(maxEnvelopeCountPerProfile))
+    }
+
+    private func profileLabel(for profile: NoctyraPrefetchProfile) -> String {
+        "Profile \(profile.id.uuidString.prefix(8))"
     }
 
     private func makeActorProof(

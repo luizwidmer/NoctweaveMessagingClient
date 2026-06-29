@@ -28,8 +28,6 @@ struct NoctyraPrefetchConfig: Codable {
 
 struct NoctyraPrefetchProfile: Codable, Identifiable {
     var id: UUID
-    var displayName: String
-    var identityFingerprint: String
     var inboxId: String
     var inboxAccessKey: SigningKeyPair
     var relay: RelayEndpoint
@@ -294,6 +292,8 @@ final class CiphertextPrefetchStore {
     private func prefetchConfigPayloadNeedsSanitization(_ payload: Data) -> Bool {
         let forbiddenKeys = [
             "identity" + "SigningKey",
+            "identityFingerprint",
+            "displayName",
             "groups",
             "groupInboxId"
         ]
