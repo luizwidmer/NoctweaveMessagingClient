@@ -47,6 +47,7 @@ struct PrefetchedDirectEnvelopeRecord: Codable, Identifiable {
 @MainActor
 final class CiphertextPrefetchStore {
     nonisolated static let appGroupIdentifier = "group.com.noctyra.client"
+    private static let maxEncryptedFileBytes = 2_000_000
 
     private let directory: URL
     private let configURL: URL
@@ -121,7 +122,15 @@ final class CiphertextPrefetchStore {
 
     private func read<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        if let size = attributes[.size] as? NSNumber,
+           size.intValue > Self.maxEncryptedFileBytes {
+            throw CiphertextPrefetchStoreError.fileTooLarge
+        }
         let data = try Data(contentsOf: url)
+        guard data.count <= Self.maxEncryptedFileBytes else {
+            throw CiphertextPrefetchStoreError.fileTooLarge
+        }
         let payload = try decrypt(data)
         return try PICCPCoder.decode(type, from: payload)
     }
@@ -183,6 +192,7 @@ private struct CiphertextPrefetchFileEnvelope: Codable {
 
 private enum CiphertextPrefetchStoreError: Error {
     case encryptionFailed
+    case fileTooLarge
 }
 
 #if canImport(Security)
