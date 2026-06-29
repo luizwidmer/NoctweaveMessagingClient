@@ -7,6 +7,11 @@ struct CiphertextPrefetchResult: Equatable {
     var failures: [String]
 }
 
+private enum CiphertextPrefetchRunnerLimits {
+    nonisolated static let defaultEnvelopeCountPerProfile = 100
+    nonisolated static let maximumEnvelopeCountPerProfile = 100
+}
+
 @MainActor
 struct CiphertextPrefetchRunner {
     private let store: CiphertextPrefetchStore
@@ -14,10 +19,13 @@ struct CiphertextPrefetchRunner {
 
     init(
         store: CiphertextPrefetchStore,
-        maxEnvelopeCountPerProfile: Int = 100
+        maxEnvelopeCountPerProfile: Int = CiphertextPrefetchRunnerLimits.defaultEnvelopeCountPerProfile
     ) {
         self.store = store
-        self.maxEnvelopeCountPerProfile = maxEnvelopeCountPerProfile
+        self.maxEnvelopeCountPerProfile = min(
+            max(1, maxEnvelopeCountPerProfile),
+            CiphertextPrefetchRunnerLimits.maximumEnvelopeCountPerProfile
+        )
     }
 
     static func runDefault() async -> CiphertextPrefetchResult {
@@ -122,7 +130,7 @@ struct CiphertextPrefetchRunner {
                 userInfo: [NSLocalizedDescriptionKey: response.error ?? "Relay did not return encrypted messages."]
             )
         }
-        return response.messages ?? []
+        return Array((response.messages ?? []).prefix(maxEnvelopeCountPerProfile))
     }
 
     private func makeActorProof(
