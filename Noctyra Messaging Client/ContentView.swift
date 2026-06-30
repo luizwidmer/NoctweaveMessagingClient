@@ -229,7 +229,8 @@ struct ContentView: View {
         #else
         GeometryReader { proxy in
             let size = proxy.size
-            let useSideRail = IOSControlMetrics.prefersSideRail(for: size)
+            let stableSize = IOSControlMetrics.stableScreenSize(fallback: size)
+            let useSideRail = IOSControlMetrics.prefersSideRail(for: stableSize)
 
             Group {
                 if useSideRail {
@@ -1539,6 +1540,11 @@ private struct ChatWallpaper: View {
 
     var body: some View {
         GeometryReader { proxy in
+            #if os(iOS)
+            let renderSize = IOSControlMetrics.stableScreenSize(fallback: proxy.size)
+            #else
+            let renderSize = proxy.size
+            #endif
             ZStack {
                 LinearGradient(
                     colors: [
@@ -1550,10 +1556,10 @@ private struct ChatWallpaper: View {
                     endPoint: .bottomTrailing
                 )
 
-                Image(assetName(for: proxy.size))
+                Image(assetName(for: renderSize))
                     .resizable()
                     .scaledToFill()
-                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .frame(width: renderSize.width, height: renderSize.height)
                     .clipped()
                     .opacity(isDark ? 0.30 : 0.24)
                     .blendMode(isDark ? .plusLighter : .normal)
@@ -1570,7 +1576,8 @@ private struct ChatWallpaper: View {
                         )
                     )
             }
-            .frame(width: proxy.size.width, height: proxy.size.height)
+            .frame(width: renderSize.width, height: renderSize.height)
+            .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
         }
         .allowsHitTesting(false)
     }
@@ -1600,6 +1607,7 @@ private struct ChatTopBar: View {
     let title: String
     let status: String
     var trailing: AnyView? = nil
+    var onBack: (() -> Void)? = nil
 
     private var isDark: Bool { colorScheme == .dark }
     private var isRegularWidth: Bool { horizontalSizeClass == .regular }
@@ -1614,6 +1622,7 @@ private struct ChatTopBar: View {
     var body: some View {
         HStack(spacing: isRegularWidth ? 12 : 9) {
             Button {
+                onBack?()
                 dismiss()
                 FeedbackGenerator.light()
             } label: {
@@ -1908,7 +1917,10 @@ private struct ConversationView: View {
                             iconSize: chatHeaderIconSize
                         )
                     }
-                )
+                ),
+                onBack: {
+                    Task { await deactivateConversation(contact.id) }
+                }
             )
             #else
             HStack(alignment: .center) {
@@ -2263,12 +2275,14 @@ private struct ConversationView: View {
             #endif
         }
         .onDisappear {
+            #if os(iOS)
+            revealMessages = false
+            #else
             if model.activeContactId == contact.id {
                 model.activeContactId = nil
             }
             Task { await deactivateConversation(contact.id) }
             revealMessages = false
-            #if os(macOS)
             SecureEventInputController.shared.setEnabled(false)
             #endif
         }
@@ -2502,7 +2516,10 @@ private struct GroupConversationView: View {
                             iconSize: chatHeaderIconSize
                         )
                     }
-                )
+                ),
+                onBack: {
+                    Task { await deactivateGroup(group.id) }
+                }
             )
             #else
             HStack(alignment: .center) {
@@ -2862,11 +2879,15 @@ private struct GroupConversationView: View {
             screenProtection.refresh()
         }
         .onDisappear {
+            #if os(iOS)
+            revealMessages = false
+            #else
             if model.activeGroupId == group.id {
                 model.activeGroupId = nil
             }
             Task { await deactivateGroup(group.id) }
             revealMessages = false
+            #endif
         }
         .onChange(of: screenProtection.isSensitiveHidden) { _, newValue in
             if newValue {

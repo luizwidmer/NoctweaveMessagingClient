@@ -16,6 +16,13 @@ enum IOSControlMetrics {
         isPad && size.width >= 900 && size.width > size.height
     }
 
+    static func stableScreenSize(fallback: CGSize) -> CGSize {
+        let screenSize = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.size }
+            .first { $0.width > 0 && $0.height > 0 }
+        return screenSize ?? fallback
+    }
+
     static var circleButtonDiameter: CGFloat {
         isPad ? 34 * padControlScale : 34
     }
