@@ -5204,7 +5204,9 @@ final class ClientViewModel: ObservableObject {
             return [state.identity.fingerprint]
         }
         var ordered: [String] = [profile.identity.fingerprint]
-        let continuityEvents = profile.continuityEvents.sorted { $0.timestamp > $1.timestamp }
+        let continuityEvents = profile.continuityEvents
+            .filter { $0.kind == .identityRotated }
+            .sorted { $0.timestamp > $1.timestamp }
         for event in continuityEvents {
             if let newFingerprint = event.newFingerprint?.trimmingCharacters(in: .whitespacesAndNewlines),
                !newFingerprint.isEmpty {
