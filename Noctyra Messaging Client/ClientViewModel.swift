@@ -1674,7 +1674,8 @@ final class ClientViewModel: ObservableObject {
             group.createdByFingerprint = descriptor.createdByFingerprint
             group.groupRatchetState = groupRatchetState(
                 from: descriptor,
-                identity: profile.identity,
+                group: group,
+                profile: profile,
                 existing: group.groupRatchetState
             )
             guard group.relayInboxId == groupInboxId,
@@ -1731,7 +1732,7 @@ final class ClientViewModel: ObservableObject {
                     continue
                 }
                 if envelope.epoch != ratchetState.epoch || envelope.transcriptHash != ratchetState.transcriptHash {
-                    if let recovered = groupRatchetState(from: descriptor, identity: profile.identity, existing: nil),
+                    if let recovered = groupRatchetState(from: descriptor, group: group, profile: profile, existing: nil),
                        recovered.epoch == envelope.epoch,
                        recovered.transcriptHash == envelope.transcriptHash {
                         ratchetState = recovered
@@ -1821,7 +1822,7 @@ final class ClientViewModel: ObservableObject {
                         acknowledgedIds.insert(envelope.id)
                     }
                 } catch {
-                    if let recovered = groupRatchetState(from: descriptor, identity: profile.identity, existing: nil),
+                    if let recovered = groupRatchetState(from: descriptor, group: group, profile: profile, existing: nil),
                        recovered.epoch == envelope.epoch,
                        recovered.transcriptHash == envelope.transcriptHash,
                        let sender = descriptor.members.first(where: { $0.fingerprint == envelope.senderFingerprint }),
@@ -2693,7 +2694,7 @@ final class ClientViewModel: ObservableObject {
             relayInboxId: relayGroup.inboxId,
             relayEpoch: relayGroup.epoch,
             relayTranscriptHash: relayGroup.mlsEpochState.confirmedTranscriptHash,
-            groupRatchetState: groupRatchetState(from: relayGroup, identity: state.identity),
+            groupRatchetState: groupRatchetState(from: relayGroup, scopedIdentity: scopedIdentity),
             createdByFingerprint: relayGroup.createdByFingerprint,
             memberProfiles: groupMemberProfiles(from: relayGroup, preferredRelay: state.relay),
             scopedIdentity: scopedIdentity
@@ -2781,7 +2782,8 @@ final class ClientViewModel: ObservableObject {
                 group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
                 group.groupRatchetState = groupRatchetState(
                     from: descriptor,
-                    identity: state.identity,
+                    group: group,
+                    profile: state,
                     existing: group.groupRatchetState
                 )
                 group.createdByFingerprint = descriptor.createdByFingerprint
@@ -2839,11 +2841,18 @@ final class ClientViewModel: ObservableObject {
         guard let group = state.group(for: id) else { return }
         if group.relayInboxId != nil {
             let relay = state.relay
+            let actorCredential = groupActorCredential(for: group)
             let identityFingerprints = activeIdentityLineageFingerprints()
             let identitySet = Set(identityFingerprints)
             let descriptor: RelayGroupDescriptor?
             do {
-                descriptor = try await fetchRelayGroup(groupId: id, relay: relay)
+                descriptor = try await fetchRelayGroup(
+                    groupId: id,
+                    relay: relay,
+                    memberFingerprint: actorCredential.fingerprint,
+                    signingKey: actorCredential.signingKey,
+                    publicSigningKey: actorCredential.publicSigningKey
+                )
             } catch {
                 lastError = "Failed to leave relay-backed group: \(error.localizedDescription)"
                 return
@@ -2851,8 +2860,8 @@ final class ClientViewModel: ObservableObject {
 
             if let descriptor,
                identitySet.contains(descriptor.createdByFingerprint) || group.scopedIdentity?.fingerprint == descriptor.createdByFingerprint {
-                let creatorCredential = group.scopedIdentity?.fingerprint == descriptor.createdByFingerprint
-                    ? groupActorCredential(for: group)
+                let creatorCredential = actorCredential.fingerprint == descriptor.createdByFingerprint
+                    ? actorCredential
                     : RelayGroupActorCredential(
                         fingerprint: descriptor.createdByFingerprint,
                         signingKey: state.identity.signingKey,
@@ -2937,16 +2946,30 @@ final class ClientViewModel: ObservableObject {
         }
         let scopedIdentity = group.scopedIdentity ?? GroupScopedIdentity(displayName: state.identity.displayName)
         do {
-            _ = try await requestRelayGroupJoin(
+            let descriptor = try await acceptRelayGroupInvitation(
                 groupId: id,
-                requesterProfile: relayGroupMemberProfile(for: scopedIdentity),
-                requesterSigningKey: scopedIdentity.signingKey,
-                invitedFingerprint: state.identity.fingerprint
+                scopedIdentity: scopedIdentity,
+                invitedFingerprint: state.identity.fingerprint,
+                relay: state.relay
             )
             group.scopedIdentity = scopedIdentity
+            group.title = descriptor.title
+            group.memberProfiles = groupMemberProfiles(from: descriptor, preferredRelay: state.relay)
+            group.memberContactIds = contactIds(for: group.memberProfiles.map(\.fingerprint))
+            group.relayInboxId = descriptor.inboxId
+            group.relayEpoch = descriptor.epoch
+            group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
+            group.groupRatchetState = groupRatchetState(
+                from: descriptor,
+                scopedIdentity: scopedIdentity,
+                existing: group.groupRatchetState
+            )
+            group.createdByFingerprint = descriptor.createdByFingerprint
+            group.isPendingInvitation = false
+            unmarkRelayGroupLocallyLeft(group.id, profileId: state.activeIdentityId)
             state.upsert(group: group)
             await save()
-            lastInfo = "Requested to join \(group.title) with a group identity."
+            lastInfo = "Joined \(group.title)."
         } catch {
             lastError = "Failed to accept group invitation: \(error.localizedDescription)"
         }
@@ -3145,7 +3168,8 @@ final class ClientViewModel: ObservableObject {
             group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
             group.groupRatchetState = groupRatchetState(
                 from: descriptor,
-                identity: state.identity,
+                group: group,
+                profile: state,
                 existing: group.groupRatchetState
             )
             group.createdByFingerprint = descriptor.createdByFingerprint
@@ -5051,6 +5075,96 @@ final class ClientViewModel: ObservableObject {
         return request
     }
 
+    private func acceptRelayGroupInvitation(
+        groupId: UUID,
+        scopedIdentity: GroupScopedIdentity,
+        invitedFingerprint: String,
+        relay: RelayEndpoint
+    ) async throws -> RelayGroupDescriptor {
+        let client = relayClient(for: relay)
+        guard let currentGroup = try await fetchRelayGroup(
+            groupId: groupId,
+            relay: relay,
+            memberFingerprint: invitedFingerprint,
+            signingKey: state.identity.signingKey,
+            publicSigningKey: state.identity.signingKey.publicKeyData
+        ) else {
+            throw RelayGroupRegistryError.rejected("Relay group invitation is no longer available.")
+        }
+        let requesterProfile = relayGroupMemberProfile(for: scopedIdentity)
+        let targetProfiles = projectedRelayGroupProfiles(
+            currentMembers: currentGroup.members,
+            addProfiles: [requesterProfile],
+            removeFingerprints: []
+        )
+        let ratchetDistribution = try GroupRatchetEpochSecretDistribution.seal(
+            secret: freshGroupRatchetSecret(),
+            groupId: groupId,
+            epoch: currentGroup.epoch + 1,
+            operation: .joinApprove,
+            recipients: targetProfiles
+        )
+        var groupCommit = SignedGroupCommit(
+            operation: .joinApprove,
+            groupId: groupId,
+            actorFingerprint: scopedIdentity.fingerprint,
+            baseEpoch: currentGroup.epoch,
+            previousTranscriptHash: currentGroup.mlsEpochState.confirmedTranscriptHash,
+            addMemberFingerprints: [scopedIdentity.fingerprint],
+            addMemberProfiles: [requesterProfile],
+            ratchetSecretDistribution: ratchetDistribution
+        )
+        let groupCommitProof = try makeActorProof(
+            fingerprint: scopedIdentity.fingerprint,
+            signingKey: scopedIdentity.signingKey,
+            publicSigningKey: scopedIdentity.signingKey.publicKeyData
+        ) { proof in
+            try groupCommit.signableData(for: proof)
+        }
+        groupCommit = SignedGroupCommit(
+            operation: groupCommit.operation,
+            groupId: groupCommit.groupId,
+            actorFingerprint: groupCommit.actorFingerprint,
+            baseEpoch: groupCommit.baseEpoch,
+            previousTranscriptHash: groupCommit.previousTranscriptHash,
+            title: groupCommit.title,
+            addMemberFingerprints: groupCommit.addMemberFingerprints,
+            addMemberProfiles: groupCommit.addMemberProfiles,
+            removeMemberFingerprints: groupCommit.removeMemberFingerprints,
+            ratchetSecretDistribution: groupCommit.ratchetSecretDistribution,
+            actorProof: groupCommitProof
+        )
+        var request = RequestGroupJoinRequest(
+            groupId: groupId,
+            requesterProfile: requesterProfile,
+            invitedFingerprint: invitedFingerprint,
+            groupCommit: groupCommit
+        )
+        let proof = try makeActorProof(
+            fingerprint: scopedIdentity.fingerprint,
+            signingKey: scopedIdentity.signingKey,
+            publicSigningKey: scopedIdentity.signingKey.publicKeyData
+        ) { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = RequestGroupJoinRequest(
+            groupId: request.groupId,
+            requesterProfile: request.requesterProfile,
+            invitedFingerprint: request.invitedFingerprint,
+            groupCommit: request.groupCommit,
+            requesterProof: proof
+        )
+        let response = try await client.send(.requestGroupJoin(request))
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected invitation acceptance.")
+        }
+        guard response.type == .group,
+              let group = response.group else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+        return group
+    }
+
     private func listRelayGroupJoinRequests(groupId: UUID) async throws -> [RelayGroupJoinRequest] {
         let client = relayClient(for: state.relay)
         guard let group = state.group(for: groupId) else {
@@ -5313,7 +5427,8 @@ final class ClientViewModel: ObservableObject {
             merged.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
             merged.groupRatchetState = groupRatchetState(
                 from: descriptor,
-                identity: profile.identity,
+                group: merged,
+                profile: profile,
                 existing: merged.groupRatchetState
             )
             merged.createdByFingerprint = descriptor.createdByFingerprint
@@ -5541,6 +5656,41 @@ final class ClientViewModel: ObservableObject {
             identity: identity,
             existing: existing
         )
+    }
+
+    private func groupRatchetState(
+        from descriptor: RelayGroupDescriptor,
+        scopedIdentity: GroupScopedIdentity,
+        existing: GroupRatchetState? = nil
+    ) -> GroupRatchetState? {
+        var identity = Identity(displayName: scopedIdentity.displayName)
+        identity.signingKey = scopedIdentity.signingKey
+        identity.agreementKey = scopedIdentity.agreementKey
+        return groupRatchetState(from: descriptor, identity: identity, existing: existing)
+    }
+
+    private func groupRatchetState(
+        from descriptor: RelayGroupDescriptor,
+        group: GroupConversation,
+        profile: IdentityProfile,
+        existing: GroupRatchetState? = nil
+    ) -> GroupRatchetState? {
+        if let scopedIdentity = group.scopedIdentity {
+            return groupRatchetState(from: descriptor, scopedIdentity: scopedIdentity, existing: existing)
+        }
+        return groupRatchetState(from: descriptor, identity: profile.identity, existing: existing)
+    }
+
+    private func groupRatchetState(
+        from descriptor: RelayGroupDescriptor,
+        group: GroupConversation,
+        profile: ClientState,
+        existing: GroupRatchetState? = nil
+    ) -> GroupRatchetState? {
+        if let scopedIdentity = group.scopedIdentity {
+            return groupRatchetState(from: descriptor, scopedIdentity: scopedIdentity, existing: existing)
+        }
+        return groupRatchetState(from: descriptor, identity: profile.identity, existing: existing)
     }
 
     private func contactIds(for memberFingerprints: [String], contacts: [Contact]? = nil) -> [UUID] {

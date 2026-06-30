@@ -2487,7 +2487,7 @@ private struct GroupConversationView: View {
 
     private var groupStatusText: String {
         if isPendingInvitation {
-            return currentGroup.scopedIdentity == nil ? "Invitation pending" : "Join requested"
+            return "Invitation pending"
         }
         return "\(memberCount) members"
     }
@@ -2514,7 +2514,6 @@ private struct GroupConversationView: View {
     var body: some View {
         let isSensitiveHidden = screenProtection.isSensitiveHidden
         let isRevealed = revealMessages && !isSensitiveHidden
-        let hasRequestedJoin = isPendingInvitation && currentGroup.scopedIdentity != nil
         VStack(spacing: 0) {
             #if os(iOS)
             ChatTopBar(
@@ -2644,7 +2643,6 @@ private struct GroupConversationView: View {
                             GroupInvitationPanel(
                                 title: groupTitle,
                                 inviterName: groupInviterName,
-                                hasRequestedJoin: hasRequestedJoin,
                                 onAccept: {
                                     Task { await model.acceptGroupInvitation(id: group.id) }
                                 },
@@ -3074,7 +3072,6 @@ private struct GroupConversationView: View {
 private struct GroupInvitationPanel: View {
     let title: String
     let inviterName: String
-    let hasRequestedJoin: Bool
     let onAccept: () -> Void
     let onDecline: () -> Void
     @Environment(\.appTheme) private var theme
@@ -3089,11 +3086,9 @@ private struct GroupInvitationPanel: View {
                     .background(theme.accent.opacity(0.14), in: Circle())
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(hasRequestedJoin ? "Join Request Sent" : "Group Invitation")
+                    Text("Group Invitation")
                         .font(.headline)
-                    Text(hasRequestedJoin
-                         ? "Your group-only identity was sent to \(title). The group creator must approve it before messages unlock."
-                         : "\(inviterName) invited you to \(title). Accepting creates a group-only identity for this conversation.")
+                    Text("\(inviterName) invited you to \(title). Accepting creates a group-only identity for this conversation.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -3101,23 +3096,14 @@ private struct GroupInvitationPanel: View {
             }
 
             HStack(spacing: 10) {
-                Button(hasRequestedJoin ? "Dismiss" : "Decline", action: onDecline)
+                Button("Decline", action: onDecline)
                     .glassButton(compact: true)
                     .hoverLift()
-                if hasRequestedJoin {
-                    Label("Requested", systemImage: "clock")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(theme.accent)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 8)
-                        .background(theme.accent.opacity(0.12), in: Capsule())
-                } else {
-                    Button(action: onAccept) {
-                        Label("Accept", systemImage: "checkmark")
-                    }
-                    .glassButton(prominent: true, compact: true)
-                    .hoverLift()
+                Button(action: onAccept) {
+                    Label("Accept", systemImage: "checkmark")
                 }
+                .glassButton(prominent: true, compact: true)
+                .hoverLift()
             }
         }
         .uniformGlassCard(cornerRadius: 18, padding: 14)
@@ -3660,11 +3646,11 @@ private struct GroupDetailsView: View {
 
     private func leave() {
         isSaving = true
+        dismiss()
         Task {
             await model.leaveGroup(id: groupId)
             await MainActor.run {
                 isSaving = false
-                dismiss()
             }
         }
     }
