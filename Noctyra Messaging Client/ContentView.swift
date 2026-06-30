@@ -2444,6 +2444,7 @@ private struct GroupConversationView: View {
     @State private var showingGroupDetails = false
     @State private var showingVoiceRecorder = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
@@ -2479,6 +2480,10 @@ private struct GroupConversationView: View {
 
     private var currentGroup: GroupConversation {
         resolvedGroup ?? group
+    }
+
+    private var isGroupUnavailable: Bool {
+        resolvedGroup == nil
     }
 
     private var isPendingInvitation: Bool {
@@ -2807,7 +2812,9 @@ private struct GroupConversationView: View {
         .toolbar(.hidden, for: .navigationBar)
         #endif
         .sheet(isPresented: $showingGroupDetails) {
-            GroupDetailsView(model: model, groupId: group.id)
+            GroupDetailsView(model: model, groupId: group.id) {
+                closeGroupView()
+            }
                 .noctyraSheetPresentation()
         }
         .sheet(isPresented: $showingVoiceRecorder) {
@@ -2923,6 +2930,11 @@ private struct GroupConversationView: View {
         .onChange(of: group.id) { oldValue, _ in
             Task { await deactivateGroup(oldValue) }
         }
+        .onChange(of: isGroupUnavailable) { _, unavailable in
+            if unavailable {
+                closeGroupView()
+            }
+        }
         .onAppear {
             revealMessages = false
             screenProtection.refresh()
@@ -2977,6 +2989,16 @@ private struct GroupConversationView: View {
         guard !trimmed.isEmpty else { return }
         Task { await model.sendGroupMessage(text: trimmed, to: group.id) }
         messageText = ""
+    }
+
+    private func closeGroupView() {
+        if model.activeGroupId == group.id {
+            model.activeGroupId = nil
+        }
+        Task { await deactivateGroup(group.id) }
+        #if os(iOS)
+        dismiss()
+        #endif
     }
 
     #if os(iOS)
@@ -3373,6 +3395,7 @@ private struct SheetGroupMemberRow: View {
 private struct GroupDetailsView: View {
     @ObservedObject var model: ClientViewModel
     let groupId: UUID
+    var onGroupRemoved: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var isSaving = false
@@ -3601,6 +3624,7 @@ private struct GroupDetailsView: View {
             await model.leaveGroup(id: groupId)
             await MainActor.run {
                 isSaving = false
+                onGroupRemoved()
             }
         }
     }
