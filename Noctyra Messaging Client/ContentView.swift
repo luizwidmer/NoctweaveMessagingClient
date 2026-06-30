@@ -3297,11 +3297,10 @@ private struct SheetContactSelectionRow: View {
 
 private struct SheetGroupMemberRow: View {
     let member: RelayGroupMemberProfile
-    let contact: Contact?
     let isSelf: Bool
     let isCreator: Bool
-    let canAddContact: Bool
-    let onAddContact: () -> Void
+    let canKick: Bool
+    let onKick: () -> Void
 
     @Environment(\.appTheme) private var theme
 
@@ -3315,7 +3314,7 @@ private struct SheetGroupMemberRow: View {
 
     private var statusText: String {
         if isSelf { return "You" }
-        if contact != nil { return "Contact" }
+        if isCreator { return "Creator" }
         return "Group identity"
     }
 
@@ -3349,8 +3348,11 @@ private struct SheetGroupMemberRow: View {
 
             Spacer(minLength: 8)
 
-            if canAddContact {
-                Button("Add Contact", action: onAddContact)
+            if canKick {
+                Button(role: .destructive, action: onKick) {
+                    Image(systemName: "person.crop.circle.badge.minus")
+                        .font(.system(size: 14, weight: .semibold))
+                }
                     .glassButton(compact: true)
                     .hoverLift()
             }
@@ -3373,10 +3375,10 @@ private struct GroupDetailsView: View {
     let groupId: UUID
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
-    @State private var selectedMembers = Set<UUID>()
-    @State private var memberSearchText = ""
     @State private var isSaving = false
     @State private var showingLeaveConfirm = false
+    @State private var showingKickConfirm = false
+    @State private var memberToKick: RelayGroupMemberProfile?
     private var canEditRelayGroup: Bool {
         guard let group else { return false }
         return model.canEditRelayGroup(group)
@@ -3424,8 +3426,8 @@ private struct GroupDetailsView: View {
                         icon: "person.3.fill",
                         title: "Group Settings",
                         subtitle: canEditRelayGroup
-                            ? "Manage the group name and membership."
-                            : "Review membership and relay policy."
+                            ? "Rename the group and manage scoped members."
+                            : "Review group membership and relay policy."
                     )
 
                     if group == nil {
@@ -3463,7 +3465,7 @@ private struct GroupDetailsView: View {
 
                         SheetSection(
                             title: "Members",
-                            subtitle: "\(group?.resolvedMemberCount ?? selectedMembers.count) in group",
+                            subtitle: "\(group?.resolvedMemberCount ?? groupMemberProfiles.count) in group",
                             icon: "person.2.fill"
                         ) {
                             if groupMemberProfiles.isEmpty {
@@ -3477,55 +3479,14 @@ private struct GroupDetailsView: View {
                                     ForEach(groupMemberProfiles, id: \.fingerprint) { member in
                                         SheetGroupMemberRow(
                                             member: member,
-                                            contact: contact(for: member.fingerprint),
                                             isSelf: isSelf(member.fingerprint),
                                             isCreator: member.fingerprint == group?.createdByFingerprint,
-                                            canAddContact: canPromote(member),
-                                            onAddContact: {
-                                                Task {
-                                                    await model.promoteGroupMemberToContact(
-                                                        groupId: groupId,
-                                                        fingerprint: member.fingerprint
-                                                    )
-                                                }
+                                            canKick: canKick(member),
+                                            onKick: {
+                                                memberToKick = member
+                                                showingKickConfirm = true
                                             }
                                         )
-                                    }
-                                }
-                            }
-                        }
-
-                        if canEditRelayGroup {
-                            SheetSection(
-                                title: "Contact Membership",
-                                subtitle: "\(selectedMembers.count) selected",
-                                icon: "person.crop.circle.badge.plus"
-                            ) {
-                                InlineSearchField(text: $memberSearchText, prompt: "Search contacts")
-
-                                if model.state.contacts.isEmpty {
-                                    SheetEmptyState(
-                                        icon: "person.crop.circle.badge.plus",
-                                        title: "No contacts available",
-                                        message: "Add contacts before editing group membership."
-                                    )
-                                } else if filteredContacts.isEmpty {
-                                    SheetEmptyState(
-                                        icon: "magnifyingglass",
-                                        title: "No matching contacts",
-                                        message: "Try another name or fingerprint."
-                                    )
-                                } else {
-                                    LazyVStack(spacing: 8) {
-                                        ForEach(filteredContacts) { contact in
-                                            SheetContactSelectionRow(
-                                                contact: contact,
-                                                isSelected: selectedMembers.contains(contact.id),
-                                                isEnabled: canEditRelayGroup
-                                            ) {
-                                                toggle(contact.id)
-                                            }
-                                        }
                                     }
                                 }
                             }
@@ -3534,7 +3495,7 @@ private struct GroupDetailsView: View {
                         SheetSection(title: "How Changes Sync", icon: "arrow.triangle.2.circlepath") {
                             Text(
                                 group?.relayInboxId != nil
-                                    ? "Changes are synced to the relay group registry for this identity. Messages remain end-to-end encrypted for each member."
+                                    ? "Changes are synced to the relay group registry through group-scoped identities. Messages remain end-to-end encrypted for each member."
                                     : "Changes affect this identity profile on this device. Messages remain end-to-end encrypted for each member."
                             )
                             .font(.callout)
@@ -3592,49 +3553,38 @@ private struct GroupDetailsView: View {
         } message: {
             Text(leaveDialogMessage)
         }
-    }
-
-    private func toggle(_ contactId: UUID) {
-        guard canEditRelayGroup else { return }
-        if selectedMembers.contains(contactId) {
-            selectedMembers.remove(contactId)
-        } else {
-            selectedMembers.insert(contactId)
+        .confirmationDialog("Remove this member?", isPresented: $showingKickConfirm) {
+            Button("Remove Member", role: .destructive) {
+                if let memberToKick {
+                    kick(memberToKick)
+                }
+            }
+        } message: {
+            if let memberToKick {
+                Text("This removes \(displayName(for: memberToKick)) from the relay group.")
+            }
         }
-        FeedbackGenerator.light()
     }
 
     private var canSave: Bool {
-        !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && selectedMembers.count >= 2
-    }
-
-    private var filteredContacts: [Contact] {
-        let sorted = model.state.contacts.sorted {
-            $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty,
+              let group else {
+            return false
         }
-        let query = memberSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !query.isEmpty else { return sorted }
-        return sorted.filter { contact in
-            let haystack = "\(contact.displayName) \(contact.fingerprint)".lowercased()
-            return haystack.contains(query)
-        }
+        return canEditRelayGroup && trimmedTitle != group.title
     }
 
     private func loadCurrentValues() {
         guard let group else { return }
         title = group.title
-        selectedMembers = Set(group.memberContactIds)
     }
 
     private func save() {
         guard canSave else { return }
         isSaving = true
         Task {
-            await model.updateGroup(
-                id: groupId,
-                title: title,
-                memberContactIds: Array(selectedMembers)
-            )
+            await model.renameGroup(id: groupId, title: title)
             await MainActor.run {
                 isSaving = false
                 if model.state.group(for: groupId) != nil {
@@ -3655,21 +3605,32 @@ private struct GroupDetailsView: View {
         }
     }
 
-    private func contact(for fingerprint: String) -> Contact? {
-        model.state.contacts.first { $0.fingerprint == fingerprint }
-    }
-
     private func isSelf(_ fingerprint: String) -> Bool {
         fingerprint == model.state.identity.fingerprint || group?.scopedIdentity?.fingerprint == fingerprint
     }
 
-    private func canPromote(_ member: RelayGroupMemberProfile) -> Bool {
-        !isSelf(member.fingerprint)
-            && contact(for: member.fingerprint) == nil
-            && member.inboxId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            && member.relay != nil
-            && member.signingPublicKey?.isEmpty == false
-            && member.agreementPublicKey?.isEmpty == false
+    private func canKick(_ member: RelayGroupMemberProfile) -> Bool {
+        canEditRelayGroup
+            && !isSelf(member.fingerprint)
+            && member.fingerprint != group?.createdByFingerprint
+    }
+
+    private func kick(_ member: RelayGroupMemberProfile) {
+        isSaving = true
+        Task {
+            await model.kickGroupMember(groupId: groupId, fingerprint: member.fingerprint)
+            await MainActor.run {
+                isSaving = false
+            }
+        }
+    }
+
+    private func displayName(for member: RelayGroupMemberProfile) -> String {
+        let trimmed = member.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            return trimmed
+        }
+        return "Group Member \(member.fingerprint.prefix(8))"
     }
 }
 

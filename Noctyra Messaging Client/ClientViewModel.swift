@@ -1655,13 +1655,20 @@ final class ClientViewModel: ObservableObject {
                 continue
             }
             let actorCredential = groupActorCredential(for: group, profile: profile)
-            guard let descriptor = try await fetchRelayGroup(
-                groupId: group.id,
-                relay: profile.relay,
-                memberFingerprint: actorCredential.fingerprint,
-                signingKey: actorCredential.signingKey,
-                publicSigningKey: actorCredential.publicSigningKey
-            ) else {
+            let descriptor: RelayGroupDescriptor?
+            do {
+                descriptor = try await fetchRelayGroup(
+                    groupId: group.id,
+                    relay: profile.relay,
+                    memberFingerprint: actorCredential.fingerprint,
+                    signingKey: actorCredential.signingKey,
+                    publicSigningKey: actorCredential.publicSigningKey
+                )
+            } catch {
+                missingRelayGroupIds.insert(group.id)
+                continue
+            }
+            guard let descriptor else {
                 missingRelayGroupIds.insert(group.id)
                 continue
             }
@@ -2839,6 +2846,9 @@ final class ClientViewModel: ObservableObject {
 
     func leaveGroup(id: UUID) async {
         guard let group = state.group(for: id) else { return }
+        if activeGroupId == id {
+            activeGroupId = nil
+        }
         if group.relayInboxId != nil {
             let relay = state.relay
             let actorCredential = groupActorCredential(for: group)
@@ -2880,7 +2890,12 @@ final class ClientViewModel: ObservableObject {
                 }
             } else if let descriptor {
                 let memberFingerprints = Set(descriptor.members.map(\.fingerprint))
-                let selfMemberships = identityFingerprints.filter { memberFingerprints.contains($0) }
+                var selfMemberships = identityFingerprints.filter { memberFingerprints.contains($0) }
+                if let scopedFingerprint = group.scopedIdentity?.fingerprint,
+                   memberFingerprints.contains(scopedFingerprint),
+                   !selfMemberships.contains(scopedFingerprint) {
+                    selfMemberships.append(scopedFingerprint)
+                }
                 if selfMemberships.isEmpty {
                     loadGroupMessagesIntoRAM(groupId: id)
                     let messages = state.group(for: id)?.messages ?? []
@@ -2900,9 +2915,13 @@ final class ClientViewModel: ObservableObject {
                 var lastMembershipError: String?
                 for membershipFingerprint in selfMemberships {
                     do {
+                        let signingKey = membershipFingerprint == actorCredential.fingerprint
+                            ? actorCredential.signingKey
+                            : state.identity.signingKey
                         _ = try await updateRelayGroupRegistry(
                             groupId: id,
                             actorFingerprint: membershipFingerprint,
+                            actorSigningKey: signingKey,
                             title: nil,
                             addMemberFingerprints: [],
                             addMemberProfiles: [],
@@ -2937,6 +2956,88 @@ final class ClientViewModel: ObservableObject {
             lastInfo = "Extinguished group \(group.title)."
         } else {
             lastInfo = "Left group \(group.title)."
+        }
+    }
+
+    func renameGroup(id: UUID, title: String) async {
+        guard var group = state.group(for: id) else {
+            lastError = "Group not found."
+            return
+        }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else {
+            lastError = "Choose a group name."
+            return
+        }
+        guard trimmedTitle != group.title else {
+            return
+        }
+
+        if group.relayInboxId != nil {
+            guard canEditRelayGroup(group) else {
+                lastError = "Only the group creator can rename this group."
+                return
+            }
+            let actorCredential = groupActorCredential(for: group)
+            do {
+                let descriptor = try await updateRelayGroupRegistry(
+                    groupId: id,
+                    actorFingerprint: actorCredential.fingerprint,
+                    actorSigningKey: actorCredential.signingKey,
+                    title: trimmedTitle,
+                    addMemberFingerprints: [],
+                    addMemberProfiles: [],
+                    removeMemberFingerprints: []
+                )
+                group = applyRelayGroupDescriptor(descriptor, to: group, profile: state)
+                state.upsert(group: group)
+                await save()
+                lastInfo = "Renamed group \(group.title)."
+            } catch {
+                lastError = "Failed to rename relay group: \(error.localizedDescription)"
+            }
+            return
+        }
+
+        group.title = trimmedTitle
+        state.upsert(group: group)
+        await save()
+        lastInfo = "Renamed group \(group.title)."
+    }
+
+    func kickGroupMember(groupId: UUID, fingerprint: String) async {
+        guard var group = state.group(for: groupId) else {
+            lastError = "Group not found."
+            return
+        }
+        guard group.relayInboxId != nil, canEditRelayGroup(group) else {
+            lastError = "Only the group creator can remove members."
+            return
+        }
+        let normalizedFingerprint = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedFingerprint.isEmpty,
+              normalizedFingerprint != group.scopedIdentity?.fingerprint,
+              normalizedFingerprint != group.createdByFingerprint else {
+            lastError = "The creator cannot be removed from the group."
+            return
+        }
+        let actorCredential = groupActorCredential(for: group)
+        do {
+            let descriptor = try await updateRelayGroupRegistry(
+                groupId: groupId,
+                actorFingerprint: actorCredential.fingerprint,
+                actorSigningKey: actorCredential.signingKey,
+                title: nil,
+                addMemberFingerprints: [],
+                addMemberProfiles: [],
+                removeMemberFingerprints: [normalizedFingerprint]
+            )
+            group = applyRelayGroupDescriptor(descriptor, to: group, profile: state)
+            state.upsert(group: group)
+            await save()
+            lastInfo = "Removed member from \(group.title)."
+        } catch {
+            lastError = "Failed to remove group member: \(error.localizedDescription)"
         }
     }
 
@@ -5573,6 +5674,31 @@ final class ClientViewModel: ObservableObject {
             agreementPublicKey: profile.agreementPublicKey
         )
         return profile
+    }
+
+    private func applyRelayGroupDescriptor(
+        _ descriptor: RelayGroupDescriptor,
+        to group: GroupConversation,
+        profile: ClientState
+    ) -> GroupConversation {
+        var updated = group
+        updated.title = descriptor.title
+        updated.memberProfiles = groupMemberProfiles(from: descriptor, preferredRelay: profile.relay)
+        updated.memberContactIds = contactIds(
+            for: updated.memberProfiles.map(\.fingerprint)
+        )
+        updated.relayInboxId = descriptor.inboxId
+        updated.relayEpoch = descriptor.epoch
+        updated.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
+        updated.groupRatchetState = groupRatchetState(
+            from: descriptor,
+            group: updated,
+            profile: profile,
+            existing: updated.groupRatchetState
+        )
+        updated.createdByFingerprint = descriptor.createdByFingerprint
+        updated.isPendingInvitation = false
+        return updated
     }
 
     private func groupActorCredential(for group: GroupConversation) -> RelayGroupActorCredential {
