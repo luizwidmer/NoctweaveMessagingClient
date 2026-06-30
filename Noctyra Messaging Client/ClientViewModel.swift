@@ -63,6 +63,12 @@ struct RelayHealthSnapshot: Equatable {
 
 @MainActor
 final class ClientViewModel: ObservableObject {
+    private struct RelayGroupActorCredential {
+        let fingerprint: String
+        let signingKey: SigningKeyPair
+        let publicSigningKey: Data
+    }
+
     @Published var state: ClientState
     @Published var isReady = false
     @Published var requiresOnboarding = false
@@ -1644,21 +1650,24 @@ final class ClientViewModel: ObservableObject {
         var missingRelayGroupIds = Set<UUID>()
         for index in profile.groups.indices {
             var group = profile.groups[index]
-            guard let groupInboxId = group.relayInboxId else {
+            guard !group.isPendingInvitation,
+                  let groupInboxId = group.relayInboxId else {
                 continue
             }
+            let actorCredential = groupActorCredential(for: group, profile: profile)
             guard let descriptor = try await fetchRelayGroup(
                 groupId: group.id,
                 relay: profile.relay,
-                memberFingerprint: profile.identity.fingerprint,
-                signingKey: profile.identity.signingKey,
-                publicSigningKey: profile.identity.signingKey.publicKeyData
+                memberFingerprint: actorCredential.fingerprint,
+                signingKey: actorCredential.signingKey,
+                publicSigningKey: actorCredential.publicSigningKey
             ) else {
                 missingRelayGroupIds.insert(group.id)
                 continue
             }
             group.title = descriptor.title
-            group.memberContactIds = contactIds(for: descriptor.members.map(\.fingerprint), contacts: profile.contacts)
+            group.memberProfiles = groupMemberProfiles(from: descriptor, preferredRelay: profile.relay)
+            group.memberContactIds = contactIds(for: group.memberProfiles.map(\.fingerprint), contacts: profile.contacts)
             group.relayInboxId = descriptor.inboxId
             group.relayEpoch = descriptor.epoch
             group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
@@ -1679,19 +1688,19 @@ final class ClientViewModel: ObservableObject {
             var fetchRequest = FetchGroupMessagesRequest(
                 groupId: group.id,
                 groupInboxId: groupInboxId,
-                actorFingerprint: profile.identity.fingerprint
+                actorFingerprint: actorCredential.fingerprint
             )
             let fetchProof = try makeActorProof(
-                fingerprint: profile.identity.fingerprint,
-                signingKey: profile.identity.signingKey,
-                publicSigningKey: profile.identity.signingKey.publicKeyData
+                fingerprint: actorCredential.fingerprint,
+                signingKey: actorCredential.signingKey,
+                publicSigningKey: actorCredential.publicSigningKey
             ) { proof in
                 try fetchRequest.signableData(for: proof)
             }
             fetchRequest = FetchGroupMessagesRequest(
                 groupId: group.id,
                 groupInboxId: groupInboxId,
-                actorFingerprint: profile.identity.fingerprint,
+                actorFingerprint: actorCredential.fingerprint,
                 actorProof: fetchProof
             )
             let response = try await relayClient(for: profile.relay).send(.fetchGroupMessages(fetchRequest))
@@ -1709,7 +1718,7 @@ final class ClientViewModel: ObservableObject {
             )
             var acknowledgedIds = Set<UUID>()
             for envelope in envelopes {
-                if envelope.senderFingerprint == profile.identity.fingerprint {
+                if envelope.senderFingerprint == actorCredential.fingerprint || envelope.senderFingerprint == profile.identity.fingerprint {
                     acknowledgedIds.insert(envelope.id)
                     continue
                 }
@@ -1866,12 +1875,12 @@ final class ClientViewModel: ObservableObject {
                     groupId: group.id,
                     groupInboxId: groupInboxId,
                     messageIds: Array(acknowledgedIds),
-                    actorFingerprint: profile.identity.fingerprint
+                    actorFingerprint: actorCredential.fingerprint
                 )
                 let ackProof = try makeActorProof(
-                    fingerprint: profile.identity.fingerprint,
-                    signingKey: profile.identity.signingKey,
-                    publicSigningKey: profile.identity.signingKey.publicKeyData
+                    fingerprint: actorCredential.fingerprint,
+                    signingKey: actorCredential.signingKey,
+                    publicSigningKey: actorCredential.publicSigningKey
                 ) { proof in
                     try acknowledgement.signableData(for: proof)
                 }
@@ -1879,7 +1888,7 @@ final class ClientViewModel: ObservableObject {
                     groupId: group.id,
                     groupInboxId: groupInboxId,
                     messageIds: Array(acknowledgedIds),
-                    actorFingerprint: profile.identity.fingerprint,
+                    actorFingerprint: actorCredential.fingerprint,
                     actorProof: ackProof
                 )
                 let acknowledgementResponse = try await relayClient(for: profile.relay).send(
@@ -2668,12 +2677,14 @@ final class ClientViewModel: ObservableObject {
             }
             return relayGroupMemberProfile(for: contact)
         }
+        let scopedIdentity = GroupScopedIdentity(displayName: state.identity.displayName)
         let relayGroup: RelayGroupDescriptor
         do {
             relayGroup = try await createRelayGroupRegistry(
                 title: trimmedTitle,
                 memberFingerprints: memberFingerprints,
-                memberProfiles: memberProfiles
+                memberProfiles: memberProfiles,
+                scopedIdentity: scopedIdentity
             )
         } catch {
             lastError = "Failed to create relay group: \(error.localizedDescription)"
@@ -2688,7 +2699,9 @@ final class ClientViewModel: ObservableObject {
             relayEpoch: relayGroup.epoch,
             relayTranscriptHash: relayGroup.mlsEpochState.confirmedTranscriptHash,
             groupRatchetState: groupRatchetState(from: relayGroup, identity: state.identity),
-            createdByFingerprint: relayGroup.createdByFingerprint
+            createdByFingerprint: relayGroup.createdByFingerprint,
+            memberProfiles: groupMemberProfiles(from: relayGroup, preferredRelay: state.relay),
+            scopedIdentity: scopedIdentity
         )
         unmarkRelayGroupLocallyLeft(group.id, profileId: state.activeIdentityId)
         state.upsert(group: group)
@@ -2743,6 +2756,7 @@ final class ClientViewModel: ObservableObject {
         }
 
         if group.relayInboxId != nil {
+            let actorCredential = groupActorCredential(for: group)
             let currentFingerprints = Set(group.memberContactIds.compactMap { memberId in
                 state.contacts.first(where: { $0.id == memberId })?.fingerprint
             })
@@ -2757,13 +2771,16 @@ final class ClientViewModel: ObservableObject {
             do {
                 let descriptor = try await updateRelayGroupRegistry(
                     groupId: id,
+                    actorFingerprint: actorCredential.fingerprint,
+                    actorSigningKey: actorCredential.signingKey,
                     title: trimmedTitle == group.title ? nil : trimmedTitle,
                     addMemberFingerprints: addMembers,
                     addMemberProfiles: memberProfilesForRelay,
                     removeMemberFingerprints: removeMembers
                 )
                 group.title = descriptor.title
-                group.memberContactIds = contactIds(for: descriptor.members.map(\.fingerprint))
+                group.memberProfiles = groupMemberProfiles(from: descriptor, preferredRelay: state.relay)
+                group.memberContactIds = contactIds(for: group.memberProfiles.map(\.fingerprint))
                 group.relayInboxId = descriptor.inboxId
                 group.relayEpoch = descriptor.epoch
                 group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
@@ -2794,6 +2811,9 @@ final class ClientViewModel: ObservableObject {
         guard group.relayInboxId != nil,
               let creator = group.createdByFingerprint else {
             return false
+        }
+        if group.scopedIdentity?.fingerprint == creator {
+            return true
         }
         return Set(activeIdentityLineageFingerprints()).contains(creator)
     }
@@ -2834,13 +2854,21 @@ final class ClientViewModel: ObservableObject {
                 return
             }
 
-            if let descriptor, identitySet.contains(descriptor.createdByFingerprint) {
-                let creatorFingerprint = descriptor.createdByFingerprint
+            if let descriptor,
+               identitySet.contains(descriptor.createdByFingerprint) || group.scopedIdentity?.fingerprint == descriptor.createdByFingerprint {
+                let creatorCredential = group.scopedIdentity?.fingerprint == descriptor.createdByFingerprint
+                    ? groupActorCredential(for: group)
+                    : RelayGroupActorCredential(
+                        fingerprint: descriptor.createdByFingerprint,
+                        signingKey: state.identity.signingKey,
+                        publicSigningKey: state.identity.signingKey.publicKeyData
+                    )
                 do {
                     try await deleteRelayGroupRegistry(
                         groupId: id,
-                        actorFingerprint: creatorFingerprint,
-                        relay: relay
+                        actorFingerprint: creatorCredential.fingerprint,
+                        relay: relay,
+                        actorSigningKey: creatorCredential.signingKey
                     )
                 } catch {
                     lastError = "Failed to extinguish relay-backed group: \(error.localizedDescription)"
@@ -2906,6 +2934,69 @@ final class ClientViewModel: ObservableObject {
         } else {
             lastInfo = "Left group \(group.title)."
         }
+    }
+
+    func acceptGroupInvitation(id: UUID) async {
+        guard var group = state.group(for: id), group.isPendingInvitation else {
+            return
+        }
+        let scopedIdentity = group.scopedIdentity ?? GroupScopedIdentity(displayName: state.identity.displayName)
+        group.scopedIdentity = scopedIdentity
+        state.upsert(group: group)
+        await save()
+        do {
+            _ = try await requestRelayGroupJoin(
+                groupId: id,
+                requesterProfile: relayGroupMemberProfile(for: scopedIdentity),
+                requesterSigningKey: scopedIdentity.signingKey
+            )
+            lastInfo = "Requested to join \(group.title) with a group identity."
+        } catch {
+            lastError = "Failed to accept group invitation: \(error.localizedDescription)"
+        }
+    }
+
+    func declineGroupInvitation(id: UUID) async {
+        await leaveGroup(id: id)
+    }
+
+    func promoteGroupMemberToContact(groupId: UUID, fingerprint: String) async {
+        guard let group = state.group(for: groupId) else { return }
+        let normalizedFingerprint = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedFingerprint.isEmpty,
+              normalizedFingerprint != state.identity.fingerprint,
+              state.contacts.first(where: { $0.fingerprint == normalizedFingerprint }) == nil,
+              let member = group.memberProfiles.first(where: { $0.fingerprint == normalizedFingerprint }),
+              let inboxId = member.inboxId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !inboxId.isEmpty,
+              let relay = member.relay,
+              let signingPublicKey = member.signingPublicKey,
+              !signingPublicKey.isEmpty,
+              let agreementPublicKey = member.agreementPublicKey,
+              !agreementPublicKey.isEmpty else {
+            lastError = "This group member cannot be added as a contact yet."
+            return
+        }
+        let displayName = member.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let contact = Contact(
+            displayName: displayName?.isEmpty == false ? displayName! : "Group Member \(abbreviatedFingerprint(normalizedFingerprint))",
+            inboxId: inboxId,
+            relay: reachableRelayEndpoint(relay, preferredRelay: state.relay),
+            signingPublicKey: signingPublicKey,
+            agreementPublicKey: agreementPublicKey
+        )
+        state.upsert(contact: contact)
+        for index in state.groups.indices where !state.groups[index].memberProfiles.isEmpty {
+            state.groups[index].memberContactIds = contactIds(for: state.groups[index].memberProfiles.map(\.fingerprint))
+        }
+        recordContinuityEvent(
+            kind: .contactAdded,
+            contact: contact,
+            note: "Added from group \(group.title).",
+            newFingerprint: contact.fingerprint
+        )
+        await save()
+        lastInfo = "Added \(contact.displayName) to contacts."
     }
 
     func requestJoin(groupId: UUID) async {
@@ -2987,10 +3078,11 @@ final class ClientViewModel: ObservableObject {
               var ratchetState = group.groupRatchetState else {
             throw RelayGroupRegistryError.invalidResponse
         }
+        let actorCredential = groupActorCredential(for: group)
         let envelope = try GroupRatchet.encrypt(
             body: .text(text),
-            senderSigningKey: state.identity.signingKey,
-            senderFingerprint: state.identity.fingerprint,
+            senderSigningKey: actorCredential.signingKey,
+            senderFingerprint: actorCredential.fingerprint,
             state: &ratchetState,
             metadataBucketSeconds: metadataBucketSeconds(for: state.relay, preferredRelay: state.relay)
         )
@@ -3027,10 +3119,18 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func makeGroupAuthenticatedContext(forSending group: inout GroupConversation) async throws -> MessageAuthenticatedContext {
+        let actorCredential = groupActorCredential(for: group)
         if group.relayInboxId != nil,
-           let descriptor = try await fetchRelayGroup(groupId: group.id, relay: state.relay) {
+           let descriptor = try await fetchRelayGroup(
+            groupId: group.id,
+            relay: state.relay,
+            memberFingerprint: actorCredential.fingerprint,
+            signingKey: actorCredential.signingKey,
+            publicSigningKey: actorCredential.publicSigningKey
+           ) {
             group.title = descriptor.title
-            group.memberContactIds = contactIds(for: descriptor.members.map(\.fingerprint))
+            group.memberProfiles = groupMemberProfiles(from: descriptor, preferredRelay: state.relay)
+            group.memberContactIds = contactIds(for: group.memberProfiles.map(\.fingerprint))
             group.relayInboxId = descriptor.inboxId
             group.relayEpoch = descriptor.epoch
             group.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
@@ -3050,7 +3150,7 @@ final class ClientViewModel: ObservableObject {
         return .group(
             groupId: group.id,
             epoch: epoch,
-            senderFingerprint: state.identity.fingerprint,
+            senderFingerprint: actorCredential.fingerprint,
             transcriptHash: transcriptHash
         )
     }
@@ -3069,7 +3169,7 @@ final class ClientViewModel: ObservableObject {
             for index in state.groups.indices {
                 state.groups[index].memberContactIds.removeAll { $0 == id }
             }
-            state.groups.removeAll { $0.memberContactIds.count < 2 }
+            state.groups.removeAll { $0.relayInboxId == nil && $0.memberContactIds.count < 2 }
             await save()
             lastInfo = "Removed \(contact.displayName)."
         }
@@ -4539,11 +4639,13 @@ final class ClientViewModel: ObservableObject {
     private func createRelayGroupRegistry(
         title: String,
         memberFingerprints: [String],
-        memberProfiles: [RelayGroupMemberProfile]
+        memberProfiles: [RelayGroupMemberProfile],
+        scopedIdentity: GroupScopedIdentity
     ) async throws -> RelayGroupDescriptor {
         let client = relayClient(for: state.relay)
         let groupId = UUID()
-        let allProfiles = uniqueRelayGroupProfiles([relayGroupMemberProfileForActiveIdentity()] + memberProfiles)
+        let creatorProfile = relayGroupMemberProfile(for: scopedIdentity)
+        let allProfiles = uniqueRelayGroupProfiles([creatorProfile] + memberProfiles)
         let initialDistribution = try GroupRatchetEpochSecretDistribution.seal(
             secret: freshGroupRatchetSecret(),
             groupId: groupId,
@@ -4554,13 +4656,17 @@ final class ClientViewModel: ObservableObject {
         var request = CreateGroupRequest(
             groupId: groupId,
             title: title,
-            creatorFingerprint: state.identity.fingerprint,
+            creatorFingerprint: scopedIdentity.fingerprint,
             memberFingerprints: memberFingerprints,
-            creatorProfile: relayGroupMemberProfileForActiveIdentity(),
+            creatorProfile: creatorProfile,
             memberProfiles: memberProfiles,
             initialRatchetSecretDistribution: initialDistribution
         )
-        let proof = try makeActiveIdentityActorProof { actorProof in
+        let proof = try makeActorProof(
+            fingerprint: scopedIdentity.fingerprint,
+            signingKey: scopedIdentity.signingKey,
+            publicSigningKey: scopedIdentity.signingKey.publicKeyData
+        ) { actorProof in
             try request.signableData(for: actorProof)
         }
         request = CreateGroupRequest(
@@ -4819,12 +4925,26 @@ final class ClientViewModel: ObservableObject {
         signerIdentity: Identity,
         relay: RelayEndpoint
     ) async throws -> [RelayGroupDescriptor] {
+        try await listRelayGroups(
+            memberFingerprint: memberFingerprint,
+            signingKey: signerIdentity.signingKey,
+            publicSigningKey: signerIdentity.signingKey.publicKeyData,
+            relay: relay
+        )
+    }
+
+    private func listRelayGroups(
+        memberFingerprint: String,
+        signingKey: SigningKeyPair,
+        publicSigningKey: Data,
+        relay: RelayEndpoint
+    ) async throws -> [RelayGroupDescriptor] {
         let client = relayClient(for: relay)
         var request = ListGroupsRequest(memberFingerprint: memberFingerprint, limit: 256)
         let proof = try makeActorProof(
-            fingerprint: signerIdentity.fingerprint,
-            signingKey: signerIdentity.signingKey,
-            publicSigningKey: signerIdentity.signingKey.publicKeyData
+            fingerprint: memberFingerprint,
+            signingKey: signingKey,
+            publicSigningKey: publicSigningKey
         ) { actorProof in
             try request.signableData(for: actorProof)
         }
@@ -4848,15 +4968,22 @@ final class ClientViewModel: ObservableObject {
     private func requestRelayGroupJoin(
         groupId: UUID,
         requesterProfile: RelayGroupMemberProfile? = nil,
+        requesterSigningKey: SigningKeyPair? = nil,
         relay: RelayEndpoint? = nil
     ) async throws -> RelayGroupJoinRequest {
         let targetRelay = relay ?? state.relay
         let client = relayClient(for: targetRelay)
-        var request = RequestGroupJoinRequest(
-            groupId: groupId,
-            requesterProfile: requesterProfile ?? relayGroupMemberProfileForActiveIdentity()
-        )
-        let proof = try makeActiveIdentityActorProof { actorProof in
+        let resolvedProfile = requesterProfile ?? relayGroupMemberProfileForActiveIdentity()
+        let signerKey = requesterSigningKey ?? state.identity.signingKey
+        guard let publicSigningKey = resolvedProfile.signingPublicKey else {
+            throw RelayGroupRegistryError.rejected("Requester profile is missing a signing key.")
+        }
+        var request = RequestGroupJoinRequest(groupId: groupId, requesterProfile: resolvedProfile)
+        let proof = try makeActorProof(
+            fingerprint: resolvedProfile.fingerprint,
+            signingKey: signerKey,
+            publicSigningKey: publicSigningKey
+        ) { actorProof in
             try request.signableData(for: actorProof)
         }
         request = RequestGroupJoinRequest(
@@ -4879,12 +5006,20 @@ final class ClientViewModel: ObservableObject {
 
     private func listRelayGroupJoinRequests(groupId: UUID) async throws -> [RelayGroupJoinRequest] {
         let client = relayClient(for: state.relay)
+        guard let group = state.group(for: groupId) else {
+            throw RelayGroupRegistryError.rejected("Relay group not found.")
+        }
+        let actorCredential = groupActorCredential(for: group)
         var request = ListGroupJoinRequestsRequest(
             groupId: groupId,
-            actorFingerprint: state.identity.fingerprint,
+            actorFingerprint: actorCredential.fingerprint,
             limit: 256
         )
-        let proof = try makeActiveIdentityActorProof { actorProof in
+        let proof = try makeActorProof(
+            fingerprint: actorCredential.fingerprint,
+            signingKey: actorCredential.signingKey,
+            publicSigningKey: actorCredential.publicSigningKey
+        ) { actorProof in
             try request.signableData(for: actorProof)
         }
         request = ListGroupJoinRequestsRequest(
@@ -4907,7 +5042,17 @@ final class ClientViewModel: ObservableObject {
 
     private func approveRelayGroupJoin(groupId: UUID, joinRequestId: UUID) async throws -> RelayGroupDescriptor {
         let client = relayClient(for: state.relay)
-        guard let currentGroup = try await fetchRelayGroup(groupId: groupId, relay: state.relay) else {
+        guard let localGroup = state.group(for: groupId) else {
+            throw RelayGroupRegistryError.rejected("Relay group not found.")
+        }
+        let actorCredential = groupActorCredential(for: localGroup)
+        guard let currentGroup = try await fetchRelayGroup(
+            groupId: groupId,
+            relay: state.relay,
+            memberFingerprint: actorCredential.fingerprint,
+            signingKey: actorCredential.signingKey,
+            publicSigningKey: actorCredential.publicSigningKey
+        ) else {
             throw RelayGroupRegistryError.rejected("Relay group not found.")
         }
         let pendingRequests = try await listRelayGroupJoinRequests(groupId: groupId)
@@ -4928,14 +5073,18 @@ final class ClientViewModel: ObservableObject {
         var groupCommit = SignedGroupCommit(
             operation: .joinApprove,
             groupId: groupId,
-            actorFingerprint: state.identity.fingerprint,
+            actorFingerprint: actorCredential.fingerprint,
             baseEpoch: currentGroup.epoch,
             previousTranscriptHash: currentGroup.mlsEpochState.confirmedTranscriptHash,
             addMemberFingerprints: [joinRequest.requester.fingerprint],
             addMemberProfiles: [joinRequest.requester],
             ratchetSecretDistribution: joinRatchetDistribution
         )
-        let groupCommitProof = try makeActiveIdentityActorProof { actorProof in
+        let groupCommitProof = try makeActorProof(
+            fingerprint: actorCredential.fingerprint,
+            signingKey: actorCredential.signingKey,
+            publicSigningKey: actorCredential.publicSigningKey
+        ) { actorProof in
             try groupCommit.signableData(for: actorProof)
         }
         groupCommit = SignedGroupCommit(
@@ -4953,11 +5102,15 @@ final class ClientViewModel: ObservableObject {
         )
         var request = ApproveGroupJoinRequest(
             groupId: groupId,
-            actorFingerprint: state.identity.fingerprint,
+            actorFingerprint: actorCredential.fingerprint,
             joinRequestId: joinRequestId,
             groupCommit: groupCommit
         )
-        let proof = try makeActiveIdentityActorProof { actorProof in
+        let proof = try makeActorProof(
+            fingerprint: actorCredential.fingerprint,
+            signingKey: actorCredential.signingKey,
+            publicSigningKey: actorCredential.publicSigningKey
+        ) { actorProof in
             try request.signableData(for: actorProof)
         }
         request = ApproveGroupJoinRequest(
@@ -4981,12 +5134,20 @@ final class ClientViewModel: ObservableObject {
 
     private func rejectRelayGroupJoin(groupId: UUID, joinRequestId: UUID) async throws {
         let client = relayClient(for: state.relay)
+        guard let group = state.group(for: groupId) else {
+            throw RelayGroupRegistryError.rejected("Relay group not found.")
+        }
+        let actorCredential = groupActorCredential(for: group)
         var request = RejectGroupJoinRequest(
             groupId: groupId,
-            actorFingerprint: state.identity.fingerprint,
+            actorFingerprint: actorCredential.fingerprint,
             joinRequestId: joinRequestId
         )
-        let proof = try makeActiveIdentityActorProof { actorProof in
+        let proof = try makeActorProof(
+            fingerprint: actorCredential.fingerprint,
+            signingKey: actorCredential.signingKey,
+            publicSigningKey: actorCredential.publicSigningKey
+        ) { actorProof in
             try request.signableData(for: actorProof)
         }
         request = RejectGroupJoinRequest(
@@ -5017,24 +5178,43 @@ final class ClientViewModel: ObservableObject {
         guard var profile = state.identityProfile(id: profileId) else {
             return
         }
-        let descriptors: [RelayGroupDescriptor]
+        var descriptorsById: [UUID: RelayGroupDescriptor] = [:]
         do {
-            descriptors = try await listRelayGroups(
+            let directDescriptors = try await listRelayGroups(
                 memberFingerprint: profile.identity.fingerprint,
                 signerIdentity: profile.identity,
                 relay: profile.relay
             )
+            for descriptor in directDescriptors {
+                descriptorsById[descriptor.id] = descriptor
+            }
+            for group in profile.groups {
+                guard let scopedIdentity = group.scopedIdentity else { continue }
+                do {
+                    let scopedDescriptors = try await listRelayGroups(
+                        memberFingerprint: scopedIdentity.fingerprint,
+                        signingKey: scopedIdentity.signingKey,
+                        publicSigningKey: scopedIdentity.signingKey.publicKeyData,
+                        relay: profile.relay
+                    )
+                    for descriptor in scopedDescriptors {
+                        descriptorsById[descriptor.id] = descriptor
+                    }
+                } catch {
+                    continue
+                }
+            }
         } catch {
             return
         }
+        let descriptors = Array(descriptorsById.values)
 
         let locallyLeftGroupIds = Set(profile.locallyLeftRelayGroupIds)
         let visibleDescriptors = descriptors.filter { !locallyLeftGroupIds.contains($0.id) }
 
-        let didMaterializeContacts = materializeGroupDirectoryContacts(from: visibleDescriptors, profile: &profile)
-
         let localOnlyGroups = profile.groups.filter { $0.relayInboxId == nil }
         let existingById = Dictionary(uniqueKeysWithValues: profile.groups.map { ($0.id, $0) })
+        let identityLineage = Set(identityLineageFingerprints(for: profile))
         let descriptorIds = Set(visibleDescriptors.map(\.id))
         let staleRelayGroups = profile.groups.filter { group in
             group.relayInboxId != nil && !descriptorIds.contains(group.id)
@@ -5047,22 +5227,26 @@ final class ClientViewModel: ObservableObject {
             try? threadMessageStore.deleteGroupMessages(profileId: profile.id, groupId: group.id)
         }
         let relayBackedGroups = visibleDescriptors.map { descriptor -> GroupConversation in
-            let memberFingerprints = normalizedRelayMemberFingerprints(
-                from: descriptor.members,
+            let memberProfiles = groupMemberProfiles(
+                from: descriptor,
                 preferredRelay: profile.relay
             )
+            let existing = existingById[descriptor.id]
             var merged = existingById[descriptor.id] ?? GroupConversation(
                 id: descriptor.id,
                 title: descriptor.title,
-                memberContactIds: contactIds(for: memberFingerprints, contacts: profile.contacts),
+                memberContactIds: contactIds(for: memberProfiles.map(\.fingerprint), contacts: profile.contacts),
                 relayInboxId: descriptor.inboxId,
                 relayEpoch: descriptor.epoch,
                 relayTranscriptHash: descriptor.mlsEpochState.confirmedTranscriptHash,
                 createdByFingerprint: descriptor.createdByFingerprint,
+                memberProfiles: memberProfiles,
+                isPendingInvitation: !identityLineage.contains(descriptor.createdByFingerprint),
                 createdAt: descriptor.createdAt
             )
             merged.title = descriptor.title
-            merged.memberContactIds = contactIds(for: memberFingerprints, contacts: profile.contacts)
+            merged.memberProfiles = memberProfiles
+            merged.memberContactIds = contactIds(for: memberProfiles.map(\.fingerprint), contacts: profile.contacts)
             merged.relayInboxId = descriptor.inboxId
             merged.relayEpoch = descriptor.epoch
             merged.relayTranscriptHash = descriptor.mlsEpochState.confirmedTranscriptHash
@@ -5072,6 +5256,13 @@ final class ClientViewModel: ObservableObject {
                 existing: merged.groupRatchetState
             )
             merged.createdByFingerprint = descriptor.createdByFingerprint
+            if existing == nil {
+                merged.isPendingInvitation = !identityLineage.contains(descriptor.createdByFingerprint)
+            }
+            if let scopedFingerprint = merged.scopedIdentity?.fingerprint,
+               memberProfiles.contains(where: { $0.fingerprint == scopedFingerprint }) {
+                merged.isPendingInvitation = false
+            }
             return merged
         }
 
@@ -5092,7 +5283,7 @@ final class ClientViewModel: ObservableObject {
             return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
         }
 
-        if mergedGroups != profile.groups || didMaterializeContacts {
+        if mergedGroups != profile.groups {
             profile.groups = mergedGroups
             mergeCurrentThreadMessages(into: &profile)
             state.updateIdentityProfile(profile)
@@ -5105,104 +5296,14 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
-    @discardableResult
-    private func materializeGroupDirectoryContacts(
-        from descriptors: [RelayGroupDescriptor],
-        profile: inout IdentityProfile
-    ) -> Bool {
-        var changed = false
-        for descriptor in descriptors {
-            let members = normalizedRelayMembers(descriptor.members, preferredRelay: profile.relay)
-            for member in members {
-                let fingerprint = member.fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !fingerprint.isEmpty, fingerprint != profile.identity.fingerprint else {
-                    continue
-                }
-                guard let inboxId = member.inboxId?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !inboxId.isEmpty,
-                      let relay = member.relay,
-                      let signingPublicKey = member.signingPublicKey,
-                      !signingPublicKey.isEmpty,
-                      let agreementPublicKey = member.agreementPublicKey,
-                      !agreementPublicKey.isEmpty else {
-                    continue
-                }
-                let reachableRelay = reachableRelayEndpoint(relay, preferredRelay: profile.relay)
-                let displayName = member.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let resolvedName = (displayName?.isEmpty == false ? displayName! : "Group Member \(abbreviatedFingerprint(fingerprint))")
-                if let index = profile.contacts.firstIndex(where: { $0.fingerprint == fingerprint }) {
-                    var existing = profile.contacts[index]
-                    var didUpdate = false
-                    if existing.displayName != resolvedName {
-                        existing.displayName = resolvedName
-                        didUpdate = true
-                    }
-                    if existing.inboxId != inboxId {
-                        existing.inboxId = inboxId
-                        didUpdate = true
-                    }
-                    if existing.relay != reachableRelay {
-                        existing.relay = reachableRelay
-                        didUpdate = true
-                    }
-                    if existing.signingPublicKey != signingPublicKey {
-                        existing.signingPublicKey = signingPublicKey
-                        didUpdate = true
-                    }
-                    if existing.agreementPublicKey != agreementPublicKey {
-                        existing.agreementPublicKey = agreementPublicKey
-                        didUpdate = true
-                    }
-                    if didUpdate {
-                        profile.contacts[index] = existing
-                        changed = true
-                    }
-                } else if let index = profile.contacts.firstIndex(where: { existing in
-                    existing.inboxId == inboxId && existing.relay == reachableRelay
-                }) {
-                    var existing = profile.contacts[index]
-                    var didUpdate = false
-                    if existing.fingerprint != fingerprint {
-                        existing.signingPublicKey = signingPublicKey
-                        existing.agreementPublicKey = agreementPublicKey
-                        didUpdate = true
-                    }
-                    if existing.displayName != resolvedName {
-                        existing.displayName = resolvedName
-                        didUpdate = true
-                    }
-                    if existing.signingPublicKey != signingPublicKey {
-                        existing.signingPublicKey = signingPublicKey
-                        didUpdate = true
-                    }
-                    if existing.agreementPublicKey != agreementPublicKey {
-                        existing.agreementPublicKey = agreementPublicKey
-                        didUpdate = true
-                    }
-                    if didUpdate {
-                        profile.contacts[index] = existing
-                        changed = true
-                    }
-                } else {
-                    let contact = Contact(
-                        displayName: resolvedName,
-                        inboxId: inboxId,
-                        relay: reachableRelay,
-                        signingPublicKey: signingPublicKey,
-                        agreementPublicKey: agreementPublicKey
-                    )
-                    profile.contacts.append(contact)
-                    changed = true
-                }
-            }
-        }
-        return changed
-    }
-
     private func activeIdentityLineageFingerprints() -> [String] {
         guard let profile = state.identityProfile(id: state.activeIdentityId) else {
             return [state.identity.fingerprint]
         }
+        return identityLineageFingerprints(for: profile)
+    }
+
+    private func identityLineageFingerprints(for profile: IdentityProfile) -> [String] {
         var ordered: [String] = [profile.identity.fingerprint]
         let continuityEvents = profile.continuityEvents
             .filter { $0.kind == .identityRotated }
@@ -5257,6 +5358,49 @@ final class ClientViewModel: ObservableObject {
             relay: member.relay,
             signingPublicKey: member.signingPublicKey,
             agreementPublicKey: member.agreementPublicKey
+        )
+    }
+
+    private func relayGroupMemberProfile(for scopedIdentity: GroupScopedIdentity) -> RelayGroupMemberProfile {
+        var profile = scopedIdentity.memberProfile
+        profile = RelayGroupMemberProfile(
+            fingerprint: profile.fingerprint,
+            displayName: profile.displayName,
+            inboxId: nil,
+            relay: nil,
+            signingPublicKey: profile.signingPublicKey,
+            agreementPublicKey: profile.agreementPublicKey
+        )
+        return profile
+    }
+
+    private func groupActorCredential(for group: GroupConversation) -> RelayGroupActorCredential {
+        if let scopedIdentity = group.scopedIdentity {
+            return RelayGroupActorCredential(
+                fingerprint: scopedIdentity.fingerprint,
+                signingKey: scopedIdentity.signingKey,
+                publicSigningKey: scopedIdentity.signingKey.publicKeyData
+            )
+        }
+        return RelayGroupActorCredential(
+            fingerprint: state.identity.fingerprint,
+            signingKey: state.identity.signingKey,
+            publicSigningKey: state.identity.signingKey.publicKeyData
+        )
+    }
+
+    private func groupActorCredential(for group: GroupConversation, profile: IdentityProfile) -> RelayGroupActorCredential {
+        if let scopedIdentity = group.scopedIdentity {
+            return RelayGroupActorCredential(
+                fingerprint: scopedIdentity.fingerprint,
+                signingKey: scopedIdentity.signingKey,
+                publicSigningKey: scopedIdentity.signingKey.publicKeyData
+            )
+        }
+        return RelayGroupActorCredential(
+            fingerprint: profile.identity.fingerprint,
+            signingKey: profile.identity.signingKey,
+            publicSigningKey: profile.identity.signingKey.publicKeyData
         )
     }
 
@@ -5372,6 +5516,16 @@ final class ClientViewModel: ObservableObject {
     ) -> [String] {
         let normalizedMembers = normalizedRelayMembers(members, preferredRelay: preferredRelay)
         return normalizedMembers.map { $0.fingerprint }
+    }
+
+    private func groupMemberProfiles(
+        from descriptor: RelayGroupDescriptor,
+        preferredRelay: RelayEndpoint
+    ) -> [RelayGroupMemberProfile] {
+        uniqueRelayGroupProfiles(
+            normalizedRelayMembers(descriptor.members, preferredRelay: preferredRelay)
+                .map { relayGroupMemberProfile(for: $0) }
+        )
     }
 
     private func relayMemberEndpointKey(_ member: RelayGroupMember, preferredRelay: RelayEndpoint) -> String? {
@@ -7055,7 +7209,7 @@ final class ClientViewModel: ObservableObject {
             for groupIndex in state.identityProfiles[profileIndex].groups.indices {
                 state.identityProfiles[profileIndex].groups[groupIndex].memberContactIds.removeAll { ids.contains($0) }
             }
-            state.identityProfiles[profileIndex].groups.removeAll { $0.memberContactIds.count < 2 }
+            state.identityProfiles[profileIndex].groups.removeAll { $0.relayInboxId == nil && $0.memberContactIds.count < 2 }
             for groupId in removedGroupIds {
                 let messages = storedGroupMessages(profileId: profileId, groupId: groupId)
                 removeAttachmentFiles(from: messages)

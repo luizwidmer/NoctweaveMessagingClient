@@ -520,8 +520,8 @@ struct ContentView: View {
                     ForEach(model.state.groups) { group in
                         MacSidebarRow(
                             title: group.title,
-                            subtitle: "\(group.memberContactIds.count) members",
-                            systemImage: "person.3.fill",
+                            subtitle: group.isPendingInvitation ? "Group invitation" : "\(group.resolvedMemberCount) members",
+                            systemImage: group.isPendingInvitation ? "envelope.badge" : "person.3.fill",
                             unreadCount: unreadCount(for: group),
                             isSelected: selection == .group(group.id)
                         )
@@ -2474,7 +2474,34 @@ private struct GroupConversationView: View {
     }
 
     private var memberCount: Int {
-        resolvedGroup?.memberContactIds.count ?? group.memberContactIds.count
+        resolvedGroup?.resolvedMemberCount ?? group.resolvedMemberCount
+    }
+
+    private var currentGroup: GroupConversation {
+        resolvedGroup ?? group
+    }
+
+    private var isPendingInvitation: Bool {
+        currentGroup.isPendingInvitation
+    }
+
+    private var groupStatusText: String {
+        isPendingInvitation ? "Invitation pending" : "\(memberCount) members"
+    }
+
+    private var groupInviterName: String {
+        guard let creator = currentGroup.createdByFingerprint else {
+            return "a group member"
+        }
+        if let contact = model.state.contacts.first(where: { $0.fingerprint == creator }) {
+            return contact.displayName
+        }
+        if let member = currentGroup.memberProfiles.first(where: { $0.fingerprint == creator }),
+           let name = member.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !name.isEmpty {
+            return name
+        }
+        return "Group Member \(creator.prefix(8))"
     }
 
     private var isDark: Bool {
@@ -2488,7 +2515,7 @@ private struct GroupConversationView: View {
             #if os(iOS)
             ChatTopBar(
                 title: isSensitiveHidden ? "Secure Group" : groupTitle,
-                status: isSensitiveHidden ? "Capture active" : "\(memberCount) members",
+                status: isSensitiveHidden ? "Capture active" : groupStatusText,
                 trailing: AnyView(
                     HStack(spacing: chatHeaderSpacing) {
                         Button {
@@ -2542,7 +2569,7 @@ private struct GroupConversationView: View {
                     } else {
                         Text(groupTitle)
                             .font(.system(size: 18, weight: .semibold, design: .rounded))
-                        Text("\(memberCount) members")
+                        Text(groupStatusText)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -2605,7 +2632,20 @@ private struct GroupConversationView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 4) {
-                        if groupMessages.isEmpty {
+                        if isPendingInvitation {
+                            GroupInvitationPanel(
+                                title: groupTitle,
+                                inviterName: groupInviterName,
+                                onAccept: {
+                                    Task { await model.acceptGroupInvitation(id: group.id) }
+                                },
+                                onDecline: {
+                                    Task { await model.declineGroupInvitation(id: group.id) }
+                                }
+                            )
+                            .padding(.horizontal, 2)
+                            .padding(.vertical, 8)
+                        } else if groupMessages.isEmpty {
                             EmptyConversationState(title: "No messages yet", subtitle: "Messages sent here are shared with this group.")
                         } else {
                             ForEach(groupMessages) { message in
@@ -2638,7 +2678,38 @@ private struct GroupConversationView: View {
                 #endif
             }
 
-            HStack(spacing: 8) {
+            if isPendingInvitation {
+                HStack(spacing: 10) {
+                    Button("Decline") {
+                        Task { await model.declineGroupInvitation(id: group.id) }
+                    }
+                    .glassButton(compact: true)
+                    .hoverLift()
+
+                    Button {
+                        Task { await model.acceptGroupInvitation(id: group.id) }
+                    } label: {
+                        Label("Accept", systemImage: "checkmark")
+                    }
+                    .glassButton(prominent: true, compact: true)
+                    .hoverLift()
+                }
+                .padding(.vertical, 8)
+                .padding(.horizontal, 10)
+                #if os(macOS)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.white.opacity(isDark ? 0.18 : 0.30), lineWidth: 0.8)
+                        )
+                )
+                #endif
+                .padding(.horizontal, 8)
+                .padding(.bottom, 6)
+            } else {
+                HStack(spacing: 8) {
                 #if os(iOS)
                 Button {
                     handleCameraButtonTap()
@@ -2747,6 +2818,7 @@ private struct GroupConversationView: View {
             #endif
             .padding(.horizontal, 8)
             .padding(.bottom, 6)
+            }
         }
         .background {
             ChatWallpaper()
@@ -3020,6 +3092,47 @@ private struct GroupConversationView: View {
     }
 }
 
+private struct GroupInvitationPanel: View {
+    let title: String
+    let inviterName: String
+    let onAccept: () -> Void
+    let onDecline: () -> Void
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "envelope.badge.shield.half.filled")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                    .frame(width: 40, height: 40)
+                    .background(theme.accent.opacity(0.14), in: Circle())
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Group Invitation")
+                        .font(.headline)
+                    Text("\(inviterName) invited you to \(title). Accepting creates a group-only identity for this conversation.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 10) {
+                Button("Decline", action: onDecline)
+                    .glassButton(compact: true)
+                    .hoverLift()
+                Button(action: onAccept) {
+                    Label("Accept", systemImage: "checkmark")
+                }
+                .glassButton(prominent: true, compact: true)
+                .hoverLift()
+            }
+        }
+        .uniformGlassCard(cornerRadius: 18, padding: 14)
+    }
+}
+
 struct SheetHero: View {
     let icon: String
     let title: String
@@ -3205,6 +3318,79 @@ private struct SheetContactSelectionRow: View {
     }
 }
 
+private struct SheetGroupMemberRow: View {
+    let member: RelayGroupMemberProfile
+    let contact: Contact?
+    let isSelf: Bool
+    let isCreator: Bool
+    let canAddContact: Bool
+    let onAddContact: () -> Void
+
+    @Environment(\.appTheme) private var theme
+
+    private var displayName: String {
+        let trimmed = member.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            return trimmed
+        }
+        return "Group Member \(member.fingerprint.prefix(8))"
+    }
+
+    private var statusText: String {
+        if isSelf { return "You" }
+        if contact != nil { return "Contact" }
+        return "Group identity"
+    }
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Image(systemName: isCreator ? "crown.fill" : "person.crop.circle")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(isCreator ? Color.yellow : theme.accent)
+                .frame(width: 34, height: 34)
+                .background((isCreator ? Color.yellow : theme.accent).opacity(0.13), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(displayName)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(statusText)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(theme.accent)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(theme.accent.opacity(0.12), in: Capsule())
+                }
+                Text(member.fingerprint)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 8)
+
+            if canAddContact {
+                Button("Add Contact", action: onAddContact)
+                    .glassButton(compact: true)
+                    .hoverLift()
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(Color.primary.opacity(0.035))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.8)
+                )
+        )
+    }
+}
+
 private struct GroupDetailsView: View {
     @ObservedObject var model: ClientViewModel
     let groupId: UUID
@@ -3237,6 +3423,10 @@ private struct GroupDetailsView: View {
 
     private var group: GroupConversation? {
         model.state.group(for: groupId)
+    }
+
+    private var groupMemberProfiles: [RelayGroupMemberProfile] {
+        group?.memberProfiles ?? []
     }
 
     var body: some View {
@@ -3296,32 +3486,68 @@ private struct GroupDetailsView: View {
 
                         SheetSection(
                             title: "Members",
-                            subtitle: "\(selectedMembers.count) selected",
+                            subtitle: "\(group?.resolvedMemberCount ?? selectedMembers.count) in group",
                             icon: "person.2.fill"
                         ) {
-                            InlineSearchField(text: $memberSearchText, prompt: "Search members")
-
-                            if model.state.contacts.isEmpty {
+                            if groupMemberProfiles.isEmpty {
                                 SheetEmptyState(
-                                    icon: "person.crop.circle.badge.plus",
-                                    title: "No contacts available",
-                                    message: "Add contacts before editing group membership."
-                                )
-                            } else if filteredContacts.isEmpty {
-                                SheetEmptyState(
-                                    icon: "magnifyingglass",
-                                    title: "No matching contacts",
-                                    message: "Try another name or fingerprint."
+                                    icon: "person.2.slash",
+                                    title: "No member profiles",
+                                    message: "The relay has not reported group-scoped member profiles yet."
                                 )
                             } else {
                                 LazyVStack(spacing: 8) {
-                                    ForEach(filteredContacts) { contact in
-                                        SheetContactSelectionRow(
-                                            contact: contact,
-                                            isSelected: selectedMembers.contains(contact.id),
-                                            isEnabled: canEditRelayGroup
-                                        ) {
-                                            toggle(contact.id)
+                                    ForEach(groupMemberProfiles, id: \.fingerprint) { member in
+                                        SheetGroupMemberRow(
+                                            member: member,
+                                            contact: contact(for: member.fingerprint),
+                                            isSelf: isSelf(member.fingerprint),
+                                            isCreator: member.fingerprint == group?.createdByFingerprint,
+                                            canAddContact: canPromote(member),
+                                            onAddContact: {
+                                                Task {
+                                                    await model.promoteGroupMemberToContact(
+                                                        groupId: groupId,
+                                                        fingerprint: member.fingerprint
+                                                    )
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if canEditRelayGroup {
+                            SheetSection(
+                                title: "Contact Membership",
+                                subtitle: "\(selectedMembers.count) selected",
+                                icon: "person.crop.circle.badge.plus"
+                            ) {
+                                InlineSearchField(text: $memberSearchText, prompt: "Search contacts")
+
+                                if model.state.contacts.isEmpty {
+                                    SheetEmptyState(
+                                        icon: "person.crop.circle.badge.plus",
+                                        title: "No contacts available",
+                                        message: "Add contacts before editing group membership."
+                                    )
+                                } else if filteredContacts.isEmpty {
+                                    SheetEmptyState(
+                                        icon: "magnifyingglass",
+                                        title: "No matching contacts",
+                                        message: "Try another name or fingerprint."
+                                    )
+                                } else {
+                                    LazyVStack(spacing: 8) {
+                                        ForEach(filteredContacts) { contact in
+                                            SheetContactSelectionRow(
+                                                contact: contact,
+                                                isSelected: selectedMembers.contains(contact.id),
+                                                isEnabled: canEditRelayGroup
+                                            ) {
+                                                toggle(contact.id)
+                                            }
                                         }
                                     }
                                 }
@@ -3450,6 +3676,23 @@ private struct GroupDetailsView: View {
                 dismiss()
             }
         }
+    }
+
+    private func contact(for fingerprint: String) -> Contact? {
+        model.state.contacts.first { $0.fingerprint == fingerprint }
+    }
+
+    private func isSelf(_ fingerprint: String) -> Bool {
+        fingerprint == model.state.identity.fingerprint || group?.scopedIdentity?.fingerprint == fingerprint
+    }
+
+    private func canPromote(_ member: RelayGroupMemberProfile) -> Bool {
+        !isSelf(member.fingerprint)
+            && contact(for: member.fingerprint) == nil
+            && member.inboxId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            && member.relay != nil
+            && member.signingPublicKey?.isEmpty == false
+            && member.agreementPublicKey?.isEmpty == false
     }
 }
 
