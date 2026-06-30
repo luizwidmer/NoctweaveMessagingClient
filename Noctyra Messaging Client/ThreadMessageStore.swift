@@ -1,6 +1,6 @@
 import CryptoKit
 import Foundation
-import PICCPCore
+import NoctweaveCore
 #if canImport(Security)
 import Security
 #endif
@@ -68,13 +68,13 @@ final class ThreadMessageStore {
         }
         let data = try Data(contentsOf: url)
         let payload = try decryptIfNeeded(data)
-        let decoded = try PICCPCoder.decode(ThreadMessagePayload.self, from: payload)
+        let decoded = try NoctweaveCoder.decode(ThreadMessagePayload.self, from: payload)
         return decoded.messages
     }
 
     private func saveMessages(_ messages: [Message], to url: URL) throws {
         let payload = ThreadMessagePayload(messages: messages)
-        let encoded = try PICCPCoder.encode(payload)
+        let encoded = try NoctweaveCoder.encode(payload)
         let encrypted = try encryptIfNeeded(encoded)
         try writeData(encrypted, to: url)
     }
@@ -133,14 +133,14 @@ final class ThreadMessageStore {
             throw ThreadMessageStoreError.encryptionFailed
         }
         let envelope = ThreadMessageEnvelope(version: 1, sealed: combined)
-        return try PICCPCoder.encode(envelope)
+        return try NoctweaveCoder.encode(envelope)
     }
 
     private func decryptIfNeeded(_ data: Data) throws -> Data {
         guard useEncryption else {
             return data
         }
-        guard let envelope = try? PICCPCoder.decode(ThreadMessageEnvelope.self, from: data),
+        guard let envelope = try? NoctweaveCoder.decode(ThreadMessageEnvelope.self, from: data),
               envelope.version == 1 else {
             throw ThreadMessageStoreError.unexpectedPlaintextInEncryptedMode
         }

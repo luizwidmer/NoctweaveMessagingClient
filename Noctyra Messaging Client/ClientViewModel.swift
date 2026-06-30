@@ -2,7 +2,7 @@ import Combine
 import CryptoKit
 import Darwin
 import Foundation
-import PICCPCore
+import NoctweaveCore
 import SwiftUI
 import UniformTypeIdentifiers
 import ImageIO
@@ -85,6 +85,11 @@ final class ClientViewModel: ObservableObject {
     @Published var insecureLastSelfTestAt: Date?
     @Published var insecureLastSelfTestResult: String?
     @Published var insecureSelfTestStep: String?
+    @Published var federationPairingAnnouncements: [PairingAnnouncement] = []
+    @Published var federationPairingRequests: [PairingRequest] = []
+    @Published var federationPairingRelayCount: Int = 0
+    @Published var federationPairingLastRefreshAt: Date?
+    @Published var federationPairingLastError: String?
     @Published var isLocked = false
     @Published var requiresStorageChoice = false
     @Published var storageProtectionMode: StorageProtectionMode = .keychain
@@ -126,6 +131,7 @@ final class ClientViewModel: ObservableObject {
     private let maxActiveWakePollSeconds = 300
     private var insecureSelfTestToken: UUID?
     private var pendingOutboundPairRequestFingerprints: Set<String> = []
+    private var dismissedPairRequestIds: Set<UUID> = []
     private var lastInactiveAt: Date?
     private let stateFileURL: URL
     private let attachmentDirectory: URL
@@ -220,7 +226,7 @@ final class ClientViewModel: ObservableObject {
 
     init() {
         let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("PICCPClient", isDirectory: true)
+            .appendingPathComponent("NoctyraClient", isDirectory: true)
         let fileURL = directory.appendingPathComponent("state.json")
         let attachmentDirectory = directory.appendingPathComponent("attachments", isDirectory: true)
         let threadMessageDirectory = directory.appendingPathComponent("threads", isDirectory: true)
@@ -3210,6 +3216,9 @@ final class ClientViewModel: ObservableObject {
                         guard announcement.offer.fingerprint != state.identity.fingerprint else {
                             return false
                         }
+                        guard !isKnownContactFingerprint(announcement.offer.fingerprint) else {
+                            return false
+                        }
                         return (try? announcement.offer.verified()) != nil
                     }
                 insecureLastPeerCount = insecureAnnouncements.count
@@ -3224,7 +3233,11 @@ final class ClientViewModel: ObservableObject {
                 let requestsResponse = try await relayClient(for: relay).send(.fetchPairRequests(fetch))
                 if requestsResponse.type == .pairRequests {
                     let fetchedRequests = (requestsResponse.pairRequests ?? []).filter { request in
-                        (try? request.from.verified()) != nil
+                        guard !dismissedPairRequestIds.contains(request.id),
+                              !isKnownContactFingerprint(request.from.fingerprint) else {
+                            return false
+                        }
+                        return (try? request.from.verified()) != nil
                     }
                     let remainingRequests = await autoAcceptMatchingPairRequests(fetchedRequests)
                     if state.insecurePairing.allowInboundRequests {
@@ -3245,6 +3258,103 @@ final class ClientViewModel: ObservableObject {
             lastError = message
             insecureLastError = message
         }
+    }
+
+    func refreshFederationPairing() async {
+        guard state.insecurePairing.isReady else {
+            federationPairingLastError = "Enable pairing and acknowledge metadata exposure first."
+            return
+        }
+        await refreshCoordinatorDirectoryIfNeeded(force: true)
+        let relays = await federationPairingRelays()
+        guard !relays.isEmpty else {
+            federationPairingRelayCount = 0
+            federationPairingAnnouncements = []
+            federationPairingRequests = []
+            federationPairingLastError = "No federation relays are available. Add or select a federated relay first."
+            return
+        }
+
+        var announcementsByFingerprint: [String: PairingAnnouncement] = [:]
+        var requestsByFingerprint: [String: PairingRequest] = [:]
+        var firstError: String?
+        var announcedAt: Date?
+        var listedAt: Date?
+        var fetchedAt: Date?
+
+        for relay in relays {
+            do {
+                let offer = try MessageEngine.makeContactOffer(
+                    identity: state.identity,
+                    inboxId: state.inboxId,
+                    relay: relay.endpoint,
+                    inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
+                )
+                let client = relayClient(for: relay.endpoint)
+                let announceResponse = try await client.send(.announce(AnnounceRequest(offer: offer, ttlSeconds: 120)))
+                if announceResponse.type == .error, let error = announceResponse.error {
+                    firstError = firstError ?? "\(relay.name): \(error)"
+                } else {
+                    announcedAt = Date()
+                }
+
+                let listResponse = try await client.send(.listAnnouncements(ListAnnouncementsRequest(limit: 75)))
+                if listResponse.type == .announcements {
+                    listedAt = Date()
+                    for announcement in listResponse.announcements ?? [] {
+                        guard announcement.offer.fingerprint != state.identity.fingerprint,
+                              !isKnownContactFingerprint(announcement.offer.fingerprint),
+                              (try? announcement.offer.verified()) != nil else {
+                            continue
+                        }
+                        let key = announcement.offer.fingerprint
+                        if let existing = announcementsByFingerprint[key],
+                           existing.announcedAt >= announcement.announcedAt {
+                            continue
+                        }
+                        announcementsByFingerprint[key] = announcement
+                    }
+                } else if listResponse.type == .error, let error = listResponse.error {
+                    firstError = firstError ?? "\(relay.name): \(error)"
+                }
+
+                if state.insecurePairing.allowInboundRequests || !pendingOutboundPairRequestFingerprints.isEmpty {
+                    let fetch = try makeFetchPairRequestsRequest(maxCount: 50)
+                    let fetchResponse = try await client.send(.fetchPairRequests(fetch))
+                    if fetchResponse.type == .pairRequests {
+                        fetchedAt = Date()
+                        for request in fetchResponse.pairRequests ?? [] {
+                            guard !dismissedPairRequestIds.contains(request.id),
+                                  !isKnownContactFingerprint(request.from.fingerprint),
+                                  (try? request.from.verified()) != nil else {
+                                continue
+                            }
+                            requestsByFingerprint[request.from.fingerprint] = request
+                        }
+                    } else if fetchResponse.type == .error, let error = fetchResponse.error {
+                        firstError = firstError ?? "\(relay.name): \(error)"
+                    }
+                }
+            } catch {
+                firstError = firstError ?? "\(relay.name): \(error.localizedDescription)"
+            }
+        }
+
+        let remainingRequests = await autoAcceptMatchingPairRequests(Array(requestsByFingerprint.values))
+        federationPairingAnnouncements = announcementsByFingerprint.values.sorted {
+            $0.offer.displayName.localizedCaseInsensitiveCompare($1.offer.displayName) == .orderedAscending
+        }
+        federationPairingRequests = state.insecurePairing.allowInboundRequests ? remainingRequests.sorted {
+            $0.from.displayName.localizedCaseInsensitiveCompare($1.from.displayName) == .orderedAscending
+        } : []
+        federationPairingRelayCount = relays.count
+        federationPairingLastRefreshAt = Date()
+        federationPairingLastError = firstError
+        insecureLastAnnounceAt = announcedAt ?? insecureLastAnnounceAt
+        insecureLastListAt = listedAt ?? insecureLastListAt
+        insecureLastRequestFetchAt = fetchedAt ?? insecureLastRequestFetchAt
+        insecureLastPeerCount = federationPairingAnnouncements.count
+        insecureLastRequestCount = federationPairingRequests.count
     }
 
     func announceInsecurePairing() async {
@@ -3404,12 +3514,24 @@ final class ClientViewModel: ObservableObject {
             lastError = "Relay unavailable for pairing via relay."
             return
         }
+        await sendPairRequest(to: announcement, via: relay, localOfferRelay: relay)
+    }
+
+    func sendFederationPairRequest(to announcement: PairingAnnouncement) async {
+        await sendPairRequest(to: announcement, via: announcement.offer.relay, localOfferRelay: state.relay)
+    }
+
+    private func sendPairRequest(
+        to announcement: PairingAnnouncement,
+        via relay: RelayEndpoint,
+        localOfferRelay: RelayEndpoint
+    ) async {
         do {
             _ = try announcement.offer.verified()
             let offer = try MessageEngine.makeContactOffer(
                 identity: state.identity,
                 inboxId: state.inboxId,
-                relay: relay,
+                relay: localOfferRelay,
                 inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
             )
             let request = try makeSendPairRequest(
@@ -3439,7 +3561,13 @@ final class ClientViewModel: ObservableObject {
     }
 
     func dismissPairRequest(_ request: PairingRequest) {
+        dismissedPairRequestIds.insert(request.id)
         insecureRequests.removeAll { $0.id == request.id }
+        federationPairingRequests.removeAll { $0.id == request.id }
+    }
+
+    private func isKnownContactFingerprint(_ fingerprint: String) -> Bool {
+        state.contacts.contains { $0.fingerprint == fingerprint }
     }
 
     private func autoAcceptMatchingPairRequests(_ requests: [PairingRequest]) async -> [PairingRequest] {
@@ -3485,33 +3613,31 @@ final class ClientViewModel: ObservableObject {
             )
         }
         insecureRequests.removeAll { $0.id == request.id }
+        federationPairingRequests.removeAll { $0.id == request.id }
         pendingOutboundPairRequestFingerprints.remove(request.from.fingerprint)
 
         var reciprocalError: String?
         if sendReciprocalRequest {
-            if let relay = relayForInsecurePairing() {
-                do {
-                    let offer = try MessageEngine.makeContactOffer(
-                        identity: state.identity,
-                        inboxId: state.inboxId,
-                        relay: relay,
-                        inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
-                    )
-                    let requestPayload = try makeSendPairRequest(
-                        targetFingerprint: request.from.fingerprint,
-                        offer: offer
-                    )
-                    let response = try await relayClient(for: relay).send(.sendPairRequest(requestPayload))
-                    if response.type == .error {
-                        reciprocalError = response.error ?? "Relay rejected reciprocal pairing request."
-                    } else if response.type != .ok {
-                        reciprocalError = "Relay rejected reciprocal pairing request (\(response.type))."
-                    }
-                } catch {
-                    reciprocalError = error.localizedDescription
+            let relay = request.from.relay
+            do {
+                let offer = try MessageEngine.makeContactOffer(
+                    identity: state.identity,
+                    inboxId: state.inboxId,
+                    relay: state.relay,
+                    inboxAccessPublicKey: state.inboxAccessKey?.publicKeyData
+                )
+                let requestPayload = try makeSendPairRequest(
+                    targetFingerprint: request.from.fingerprint,
+                    offer: offer
+                )
+                let response = try await relayClient(for: relay).send(.sendPairRequest(requestPayload))
+                if response.type == .error {
+                    reciprocalError = response.error ?? "Relay rejected reciprocal pairing request."
+                } else if response.type != .ok {
+                    reciprocalError = "Relay rejected reciprocal pairing request (\(response.type))."
                 }
-            } else {
-                reciprocalError = "Relay unavailable to send pairing acceptance."
+            } catch {
+                reciprocalError = error.localizedDescription
             }
         }
 
@@ -4015,11 +4141,11 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func parseMasterServerData(_ data: Data, sourceId: UUID) throws -> [RelayServerRecord] {
-        if let entries = try? PICCPCoder.decode([MasterServerEntry].self, from: data) {
+        if let entries = try? NoctweaveCoder.decode([MasterServerEntry].self, from: data) {
             return entries.map { RelayServerRecord(entry: $0, sourceId: sourceId) }
         }
 
-        if let list = try? PICCPCoder.decode(MasterServerList.self, from: data) {
+        if let list = try? NoctweaveCoder.decode(MasterServerList.self, from: data) {
             return list.servers.map { RelayServerRecord(entry: $0, sourceId: sourceId) }
         }
 
@@ -4085,53 +4211,7 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func parseHostPort(_ value: String) -> RelayEndpoint? {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if let components = URLComponents(string: trimmed), let scheme = components.scheme, !scheme.isEmpty {
-            guard let host = components.host else { return nil }
-            let loweredScheme = scheme.lowercased()
-            let defaultPort: Int
-            switch loweredScheme {
-            case "https", "wss":
-                defaultPort = 443
-            case "http", "ws":
-                defaultPort = 80
-            default:
-                defaultPort = 9339
-            }
-            guard let port = UInt16(exactly: components.port ?? defaultPort) else { return nil }
-            switch loweredScheme {
-            case "https":
-                return RelayEndpoint(host: host, port: port, useTLS: true, transport: .http)
-            case "http":
-                return RelayEndpoint(host: host, port: port, useTLS: false, transport: .http)
-            case "wss":
-                return RelayEndpoint(host: host, port: port, useTLS: true, transport: .websocket)
-            case "ws":
-                return RelayEndpoint(host: host, port: port, useTLS: false, transport: .websocket)
-            case "tls":
-                return RelayEndpoint(host: host, port: port, useTLS: true, transport: .tcp)
-            case "tcp":
-                return RelayEndpoint(host: host, port: port, useTLS: false, transport: .tcp)
-            default:
-                return RelayEndpoint(host: host, port: port, useTLS: false, transport: .tcp)
-            }
-        }
-        if trimmed.hasPrefix("["), let close = trimmed.firstIndex(of: "]") {
-            let host = String(trimmed[trimmed.index(after: trimmed.startIndex)..<close])
-            let remainder = trimmed[trimmed.index(after: close)...].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard remainder.hasPrefix(":"),
-                  let port = UInt16(remainder.dropFirst()) else {
-                return nil
-            }
-            return RelayEndpoint(host: host, port: port, useTLS: false, transport: .tcp)
-        }
-        let parts = trimmed.split(separator: ":", maxSplits: 1)
-        guard parts.count == 2, let port = UInt16(parts[1]) else {
-            return nil
-        }
-        let host = String(parts[0])
-        return host.isEmpty ? nil : RelayEndpoint(host: host, port: port, useTLS: false, transport: .tcp)
+        try? RelayEndpointParser.parse(value)
     }
 
     private func parseTags(_ value: String) -> [String]? {
@@ -4284,6 +4364,11 @@ final class ClientViewModel: ObservableObject {
                 return "Curated (\(name))"
             }
             return "Curated"
+        case .manual:
+            if let name = federation.name, !name.isEmpty {
+                return "Manual (\(name))"
+            }
+            return "Manual"
         case .open:
             if let name = federation.name, !name.isEmpty {
                 return "Open (\(name))"
@@ -5271,10 +5356,12 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func reachableRelayEndpoint(_ endpoint: RelayEndpoint, preferredRelay: RelayEndpoint) -> RelayEndpoint {
-        guard endpoint.port == preferredRelay.port else {
+        guard endpoint.port == preferredRelay.port,
+              endpoint.useTLS == preferredRelay.useTLS,
+              endpoint.transport == preferredRelay.transport else {
             return endpoint
         }
-        guard isLoopbackOrWildcardHost(endpoint.host), !isLoopbackOrWildcardHost(preferredRelay.host) else {
+        guard isLoopbackOrWildcardHost(endpoint.host) || isLoopbackOrWildcardHost(preferredRelay.host) else {
             return endpoint
         }
         return RelayEndpoint(
@@ -5665,6 +5752,46 @@ final class ClientViewModel: ObservableObject {
                     sourceId: nil
                 )
             )
+        }
+    }
+
+    private func federationPairingRelays() async -> [RelayServerRecord] {
+        var resolved: [RelayServerRecord] = []
+        var changed = false
+        for index in state.relayServers.indices {
+            var record = state.relayServers[index]
+            var info = record.advertisedInfo
+            if info == nil {
+                info = try? await loadRelayInfo(endpoint: record.endpoint)
+                if let info {
+                    state.relayServers[index].advertisedInfo = info
+                    state.relayServers[index].lastInfoFetchedAt = Date()
+                    record = state.relayServers[index]
+                    changed = true
+                }
+            }
+            guard let info,
+                  info.kind != .coordinator,
+                  info.federation.mode != .solo else {
+                continue
+            }
+            if let policy = state.federationPolicy,
+               !isFederationCompatible(policy: policy, info: info.federation) {
+                continue
+            }
+            resolved.append(record)
+        }
+        if changed {
+            await save()
+        }
+        var seen: Set<String> = []
+        return resolved.filter { record in
+            let key = "\(record.endpoint.transport.rawValue)|\(record.endpoint.host.lowercased())|\(record.endpoint.port)|\(record.endpoint.useTLS)"
+            if seen.contains(key) {
+                return false
+            }
+            seen.insert(key)
+            return true
         }
     }
 
@@ -7374,7 +7501,7 @@ final class ClientViewModel: ObservableObject {
     private func deleteAllLocalDocuments() {
         let supportDirectory = stateFileURL.deletingLastPathComponent()
         if let files = try? FileManager.default.contentsOfDirectory(at: supportDirectory, includingPropertiesForKeys: nil) {
-            for file in files where file.pathExtension.lowercased() == "piccp" {
+            for file in files where file.pathExtension.lowercased() == "noctweave" {
                 try? FileManager.default.removeItem(at: file)
             }
         }

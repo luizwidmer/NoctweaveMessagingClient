@@ -1,5 +1,5 @@
 import Foundation
-import PICCPCore
+import NoctweaveCore
 import CryptoKit
 #if canImport(Security)
 import Security
@@ -75,7 +75,7 @@ final class CiphertextPrefetchStore {
             return appGroupURL.appendingPathComponent("CiphertextPrefetch", isDirectory: true)
         }
         return fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("PICCPClient", isDirectory: true)
+            .appendingPathComponent("NoctyraClient", isDirectory: true)
             .appendingPathComponent("CiphertextPrefetch", isDirectory: true)
     }
 
@@ -85,7 +85,7 @@ final class CiphertextPrefetchStore {
 
     func loadConfig() throws -> NoctyraPrefetchConfig? {
         guard let payload = try readPayload(from: configURL) else { return nil }
-        let decoded = try PICCPCoder.decode(NoctyraPrefetchConfig.self, from: payload)
+        let decoded = try NoctweaveCoder.decode(NoctyraPrefetchConfig.self, from: payload)
         let config = sanitizedPrefetchConfig(decoded)
         if prefetchConfigPayloadNeedsSanitization(payload) || decoded.profiles.count != config.profiles.count {
             try saveConfig(config)
@@ -99,7 +99,7 @@ final class CiphertextPrefetchStore {
 
     func loadStatus() throws -> NoctyraPrefetchStatus {
         guard let payload = try readPayload(from: statusURL) else { return .empty }
-        let decoded = try PICCPCoder.decode(NoctyraPrefetchStatus.self, from: payload)
+        let decoded = try NoctweaveCoder.decode(NoctyraPrefetchStatus.self, from: payload)
         let status = sanitizedPrefetchStatus(decoded)
         if prefetchStatusPayloadNeedsSanitization(payload) || status != decoded {
             try saveStatus(status)
@@ -119,7 +119,7 @@ final class CiphertextPrefetchStore {
                 inboxId: record.inboxId,
                 groupId: nil,
                 stagedAt: record.fetchedAt,
-                sealedEnvelope: PICCPCoder.encode(record.envelope),
+                sealedEnvelope: NoctweaveCoder.encode(record.envelope),
                 acknowledgementDeferred: true
             )
         }
@@ -139,7 +139,7 @@ final class CiphertextPrefetchStore {
                 inboxId: record.groupInboxId,
                 groupId: record.groupId,
                 stagedAt: record.fetchedAt,
-                sealedEnvelope: PICCPCoder.encode(record.envelope),
+                sealedEnvelope: NoctweaveCoder.encode(record.envelope),
                 acknowledgementDeferred: true
             )
         }
@@ -154,7 +154,7 @@ final class CiphertextPrefetchStore {
         return try loadPrefetchRecords().compactMap { record in
             guard record.kind == .directMessage,
                   record.inboxId == profile.inboxId,
-                  let envelope = try? PICCPCoder.decode(Envelope.self, from: record.sealedEnvelope)
+                  let envelope = try? NoctweaveCoder.decode(Envelope.self, from: record.sealedEnvelope)
             else {
                 return nil
             }
@@ -175,7 +175,7 @@ final class CiphertextPrefetchStore {
         return try loadPrefetchRecords().compactMap { record in
             guard record.kind == .groupMessage,
                   record.groupId == groupId,
-                  let envelope = try? PICCPCoder.decode(GroupRatchetEnvelope.self, from: record.sealedEnvelope)
+                  let envelope = try? NoctweaveCoder.decode(GroupRatchetEnvelope.self, from: record.sealedEnvelope)
             else {
                 return nil
             }
@@ -262,7 +262,7 @@ final class CiphertextPrefetchStore {
 
     private func read<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
         guard let payload = try readPayload(from: url) else { return nil }
-        return try PICCPCoder.decode(type, from: payload)
+        return try NoctweaveCoder.decode(type, from: payload)
     }
 
     private func readPayload(from url: URL) throws -> Data? {
@@ -325,7 +325,7 @@ final class CiphertextPrefetchStore {
         protection: FileProtectionType
     ) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let payload = try PICCPCoder.encode(value, sortedKeys: true)
+        let payload = try NoctweaveCoder.encode(value, sortedKeys: true)
         let data = try encrypt(payload)
         guard data.count <= Self.maxEncryptedFileBytes else {
             throw CiphertextPrefetchStoreError.fileTooLarge
@@ -343,11 +343,11 @@ final class CiphertextPrefetchStore {
         guard let combined = sealed.combined else {
             throw CiphertextPrefetchStoreError.encryptionFailed
         }
-        return try PICCPCoder.encode(CiphertextPrefetchFileEnvelope(version: 1, sealed: combined))
+        return try NoctweaveCoder.encode(CiphertextPrefetchFileEnvelope(version: 1, sealed: combined))
     }
 
     private func decrypt(_ data: Data) throws -> Data {
-        let envelope = try PICCPCoder.decode(CiphertextPrefetchFileEnvelope.self, from: data)
+        let envelope = try NoctweaveCoder.decode(CiphertextPrefetchFileEnvelope.self, from: data)
         guard envelope.version == 1 else {
             throw CiphertextPrefetchStoreError.encryptionFailed
         }

@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 import SwiftUI
 
 struct ContactShareDocument: FileDocument {
-    static var readableContentTypes: [UTType] { [.piccpContactShare, .data] }
+    static var readableContentTypes: [UTType] { [.noctweaveContactShare, .data] }
 
     var data: Data
 
@@ -21,7 +21,7 @@ struct ContactShareDocument: FileDocument {
 }
 
 extension UTType {
-    static var piccpContactShare: UTType {
-        UTType(exportedAs: "com.piccp.contactshare")
+    static var noctweaveContactShare: UTType {
+        UTType(exportedAs: "org.noctweave.contactshare")
     }
 }

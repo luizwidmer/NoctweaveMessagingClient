@@ -1,5 +1,5 @@
 import SwiftUI
-import PICCPCore
+import NoctweaveCore
 #if os(iOS)
 import UIKit
 #endif

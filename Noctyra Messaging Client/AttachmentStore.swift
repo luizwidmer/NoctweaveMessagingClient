@@ -1,6 +1,6 @@
 import CryptoKit
 import Foundation
-import PICCPCore
+import NoctweaveCore
 #if canImport(Security)
 import Security
 #endif
@@ -59,14 +59,14 @@ final class AttachmentStore {
             throw AttachmentStoreError.encryptionFailed
         }
         let envelope = AttachmentEnvelope(version: 1, sealed: combined)
-        return try PICCPCoder.encode(envelope)
+        return try NoctweaveCoder.encode(envelope)
     }
 
     private func decryptIfNeeded(_ data: Data) throws -> Data {
         guard useEncryption else {
             return data
         }
-        guard let envelope = try? PICCPCoder.decode(AttachmentEnvelope.self, from: data),
+        guard let envelope = try? NoctweaveCoder.decode(AttachmentEnvelope.self, from: data),
               envelope.version == 1 else {
             throw AttachmentStoreError.unexpectedPlaintextInEncryptedMode
         }

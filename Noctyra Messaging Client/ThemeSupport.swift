@@ -1,5 +1,5 @@
 import SwiftUI
-import PICCPCore
+import NoctweaveCore
 
 struct ThemeStyle: Equatable {
     let palette: ThemePalette

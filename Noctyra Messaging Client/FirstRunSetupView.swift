@@ -1,5 +1,5 @@
 import SwiftUI
-import PICCPCore
+import NoctweaveCore
 
 struct FirstRunSetupView: View {
     @ObservedObject var model: ClientViewModel

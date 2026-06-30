@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		C1D2E3F405162738495A6B7C /* PICCPCore in Frameworks */ = {isa = PBXBuildFile; productRef = B1C2D3E4F5061728394A5B6C /* PICCPCore */; };
+		C1D2E3F405162738495A6B7C /* NoctweaveCore in Frameworks */ = {isa = PBXBuildFile; productRef = B1C2D3E4F5061728394A5B6C /* NoctweaveCore */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -34,19 +34,19 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		2566835F2F00A4F0006D96F3 /* PICCP Messaging Client */ = {
+		2566835F2F00A4F0006D96F3 /* Noctyra Messaging Client */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "PICCP Messaging Client";
+			path = "Noctyra Messaging Client";
 			sourceTree = "<group>";
 		};
-		9E5F1C5B2C0A4C009A000002 /* PICCP Messaging ClientUITests */ = {
+		9E5F1C5B2C0A4C009A000002 /* Noctyra Messaging ClientUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "PICCP Messaging ClientUITests";
+			path = "Noctyra Messaging ClientUITests";
 			sourceTree = "<group>";
 		};
-		9E5F1C5B2C0A4C009A000012 /* PICCP Messaging ClientUITests_iOS */ = {
+		9E5F1C5B2C0A4C009A000012 /* Noctyra Messaging ClientUITests_iOS */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "PICCP Messaging ClientUITests_iOS";
+			path = "Noctyra Messaging ClientUITests_iOS";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -56,7 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C1D2E3F405162738495A6B7C /* PICCPCore in Frameworks */,
+				C1D2E3F405162738495A6B7C /* NoctweaveCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -80,9 +80,9 @@
 		256683542F00A4F0006D96F3 = {
 			isa = PBXGroup;
 			children = (
-				2566835F2F00A4F0006D96F3 /* PICCP Messaging Client */,
-				9E5F1C5B2C0A4C009A000002 /* PICCP Messaging ClientUITests */,
-				9E5F1C5B2C0A4C009A000012 /* PICCP Messaging ClientUITests_iOS */,
+				2566835F2F00A4F0006D96F3 /* Noctyra Messaging Client */,
+				9E5F1C5B2C0A4C009A000002 /* Noctyra Messaging ClientUITests */,
+				9E5F1C5B2C0A4C009A000012 /* Noctyra Messaging ClientUITests_iOS */,
 				2566835E2F00A4F0006D96F3 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -113,11 +113,11 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				2566835F2F00A4F0006D96F3 /* PICCP Messaging Client */,
+				2566835F2F00A4F0006D96F3 /* Noctyra Messaging Client */,
 			);
 			name = Noctyra;
 			packageProductDependencies = (
-				B1C2D3E4F5061728394A5B6C /* PICCPCore */,
+				B1C2D3E4F5061728394A5B6C /* NoctweaveCore */,
 			);
 			productName = Noctyra;
 			productReference = 2566835D2F00A4F0006D96F3 /* Noctyra.app */;
@@ -137,7 +137,7 @@
 				9E5F1C5B2C0A4C009A00000A /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				9E5F1C5B2C0A4C009A000002 /* PICCP Messaging ClientUITests */,
+				9E5F1C5B2C0A4C009A000002 /* Noctyra Messaging ClientUITests */,
 			);
 			name = NoctyraUITests;
 			productName = NoctyraUITests;
@@ -158,7 +158,7 @@
 				9E5F1C5B2C0A4C009A00001A /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				9E5F1C5B2C0A4C009A000012 /* PICCP Messaging ClientUITests_iOS */,
+				9E5F1C5B2C0A4C009A000012 /* Noctyra Messaging ClientUITests_iOS */,
 			);
 			name = NoctyraUITests_iOS;
 			productName = NoctyraUITests_iOS;
@@ -188,7 +188,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 256683582F00A4F0006D96F3 /* Build configuration list for PBXProject "PICCP Messaging Client" */;
+			buildConfigurationList = 256683582F00A4F0006D96F3 /* Build configuration list for PBXProject "Noctyra Messaging Client" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -198,7 +198,7 @@
 			mainGroup = 256683542F00A4F0006D96F3;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				A1B2C3D4E5F60718293A4B5C /* XCLocalSwiftPackageReference "../PICCPCore" */,
+				A1B2C3D4E5F60718293A4B5C /* XCLocalSwiftPackageReference "../NoctweaveCore" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 2566835E2F00A4F0006D96F3 /* Products */;
@@ -395,7 +395,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "PICCP Messaging Client/PICCP Messaging Client.entitlements";
+				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "Noctyra Messaging Client/Noctyra Messaging Client.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 9MY7SXN56X;
@@ -421,7 +421,7 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
-				INFOPLIST_KEY_UTExportedTypeDeclarations = "{\n    UTTypeConformsTo =     (\n        \"public.data\"\n    );\n    UTTypeDescription = \"PICCP Contact Share\";\n    UTTypeIdentifier = \"com.piccp.contactshare\";\n    UTTypeTagSpecification =     {\n        \"public.filename-extension\" =         (\n            piccp\n        );\n    };\n}";
+				INFOPLIST_KEY_UTExportedTypeDeclarations = "{\n    UTTypeConformsTo =     (\n        \"public.data\"\n    );\n    UTTypeDescription = \"Noctweave Contact Share\";\n    UTTypeIdentifier = \"org.noctweave.contactshare\";\n    UTTypeTagSpecification =     {\n        \"public.filename-extension\" =         (\n            noctweave\n        );\n    };\n}";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
@@ -449,7 +449,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "PICCP Messaging Client/PICCP Messaging Client.entitlements";
+				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = "Noctyra Messaging Client/Noctyra Messaging Client.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 9MY7SXN56X;
@@ -475,7 +475,7 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
-				INFOPLIST_KEY_UTExportedTypeDeclarations = "{\n    UTTypeConformsTo =     (\n        \"public.data\"\n    );\n    UTTypeDescription = \"PICCP Contact Share\";\n    UTTypeIdentifier = \"com.piccp.contactshare\";\n    UTTypeTagSpecification =     {\n        \"public.filename-extension\" =         (\n            piccp\n        );\n    };\n}";
+				INFOPLIST_KEY_UTExportedTypeDeclarations = "{\n    UTTypeConformsTo =     (\n        \"public.data\"\n    );\n    UTTypeDescription = \"Noctweave Contact Share\";\n    UTTypeIdentifier = \"org.noctweave.contactshare\";\n    UTTypeTagSpecification =     {\n        \"public.filename-extension\" =         (\n            noctweave\n        );\n    };\n}";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
@@ -575,7 +575,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		256683582F00A4F0006D96F3 /* Build configuration list for PBXProject "PICCP Messaging Client" */ = {
+		256683582F00A4F0006D96F3 /* Build configuration list for PBXProject "Noctyra Messaging Client" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				256683662F00A4F1006D96F3 /* Debug */,
@@ -614,17 +614,17 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		A1B2C3D4E5F60718293A4B5C /* XCLocalSwiftPackageReference "../PICCPCore" */ = {
+		A1B2C3D4E5F60718293A4B5C /* XCLocalSwiftPackageReference "../NoctweaveCore" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = ../PICCPCore;
+			relativePath = ../NoctweaveCore;
 		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		B1C2D3E4F5061728394A5B6C /* PICCPCore */ = {
+		B1C2D3E4F5061728394A5B6C /* NoctweaveCore */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A1B2C3D4E5F60718293A4B5C /* XCLocalSwiftPackageReference "../PICCPCore" */;
-			productName = PICCPCore;
+			package = A1B2C3D4E5F60718293A4B5C /* XCLocalSwiftPackageReference "../NoctweaveCore" */;
+			productName = NoctweaveCore;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

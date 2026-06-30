@@ -1,5 +1,5 @@
 import SwiftUI
-import PICCPCore
+import NoctweaveCore
 import UniformTypeIdentifiers
 import ImageIO
 import Darwin
@@ -12,6 +12,12 @@ import PhotosUI
 #elseif os(macOS)
 import AppKit
 import Carbon.HIToolbox
+#endif
+
+#if os(iOS)
+private func dismissActiveTextInput() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
 #endif
 
 private enum SidebarItem: Hashable {
@@ -1393,7 +1399,7 @@ private struct ChatsListView: View {
         previewText(for: model.latestDirectMessage(contactId: contact.id))
     }
 
-    private func previewText(for message: PICCPCore.Message?) -> String {
+    private func previewText(for message: NoctweaveCore.Message?) -> String {
         guard let message else { return "No messages yet" }
         if message.isMismatch {
             return "Delivery sync pending"
@@ -2003,6 +2009,14 @@ private struct ConversationView: View {
                 .onChange(of: messages.count) { _, _ in
                     scrollToBottom(messages, proxy: proxy, animated: true)
                 }
+                #if os(iOS)
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    TapGesture().onEnded {
+                        dismissActiveTextInput()
+                    }
+                )
+                #endif
             }
 
             HStack(spacing: 8) {
@@ -2379,7 +2393,7 @@ private struct ConversationView: View {
     }
     #endif
 
-    private func scrollToBottom(_ messages: [PICCPCore.Message], proxy: ScrollViewProxy, animated: Bool) {
+    private func scrollToBottom(_ messages: [NoctweaveCore.Message], proxy: ScrollViewProxy, animated: Bool) {
         guard let last = messages.last else { return }
         DispatchQueue.main.async {
             if animated {
@@ -2441,7 +2455,7 @@ private struct GroupConversationView: View {
         resolvedGroup?.title ?? group.title
     }
 
-    private var groupMessages: [PICCPCore.Message] {
+    private var groupMessages: [NoctweaveCore.Message] {
         model.groupMessagesForDisplay(groupId: group.id)
     }
 
@@ -2597,6 +2611,14 @@ private struct GroupConversationView: View {
                 .onChange(of: groupMessages.count) { _, _ in
                     scrollToBottom(groupMessages, proxy: proxy, animated: true)
                 }
+                #if os(iOS)
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    TapGesture().onEnded {
+                        dismissActiveTextInput()
+                    }
+                )
+                #endif
             }
 
             HStack(spacing: 8) {
@@ -2949,7 +2971,7 @@ private struct GroupConversationView: View {
     }
     #endif
 
-    private func scrollToBottom(_ messages: [PICCPCore.Message], proxy: ScrollViewProxy, animated: Bool) {
+    private func scrollToBottom(_ messages: [NoctweaveCore.Message], proxy: ScrollViewProxy, animated: Bool) {
         guard let last = messages.last else { return }
         DispatchQueue.main.async {
             if animated {
@@ -3392,7 +3414,7 @@ private struct GroupDetailsView: View {
 
 private struct MessageRow: View {
     @ObservedObject var model: ClientViewModel
-    let message: PICCPCore.Message
+    let message: NoctweaveCore.Message
     let isRevealed: Bool
     let onRetry: (() -> Void)?
     @Environment(\.appTheme) private var theme
@@ -4785,6 +4807,30 @@ private struct MismatchInlineBadge: View {
     }
 }
 
+private struct StableCapsuleBadge: View {
+    let text: String
+    let icon: String?
+    let color: Color
+
+    var body: some View {
+        Group {
+            if let icon {
+                Label(text, systemImage: icon)
+            } else {
+                Text(text)
+            }
+        }
+        .font(.caption2.weight(.semibold))
+        .lineLimit(1)
+        .minimumScaleFactor(0.72)
+        .foregroundStyle(color)
+        .padding(.horizontal, 8)
+        .frame(minHeight: 24)
+        .background(Capsule().fill(color.opacity(0.18)))
+        .fixedSize(horizontal: true, vertical: true)
+    }
+}
+
 private struct StorageStatusToast: View {
     let message: String
 
@@ -5043,8 +5089,8 @@ private struct MyCodeView: View {
         .fileExporter(
             isPresented: $showingExporter,
             document: exportDocument,
-            contentType: .piccpContactShare,
-            defaultFilename: "piccp-contact"
+            contentType: .noctweaveContactShare,
+            defaultFilename: "noctweave-contact"
         ) { result in
             switch result {
             case .success:
@@ -5202,7 +5248,7 @@ private struct MyCodeView: View {
     #endif
 
     private func writeShareFile(data: Data) throws -> URL {
-        let filename = "piccp-contact-\(UUID().uuidString).piccp"
+        let filename = "noctweave-contact-\(UUID().uuidString).noctweave"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         try data.write(to: url, options: [.atomic])
         return url
@@ -5459,12 +5505,17 @@ private struct AddContactView: View {
             .onAppear {
                 insecureSettings = model.state.insecurePairing
             }
+            .onChange(of: method) { _, newValue in
+                if newValue == .federation {
+                    Task { await model.refreshFederationPairing() }
+                }
+            }
             .onChange(of: insecureSettings) { _, newValue in
                 Task { await model.updateInsecurePairing(newValue) }
             }
             .fileImporter(
                 isPresented: $showingImporter,
-                allowedContentTypes: [.piccpContactShare, .data]
+                allowedContentTypes: [.noctweaveContactShare, .data]
             ) { result in
                 switch result {
                 case .success(let url):
@@ -5634,6 +5685,8 @@ private struct AddContactView: View {
             }
         case .insecure:
             relayPairingContent
+        case .federation:
+            federationPairingContent
         }
     }
 
@@ -5787,6 +5840,133 @@ private struct AddContactView: View {
         case .pasteCode: return "Paste a complete contact payload."
         case .importFile: return "Open a password-protected contact file."
         case .insecure: return "Discover peers through your configured relay."
+        case .federation: return "Discover peers across compatible relays in your federation."
+        }
+    }
+
+    @ViewBuilder
+    private var federationPairingContent: some View {
+        let formattedDate: (Date?) -> String = { date in
+            date?.formatted(date: .abbreviated, time: .shortened) ?? "Never"
+        }
+
+        SheetSection(title: "Pair over Federation", icon: "point.3.connected.trianglepath.dotted") {
+            Toggle("Enable federation pairing", isOn: $insecureSettings.isEnabled)
+            Toggle("I understand federation pairing leaks metadata", isOn: $insecureSettings.acknowledgeInterceptRisk)
+                .disabled(!insecureSettings.isEnabled)
+            Toggle("Allow incoming federation pair requests", isOn: $insecureSettings.allowInboundRequests)
+                .disabled(!insecureSettings.isEnabled || !insecureSettings.acknowledgeInterceptRisk)
+            Text("Federation pairing announces this identity to compatible relays in the current federation and checks those relays for peers. Message contents remain protected, but relays may observe timing, participating relays, and identity fingerprints. Compare the safety code over a trusted side channel before marking a contact verified.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+
+        if insecureSettings.isReady {
+            SheetSection(
+                title: "Federation Discovery",
+                subtitle: "\(model.federationPairingRelayCount) relay\(model.federationPairingRelayCount == 1 ? "" : "s") scanned",
+                icon: "network"
+            ) {
+                pairingStatusRow("Last refresh", formattedDate(model.federationPairingLastRefreshAt))
+                pairingStatusRow("Peers found", "\(model.federationPairingAnnouncements.count)")
+                pairingStatusRow("Incoming requests", "\(model.federationPairingRequests.count)")
+                if let error = model.federationPairingLastError {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                Button {
+                    FeedbackGenerator.light()
+                    Task { await model.refreshFederationPairing() }
+                } label: {
+                    Label("Refresh Federation", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .glassButton(prominent: true)
+                .hoverLift()
+            }
+
+            SheetSection(title: "Federation Peers", icon: "person.2.wave.2") {
+                if model.federationPairingAnnouncements.isEmpty {
+                    SheetEmptyState(
+                        icon: "network",
+                        title: "No federation peers found",
+                        message: "Ask the other person to enable Pair over Federation, then refresh."
+                    )
+                }
+                ForEach(model.federationPairingAnnouncements) { announcement in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text(announcement.offer.displayName)
+                                .font(.headline)
+                            Spacer()
+                            Text(announcement.offer.relay.host)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Text("Relay: \(announcement.offer.relay.host):\(announcement.offer.relay.port)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text("Safety code: \(pairingSafetyNumber(for: announcement.offer.fingerprint))")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        Button("Send Federation Pair Request") {
+                            Task { await model.sendFederationPairRequest(to: announcement) }
+                        }
+                        .glassButton(prominent: true)
+                        .hoverLift()
+                    }
+                    .padding(12)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+                }
+            }
+
+            SheetSection(title: "Incoming Federation Requests", icon: "tray.and.arrow.down.fill") {
+                if model.federationPairingRequests.isEmpty {
+                    SheetEmptyState(
+                        icon: "tray",
+                        title: "No incoming requests",
+                        message: "Requests sent through federation relays will appear here."
+                    )
+                }
+                ForEach(model.federationPairingRequests) { request in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(request.from.displayName)
+                            .font(.headline)
+                        Text("Reply relay: \(request.from.relay.host):\(request.from.relay.port)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text("Safety code: \(pairingSafetyNumber(for: request.from.fingerprint))")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                        ViewThatFits(in: .horizontal) {
+                            HStack {
+                                acceptRequestButton(request)
+                                dismissRequestButton(request)
+                            }
+                            VStack(alignment: .leading, spacing: 10) {
+                                acceptRequestButton(request)
+                                dismissRequestButton(request)
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+                }
+            }
+        } else {
+            SheetSection(title: "Federation Discovery Locked", icon: "lock.fill") {
+                Text("Enable federation pairing and acknowledge its metadata exposure to scan compatible relays.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -5866,6 +6046,7 @@ private enum PairingMethod: String, CaseIterable, Identifiable {
     case pasteCode
     case importFile
     case insecure
+    case federation
 
     var id: String { rawValue }
 
@@ -5879,6 +6060,8 @@ private enum PairingMethod: String, CaseIterable, Identifiable {
             return "Import File"
         case .insecure:
             return "Relay Pairing"
+        case .federation:
+            return "Federation"
         }
     }
 }
@@ -9695,8 +9878,10 @@ private struct RelayServerRow: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                #if os(macOS)
                 transportBadge
                 relayHealthBadge
+                #endif
                 Spacer()
                 #if os(iOS)
                 Menu {
@@ -9719,6 +9904,14 @@ private struct RelayServerRow: View {
                     .hoverLift()
                 #endif
             }
+            #if os(iOS)
+            HStack(spacing: 6) {
+                transportBadge
+                relayHealthBadge
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 4)
+            #endif
             Text("\(server.endpoint.host):\(server.endpoint.port)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -9769,21 +9962,11 @@ private struct RelayServerRow: View {
     @ViewBuilder
     private var relayHealthBadge: some View {
         if let badge = relayHealthBadgeData {
+            let view = StableCapsuleBadge(text: badge.text, icon: badge.icon, color: badge.color)
             #if os(macOS)
-            Label(badge.text, systemImage: badge.icon)
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .foregroundStyle(badge.color)
-                .background(Capsule().fill(badge.color.opacity(0.18)))
-                .help(badge.help)
+            view.help(badge.help)
             #else
-            Label(badge.text, systemImage: badge.icon)
-                .font(.caption2.weight(.semibold))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .foregroundStyle(badge.color)
-                .background(Capsule().fill(badge.color.opacity(0.18)))
+            view
             #endif
         }
     }
@@ -9835,21 +10018,11 @@ private struct RelayServerRow: View {
     @ViewBuilder
     private var transportBadge: some View {
         let badge = transportBadgeData
+        let view = StableCapsuleBadge(text: badge.text, icon: badge.icon, color: badge.color)
         #if os(macOS)
-        Label(badge.text, systemImage: badge.icon)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .foregroundStyle(badge.color)
-            .background(Capsule().fill(badge.color.opacity(0.18)))
-            .help(badge.help)
+        view.help(badge.help)
         #else
-        Label(badge.text, systemImage: badge.icon)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .foregroundStyle(badge.color)
-            .background(Capsule().fill(badge.color.opacity(0.18)))
+        view
         #endif
     }
 
@@ -10005,12 +10178,7 @@ private struct RelayServerRow: View {
 
     @ViewBuilder
     private func policyBadgeView(_ badge: PolicyBadge) -> some View {
-        let view = Label(badge.text, systemImage: badge.icon)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .foregroundStyle(badge.color)
-            .background(Capsule().fill(badge.color.opacity(0.18)))
+        let view = StableCapsuleBadge(text: badge.text, icon: badge.icon, color: badge.color)
         #if os(macOS)
         view.help(badge.help)
         #else
@@ -10123,6 +10291,11 @@ private struct RelayServerRow: View {
                 return "Curated (\(name))"
             }
             return "Curated"
+        case .manual:
+            if let name = federation.name, !name.isEmpty {
+                return "Manual (\(name))"
+            }
+            return "Manual"
         case .open:
             if let name = federation.name, !name.isEmpty {
                 return "Open (\(name))"

@@ -1,5 +1,5 @@
 import Foundation
-import PICCPCore
+import NoctweaveCore
 
 struct CiphertextPrefetchResult: Equatable {
     var fetchedEnvelopeCount: Int

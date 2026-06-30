@@ -1,5 +1,5 @@
 //
-//  PICCP_Messaging_ClientApp.swift
+//  NoctyraApp.swift
 //  Noctyra
 //
 //  Created by Luiz Fernando Widmer Neto on 27/12/25.
@@ -13,7 +13,7 @@ import AppKit
 #endif
 
 @main
-struct PICCP_Messaging_ClientApp: App {
+struct NoctyraApp: App {
     #if os(iOS)
     @UIApplicationDelegateAdaptor(NoctyraIOSAppDelegate.self) private var appDelegate
     #endif

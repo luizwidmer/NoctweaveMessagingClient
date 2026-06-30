@@ -17,7 +17,21 @@
                BlueprintIdentifier = "2566835C2F00A4F0006D96F3"
                BuildableName = "Noctyra.app"
                BlueprintName = "Noctyra"
-               ReferencedContainer = "container:PICCP Messaging Client.xcodeproj">
+               ReferencedContainer = "container:Noctyra Messaging Client.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "NO"
+            buildForProfiling = "NO"
+            buildForArchiving = "NO"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "9E5F1C5B2C0A4C009A000013"
+               BuildableName = "NoctyraUITests_iOS.xctest"
+               BlueprintName = "NoctyraUITests_iOS"
+               ReferencedContainer = "container:Noctyra Messaging Client.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -33,10 +47,20 @@
             BlueprintIdentifier = "2566835C2F00A4F0006D96F3"
             BuildableName = "Noctyra.app"
             BlueprintName = "Noctyra"
-            ReferencedContainer = "container:PICCP Messaging Client.xcodeproj">
+            ReferencedContainer = "container:Noctyra Messaging Client.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "9E5F1C5B2C0A4C009A000013"
+               BuildableName = "NoctyraUITests_iOS.xctest"
+               BlueprintName = "NoctyraUITests_iOS"
+               ReferencedContainer = "container:Noctyra Messaging Client.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction
@@ -56,7 +80,7 @@
             BlueprintIdentifier = "2566835C2F00A4F0006D96F3"
             BuildableName = "Noctyra.app"
             BlueprintName = "Noctyra"
-            ReferencedContainer = "container:PICCP Messaging Client.xcodeproj">
+            ReferencedContainer = "container:Noctyra Messaging Client.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -73,7 +97,7 @@
             BlueprintIdentifier = "2566835C2F00A4F0006D96F3"
             BuildableName = "Noctyra.app"
             BlueprintName = "Noctyra"
-            ReferencedContainer = "container:PICCP Messaging Client.xcodeproj">
+            ReferencedContainer = "container:Noctyra Messaging Client.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>
