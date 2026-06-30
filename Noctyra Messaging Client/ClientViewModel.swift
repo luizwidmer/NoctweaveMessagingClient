@@ -2936,9 +2936,6 @@ final class ClientViewModel: ObservableObject {
             return
         }
         let scopedIdentity = group.scopedIdentity ?? GroupScopedIdentity(displayName: state.identity.displayName)
-        group.scopedIdentity = scopedIdentity
-        state.upsert(group: group)
-        await save()
         do {
             _ = try await requestRelayGroupJoin(
                 groupId: id,
@@ -2946,6 +2943,9 @@ final class ClientViewModel: ObservableObject {
                 requesterSigningKey: scopedIdentity.signingKey,
                 invitedFingerprint: state.identity.fingerprint
             )
+            group.scopedIdentity = scopedIdentity
+            state.upsert(group: group)
+            await save()
             lastInfo = "Requested to join \(group.title) with a group identity."
         } catch {
             lastError = "Failed to accept group invitation: \(error.localizedDescription)"
@@ -2953,7 +2953,20 @@ final class ClientViewModel: ObservableObject {
     }
 
     func declineGroupInvitation(id: UUID) async {
-        await leaveGroup(id: id)
+        guard let group = state.group(for: id), group.isPendingInvitation else {
+            return
+        }
+        if var profile = state.identityProfile(id: state.activeIdentityId),
+           !profile.locallyLeftRelayGroupIds.contains(id) {
+            profile.locallyLeftRelayGroupIds.append(id)
+            state.updateIdentityProfile(profile)
+        }
+        state.groups.removeAll { $0.id == id }
+        if activeGroupId == id {
+            activeGroupId = nil
+        }
+        await save()
+        lastInfo = "Declined invitation to \(group.title)."
     }
 
     func promoteGroupMemberToContact(groupId: UUID, fingerprint: String) async {

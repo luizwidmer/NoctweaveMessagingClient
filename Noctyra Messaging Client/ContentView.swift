@@ -2486,7 +2486,10 @@ private struct GroupConversationView: View {
     }
 
     private var groupStatusText: String {
-        isPendingInvitation ? "Invitation pending" : "\(memberCount) members"
+        if isPendingInvitation {
+            return currentGroup.scopedIdentity == nil ? "Invitation pending" : "Join requested"
+        }
+        return "\(memberCount) members"
     }
 
     private var groupInviterName: String {
@@ -2511,6 +2514,7 @@ private struct GroupConversationView: View {
     var body: some View {
         let isSensitiveHidden = screenProtection.isSensitiveHidden
         let isRevealed = revealMessages && !isSensitiveHidden
+        let hasRequestedJoin = isPendingInvitation && currentGroup.scopedIdentity != nil
         VStack(spacing: 0) {
             #if os(iOS)
             ChatTopBar(
@@ -2518,30 +2522,32 @@ private struct GroupConversationView: View {
                 status: isSensitiveHidden ? "Capture active" : groupStatusText,
                 trailing: AnyView(
                     HStack(spacing: chatHeaderSpacing) {
-                        Button {
-                            showingGroupDetails = true
-                        } label: {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.system(size: chatHeaderIconSize, weight: .semibold))
+                        if !isPendingInvitation {
+                            Button {
+                                showingGroupDetails = true
+                            } label: {
+                                Image(systemName: "slider.horizontal.3")
+                                    .font(.system(size: chatHeaderIconSize, weight: .semibold))
+                            }
+                            .accessibilityLabel("Group Settings")
+                            .glassCircleButton(diameter: chatHeaderButtonDiameter)
+                            .hoverLift()
+                            Button {
+                                showingClearChatConfirm = true
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: chatHeaderIconSize, weight: .semibold))
+                            }
+                            .accessibilityLabel("Clear Group Chat")
+                            .glassCircleButton(diameter: chatHeaderButtonDiameter)
+                            .hoverLift()
+                            RevealToggleButton(
+                                isRevealed: $revealMessages,
+                                isDisabled: isSensitiveHidden,
+                                diameter: chatHeaderButtonDiameter,
+                                iconSize: chatHeaderIconSize
+                            )
                         }
-                        .accessibilityLabel("Group Settings")
-                        .glassCircleButton(diameter: chatHeaderButtonDiameter)
-                        .hoverLift()
-                        Button {
-                            showingClearChatConfirm = true
-                        } label: {
-                            Image(systemName: "trash")
-                                .font(.system(size: chatHeaderIconSize, weight: .semibold))
-                        }
-                        .accessibilityLabel("Clear Group Chat")
-                        .glassCircleButton(diameter: chatHeaderButtonDiameter)
-                        .hoverLift()
-                        RevealToggleButton(
-                            isRevealed: $revealMessages,
-                            isDisabled: isSensitiveHidden,
-                            diameter: chatHeaderButtonDiameter,
-                            iconSize: chatHeaderIconSize
-                        )
                     }
                 ),
                 onBack: {
@@ -2575,25 +2581,27 @@ private struct GroupConversationView: View {
                     }
                 }
                 Spacer()
-                Button {
-                    showingGroupDetails = true
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 14, weight: .semibold))
+                if !isPendingInvitation {
+                    Button {
+                        showingGroupDetails = true
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .accessibilityLabel("Group Settings")
+                    .glassCircleButton(diameter: 30)
+                    .hoverLift()
+                    Button {
+                        showingClearChatConfirm = true
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .accessibilityLabel("Clear Group Chat")
+                    .glassCircleButton(diameter: 30)
+                    .hoverLift()
+                    RevealToggleButton(isRevealed: $revealMessages, isDisabled: isSensitiveHidden)
                 }
-                .accessibilityLabel("Group Settings")
-                .glassCircleButton(diameter: 30)
-                .hoverLift()
-                Button {
-                    showingClearChatConfirm = true
-                } label: {
-                    Image(systemName: "trash")
-                        .font(.system(size: 14, weight: .semibold))
-                }
-                .accessibilityLabel("Clear Group Chat")
-                .glassCircleButton(diameter: 30)
-                .hoverLift()
-                RevealToggleButton(isRevealed: $revealMessages, isDisabled: isSensitiveHidden)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -2636,6 +2644,7 @@ private struct GroupConversationView: View {
                             GroupInvitationPanel(
                                 title: groupTitle,
                                 inviterName: groupInviterName,
+                                hasRequestedJoin: hasRequestedJoin,
                                 onAccept: {
                                     Task { await model.acceptGroupInvitation(id: group.id) }
                                 },
@@ -2678,37 +2687,7 @@ private struct GroupConversationView: View {
                 #endif
             }
 
-            if isPendingInvitation {
-                HStack(spacing: 10) {
-                    Button("Decline") {
-                        Task { await model.declineGroupInvitation(id: group.id) }
-                    }
-                    .glassButton(compact: true)
-                    .hoverLift()
-
-                    Button {
-                        Task { await model.acceptGroupInvitation(id: group.id) }
-                    } label: {
-                        Label("Accept", systemImage: "checkmark")
-                    }
-                    .glassButton(prominent: true, compact: true)
-                    .hoverLift()
-                }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 10)
-                #if os(macOS)
-                .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(Color.white.opacity(isDark ? 0.18 : 0.30), lineWidth: 0.8)
-                        )
-                )
-                #endif
-                .padding(.horizontal, 8)
-                .padding(.bottom, 6)
-            } else {
+            if !isPendingInvitation {
                 HStack(spacing: 8) {
                 #if os(iOS)
                 Button {
@@ -2816,8 +2795,8 @@ private struct GroupConversationView: View {
                     )
             )
             #endif
-            .padding(.horizontal, 8)
-            .padding(.bottom, 6)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 6)
             }
         }
         .background {
@@ -3095,6 +3074,7 @@ private struct GroupConversationView: View {
 private struct GroupInvitationPanel: View {
     let title: String
     let inviterName: String
+    let hasRequestedJoin: Bool
     let onAccept: () -> Void
     let onDecline: () -> Void
     @Environment(\.appTheme) private var theme
@@ -3109,9 +3089,11 @@ private struct GroupInvitationPanel: View {
                     .background(theme.accent.opacity(0.14), in: Circle())
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Group Invitation")
+                    Text(hasRequestedJoin ? "Join Request Sent" : "Group Invitation")
                         .font(.headline)
-                    Text("\(inviterName) invited you to \(title). Accepting creates a group-only identity for this conversation.")
+                    Text(hasRequestedJoin
+                         ? "Your group-only identity was sent to \(title). The group creator must approve it before messages unlock."
+                         : "\(inviterName) invited you to \(title). Accepting creates a group-only identity for this conversation.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -3119,14 +3101,23 @@ private struct GroupInvitationPanel: View {
             }
 
             HStack(spacing: 10) {
-                Button("Decline", action: onDecline)
+                Button(hasRequestedJoin ? "Dismiss" : "Decline", action: onDecline)
                     .glassButton(compact: true)
                     .hoverLift()
-                Button(action: onAccept) {
-                    Label("Accept", systemImage: "checkmark")
+                if hasRequestedJoin {
+                    Label("Requested", systemImage: "clock")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.accent)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(theme.accent.opacity(0.12), in: Capsule())
+                } else {
+                    Button(action: onAccept) {
+                        Label("Accept", systemImage: "checkmark")
+                    }
+                    .glassButton(prominent: true, compact: true)
+                    .hoverLift()
                 }
-                .glassButton(prominent: true, compact: true)
-                .hoverLift()
             }
         }
         .uniformGlassCard(cornerRadius: 18, padding: 14)
