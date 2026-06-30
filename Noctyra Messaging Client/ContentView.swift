@@ -3322,10 +3322,9 @@ private struct SheetGroupMemberRow: View {
     let isSelf: Bool
     let isCreator: Bool
     let isDirectContact: Bool
-    let canPair: Bool
     let canPromoteDirectly: Bool
     let canKick: Bool
-    let onPair: () -> Void
+    let onAddContact: () -> Void
     let onKick: () -> Void
 
     @Environment(\.appTheme) private var theme
@@ -3343,10 +3342,6 @@ private struct SheetGroupMemberRow: View {
         if isCreator { return "Creator" }
         if isDirectContact { return "Contact" }
         return "Group identity"
-    }
-
-    private var pairLabel: String {
-        canPromoteDirectly ? "Add Contact" : "Request Pair"
     }
 
     var body: some View {
@@ -3379,11 +3374,11 @@ private struct SheetGroupMemberRow: View {
 
             Spacer(minLength: 8)
 
-            if canPair || canKick {
+            if canPromoteDirectly || canKick {
                 VStack(alignment: .trailing, spacing: 6) {
-                    if canPair {
-                        Button(action: onPair) {
-                            Label(pairLabel, systemImage: canPromoteDirectly ? "person.badge.plus" : "point.3.connected.trianglepath.dotted")
+                    if canPromoteDirectly {
+                        Button(action: onAddContact) {
+                            Label("Add Contact", systemImage: "person.badge.plus")
                                 .labelStyle(.titleAndIcon)
                                 .font(.caption.weight(.semibold))
                         }
@@ -3427,6 +3422,9 @@ private struct GroupDetailsView: View {
     @State private var showingKickConfirm = false
     @State private var memberToKick: RelayGroupMemberProfile?
     @State private var actingMemberFingerprint: String?
+    @State private var selectedInviteContacts = Set<UUID>()
+    @State private var inviteSearchText = ""
+    @State private var isInviting = false
     private var canEditRelayGroup: Bool {
         guard let group else { return false }
         return model.canEditRelayGroup(group)
@@ -3454,6 +3452,24 @@ private struct GroupDetailsView: View {
 
     private var groupMemberProfiles: [RelayGroupMemberProfile] {
         group?.memberProfiles ?? []
+    }
+
+    private var availableInviteContacts: [Contact] {
+        let memberFingerprints = Set(groupMemberProfiles.map(\.fingerprint))
+        let sorted = model.state.contacts
+            .filter { contact in
+                !memberFingerprints.contains(contact.fingerprint)
+                    && contact.fingerprint != model.state.identity.fingerprint
+                    && contact.fingerprint != group?.createdByFingerprint
+            }
+            .sorted {
+                $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+            }
+        let query = inviteSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return sorted }
+        return sorted.filter { contact in
+            "\(contact.displayName) \(contact.fingerprint)".lowercased().contains(query)
+        }
     }
 
     var body: some View {
@@ -3486,34 +3502,14 @@ private struct GroupDetailsView: View {
                         )
                     } else {
                         SheetSection(title: "Group Name", icon: "textformat") {
-                        TextField("Group name", text: $title)
-                            .disabled(!canEditRelayGroup)
-                            .noctyraInputField()
-                        }
-
-                        SheetSection(
-                            title: "Your Role",
-                            icon: isRelayGroupCreator ? "crown.fill" : "person.fill"
-                        ) {
-                            Label(
-                                isRelayGroupCreator ? "Creator" : "Member",
-                                systemImage: isRelayGroupCreator ? "crown.fill" : "person.fill"
-                            )
-                            .font(.headline)
-                            .foregroundStyle(.primary)
-
-                            Text(
-                                isRelayGroupCreator
-                                    ? "You can update membership, rename the group, and extinguish this relay-backed group for everyone."
-                                    : "You can read group details and leave this group. Only the creator can update membership or extinguish it."
-                            )
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                            TextField("Group name", text: $title)
+                                .disabled(!canEditRelayGroup)
+                                .noctyraInputField()
                         }
 
                         SheetSection(
                             title: "Members",
-                            subtitle: "\(group?.resolvedMemberCount ?? groupMemberProfiles.count) in group",
+                            subtitle: "\(group?.resolvedMemberCount ?? groupMemberProfiles.count) in group • You are \(isRelayGroupCreator ? "creator" : "member")",
                             icon: "person.2.fill"
                         ) {
                             if groupMemberProfiles.isEmpty {
@@ -3530,11 +3526,10 @@ private struct GroupDetailsView: View {
                                             isSelf: isSelf(member.fingerprint),
                                             isCreator: member.fingerprint == group?.createdByFingerprint,
                                             isDirectContact: model.groupMemberIsDirectContact(member),
-                                            canPair: canPair(member),
-                                            canPromoteDirectly: model.canPromoteGroupMember(member),
+                                            canPromoteDirectly: model.canPromoteGroupMember(member) && actingMemberFingerprint == nil,
                                             canKick: canKick(member),
-                                            onPair: {
-                                                pair(member)
+                                            onAddContact: {
+                                                addContact(member)
                                             },
                                             onKick: {
                                                 memberToKick = member
@@ -3546,21 +3541,54 @@ private struct GroupDetailsView: View {
                             }
                         }
 
-                        SheetSection(title: "How Changes Sync", icon: "arrow.triangle.2.circlepath") {
-                            Text(
-                                group?.relayInboxId != nil
-                                    ? "Changes are synced to the relay group registry through group-scoped identities. Messages remain end-to-end encrypted for each member."
-                                    : "Changes affect this identity profile on this device. Messages remain end-to-end encrypted for each member."
-                            )
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        if canEditRelayGroup {
+                            SheetSection(
+                                title: "Add Members",
+                                subtitle: "\(selectedInviteContacts.count) selected",
+                                icon: "person.crop.circle.badge.plus"
+                            ) {
+                                InlineSearchField(text: $inviteSearchText, prompt: "Search contacts")
 
-                            if !canEditRelayGroup {
+                                if model.state.contacts.isEmpty {
+                                    SheetEmptyState(
+                                        icon: "person.crop.circle.badge.plus",
+                                        title: "No contacts",
+                                        message: "Pair contacts before inviting them to a group."
+                                    )
+                                } else if availableInviteContacts.isEmpty {
+                                    SheetEmptyState(
+                                        icon: "checkmark.circle",
+                                        title: "No contacts to add",
+                                        message: "All matching contacts are already in this group."
+                                    )
+                                } else {
+                                    LazyVStack(spacing: 8) {
+                                        ForEach(availableInviteContacts) { contact in
+                                            SheetContactSelectionRow(
+                                                contact: contact,
+                                                isSelected: selectedInviteContacts.contains(contact.id)
+                                            ) {
+                                                toggleInviteContact(contact.id)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Button {
+                                    inviteSelectedContacts()
+                                } label: {
+                                    Label(isInviting ? "Inviting…" : "Invite Selected", systemImage: "paperplane.fill")
+                                }
+                                .glassButton(prominent: true)
+                                .disabled(selectedInviteContacts.isEmpty || isInviting || isSaving)
+                            }
+                        } else {
+                            SheetSection(title: "Group Controls", icon: "lock.fill") {
                                 Label(
-                                    "Only the group creator can edit relay-backed groups.",
+                                    "Only the group creator can rename this group or invite and remove members.",
                                     systemImage: "lock.fill"
                                 )
-                                .font(.caption)
+                                .font(.callout)
                                 .foregroundStyle(.secondary)
                             }
                         }
@@ -3633,6 +3661,8 @@ private struct GroupDetailsView: View {
     private func loadCurrentValues() {
         guard let group else { return }
         title = group.title
+        selectedInviteContacts.removeAll()
+        inviteSearchText = ""
     }
 
     private func save() {
@@ -3672,18 +3702,35 @@ private struct GroupDetailsView: View {
             && actingMemberFingerprint == nil
     }
 
-    private func canPair(_ member: RelayGroupMemberProfile) -> Bool {
-        !isSelf(member.fingerprint)
-            && !model.groupMemberIsDirectContact(member)
-            && actingMemberFingerprint == nil
-    }
-
-    private func pair(_ member: RelayGroupMemberProfile) {
+    private func addContact(_ member: RelayGroupMemberProfile) {
         actingMemberFingerprint = member.fingerprint
         Task {
-            await model.pairWithGroupMember(groupId: groupId, fingerprint: member.fingerprint)
+            await model.promoteGroupMemberToContact(groupId: groupId, fingerprint: member.fingerprint)
             await MainActor.run {
                 actingMemberFingerprint = nil
+            }
+        }
+    }
+
+    private func toggleInviteContact(_ contactId: UUID) {
+        if selectedInviteContacts.contains(contactId) {
+            selectedInviteContacts.remove(contactId)
+        } else {
+            selectedInviteContacts.insert(contactId)
+        }
+        FeedbackGenerator.light()
+    }
+
+    private func inviteSelectedContacts() {
+        guard !selectedInviteContacts.isEmpty else { return }
+        isInviting = true
+        let contactIds = Array(selectedInviteContacts)
+        Task {
+            await model.inviteContactsToGroup(groupId: groupId, contactIds: contactIds)
+            await MainActor.run {
+                isInviting = false
+                selectedInviteContacts.removeAll()
+                inviteSearchText = ""
             }
         }
     }
