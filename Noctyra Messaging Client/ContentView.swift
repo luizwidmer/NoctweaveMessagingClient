@@ -3223,7 +3223,7 @@ private struct GroupDetailsView: View {
         return model.isRelayGroupCreator(group)
     }
     private var leaveButtonLabel: String {
-        isRelayGroupCreator ? "Leave & Extinguish Group" : "Leave Group"
+        isRelayGroupCreator ? "Extinguish Group" : "Leave Group"
     }
     private var leaveDialogTitle: String {
         isRelayGroupCreator ? "Extinguish this group?" : "Leave this group?"
@@ -3272,6 +3272,26 @@ private struct GroupDetailsView: View {
                         TextField("Group name", text: $title)
                             .disabled(!canEditRelayGroup)
                             .noctyraInputField()
+                        }
+
+                        SheetSection(
+                            title: "Your Role",
+                            icon: isRelayGroupCreator ? "crown.fill" : "person.fill"
+                        ) {
+                            Label(
+                                isRelayGroupCreator ? "Creator" : "Member",
+                                systemImage: isRelayGroupCreator ? "crown.fill" : "person.fill"
+                            )
+                            .font(.headline)
+                            .foregroundStyle(.primary)
+
+                            Text(
+                                isRelayGroupCreator
+                                    ? "You can update membership, rename the group, and extinguish this relay-backed group for everyone."
+                                    : "You can read group details and leave this group. Only the creator can update membership or extinguish it."
+                            )
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                         }
 
                         SheetSection(
@@ -9309,11 +9329,17 @@ wss://relay-b.example.org:443,WS Relay,EU,privacy,https://relay-b.example.org,We
 }
 
 private struct ContactBookView: View {
+    private struct DeleteContactPrompt: Identifiable {
+        let id: UUID
+        let name: String
+    }
+
     @ObservedObject var model: ClientViewModel
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     let onOpen: (UUID) -> Void
     let onAdd: () -> Void
     @State private var trustPrompt: TrustPrompt?
+    @State private var deleteContactPrompt: DeleteContactPrompt?
     @State private var searchText = ""
 
     var body: some View {
@@ -9369,6 +9395,23 @@ private struct ContactBookView: View {
                 }
             }
             .noctyraSheetPresentation()
+        }
+        .confirmationDialog(
+            "Delete contact?",
+            isPresented: Binding(
+                get: { deleteContactPrompt != nil },
+                set: { if !$0 { deleteContactPrompt = nil } }
+            )
+        ) {
+            if let prompt = deleteContactPrompt {
+                Button("Delete \(prompt.name)", role: .destructive) {
+                    Task { await model.removeContact(id: prompt.id) }
+                    deleteContactPrompt = nil
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the contact, local direct chat history, and trust records from this device.")
         }
     }
 
@@ -9465,6 +9508,14 @@ private struct ContactBookView: View {
                 }
                 .accessibilityLabel("Open Chat")
                 .glassCircleButton(prominent: true, diameter: 34)
+                Button {
+                    deleteContactPrompt = DeleteContactPrompt(id: contact.id, name: contact.displayName)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .accessibilityLabel("Delete Contact")
+                .glassCircleButton(diameter: 34)
             }
 
             VStack(alignment: .leading, spacing: 5) {
@@ -9489,7 +9540,7 @@ private struct ContactBookView: View {
         .uniformGlassCard(cornerRadius: 18, padding: 14)
         .contextMenu {
             Button("Remove Contact", role: .destructive) {
-                Task { await model.removeContact(id: contact.id) }
+                deleteContactPrompt = DeleteContactPrompt(id: contact.id, name: contact.displayName)
             }
         }
     }
@@ -9568,7 +9619,7 @@ private struct ContactBookView: View {
                     .glassCircleButton(diameter: 32)
                     .hoverLift()
                     Button {
-                        Task { await model.removeContact(id: contact.id) }
+                        deleteContactPrompt = DeleteContactPrompt(id: contact.id, name: contact.displayName)
                     } label: {
                         Image(systemName: "trash")
                             .font(.system(size: 14, weight: .semibold))
@@ -9580,7 +9631,7 @@ private struct ContactBookView: View {
                         .glassButton()
                         .hoverLift()
                 Button("Delete") {
-                    Task { await model.removeContact(id: contact.id) }
+                    deleteContactPrompt = DeleteContactPrompt(id: contact.id, name: contact.displayName)
                 }
                 .glassButton()
                 .hoverLift()
@@ -9621,12 +9672,12 @@ private struct ContactBookView: View {
             .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
             .contextMenu {
                 Button("Remove Contact", role: .destructive) {
-                    Task { await model.removeContact(id: contact.id) }
+                    deleteContactPrompt = DeleteContactPrompt(id: contact.id, name: contact.displayName)
                 }
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                 Button(role: .destructive) {
-                    Task { await model.removeContact(id: contact.id) }
+                    deleteContactPrompt = DeleteContactPrompt(id: contact.id, name: contact.displayName)
                 } label: {
                     Label("Delete", systemImage: "trash")
                 }

@@ -2690,6 +2690,7 @@ final class ClientViewModel: ObservableObject {
             groupRatchetState: groupRatchetState(from: relayGroup, identity: state.identity),
             createdByFingerprint: relayGroup.createdByFingerprint
         )
+        unmarkRelayGroupLocallyLeft(group.id, profileId: state.activeIdentityId)
         state.upsert(group: group)
         await save()
         lastInfo = "Created relay-backed group \(group.title)."
@@ -2701,6 +2702,9 @@ final class ClientViewModel: ObservableObject {
         let messages = state.group(for: id)?.messages ?? []
         removeAttachmentFiles(from: messages)
         try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: id)
+        if group.relayInboxId != nil {
+            markRelayGroupLocallyLeft(id, profileId: state.activeIdentityId)
+        }
         state.groups.removeAll { $0.id == id }
         if activeGroupId == id {
             activeGroupId = nil
@@ -2798,6 +2802,24 @@ final class ClientViewModel: ObservableObject {
         group.relayInboxId == nil || isRelayGroupCreator(group)
     }
 
+    private func markRelayGroupLocallyLeft(_ groupId: UUID, profileId: UUID) {
+        guard var profile = state.identityProfile(id: profileId),
+              !profile.locallyLeftRelayGroupIds.contains(groupId) else {
+            return
+        }
+        profile.locallyLeftRelayGroupIds.append(groupId)
+        state.updateIdentityProfile(profile)
+    }
+
+    private func unmarkRelayGroupLocallyLeft(_ groupId: UUID, profileId: UUID) {
+        guard var profile = state.identityProfile(id: profileId),
+              profile.locallyLeftRelayGroupIds.contains(groupId) else {
+            return
+        }
+        profile.locallyLeftRelayGroupIds.removeAll { $0 == groupId }
+        state.updateIdentityProfile(profile)
+    }
+
     func leaveGroup(id: UUID) async {
         guard let group = state.group(for: id) else { return }
         if group.relayInboxId != nil {
@@ -2889,6 +2911,8 @@ final class ClientViewModel: ObservableObject {
     func requestJoin(groupId: UUID) async {
         do {
             _ = try await requestRelayGroupJoin(groupId: groupId)
+            unmarkRelayGroupLocallyLeft(groupId, profileId: state.activeIdentityId)
+            await save()
             lastInfo = "Join request sent."
         } catch {
             lastError = "Failed to request join: \(error.localizedDescription)"
@@ -5004,11 +5028,14 @@ final class ClientViewModel: ObservableObject {
             return
         }
 
-        let didMaterializeContacts = materializeGroupDirectoryContacts(from: descriptors, profile: &profile)
+        let locallyLeftGroupIds = Set(profile.locallyLeftRelayGroupIds)
+        let visibleDescriptors = descriptors.filter { !locallyLeftGroupIds.contains($0.id) }
+
+        let didMaterializeContacts = materializeGroupDirectoryContacts(from: visibleDescriptors, profile: &profile)
 
         let localOnlyGroups = profile.groups.filter { $0.relayInboxId == nil }
         let existingById = Dictionary(uniqueKeysWithValues: profile.groups.map { ($0.id, $0) })
-        let descriptorIds = Set(descriptors.map(\.id))
+        let descriptorIds = Set(visibleDescriptors.map(\.id))
         let staleRelayGroups = profile.groups.filter { group in
             group.relayInboxId != nil && !descriptorIds.contains(group.id)
         }
@@ -5019,7 +5046,7 @@ final class ClientViewModel: ObservableObject {
             removeAttachmentFiles(from: messages)
             try? threadMessageStore.deleteGroupMessages(profileId: profile.id, groupId: group.id)
         }
-        let relayBackedGroups = descriptors.map { descriptor -> GroupConversation in
+        let relayBackedGroups = visibleDescriptors.map { descriptor -> GroupConversation in
             let memberFingerprints = normalizedRelayMemberFingerprints(
                 from: descriptor.members,
                 preferredRelay: profile.relay
