@@ -2671,19 +2671,14 @@ final class ClientViewModel: ObservableObject {
             lastError = "Selected members are missing relay fingerprints."
             return
         }
-        let memberProfiles: [RelayGroupMemberProfile] = validMembers.compactMap { memberId -> RelayGroupMemberProfile? in
-            guard let contact = state.contacts.first(where: { $0.id == memberId }) else {
-                return nil
-            }
-            return relayGroupMemberProfile(for: contact)
-        }
         let scopedIdentity = GroupScopedIdentity(displayName: state.identity.displayName)
         let relayGroup: RelayGroupDescriptor
         do {
             relayGroup = try await createRelayGroupRegistry(
                 title: trimmedTitle,
-                memberFingerprints: memberFingerprints,
-                memberProfiles: memberProfiles,
+                memberFingerprints: [],
+                memberProfiles: [],
+                invitedFingerprints: memberFingerprints,
                 scopedIdentity: scopedIdentity
             )
         } catch {
@@ -2948,7 +2943,8 @@ final class ClientViewModel: ObservableObject {
             _ = try await requestRelayGroupJoin(
                 groupId: id,
                 requesterProfile: relayGroupMemberProfile(for: scopedIdentity),
-                requesterSigningKey: scopedIdentity.signingKey
+                requesterSigningKey: scopedIdentity.signingKey,
+                invitedFingerprint: state.identity.fingerprint
             )
             lastInfo = "Requested to join \(group.title) with a group identity."
         } catch {
@@ -4640,6 +4636,7 @@ final class ClientViewModel: ObservableObject {
         title: String,
         memberFingerprints: [String],
         memberProfiles: [RelayGroupMemberProfile],
+        invitedFingerprints: [String] = [],
         scopedIdentity: GroupScopedIdentity
     ) async throws -> RelayGroupDescriptor {
         let client = relayClient(for: state.relay)
@@ -4658,6 +4655,7 @@ final class ClientViewModel: ObservableObject {
             title: title,
             creatorFingerprint: scopedIdentity.fingerprint,
             memberFingerprints: memberFingerprints,
+            invitedFingerprints: invitedFingerprints,
             creatorProfile: creatorProfile,
             memberProfiles: memberProfiles,
             initialRatchetSecretDistribution: initialDistribution
@@ -4674,6 +4672,7 @@ final class ClientViewModel: ObservableObject {
             title: request.title,
             creatorFingerprint: request.creatorFingerprint,
             memberFingerprints: request.memberFingerprints,
+            invitedFingerprints: request.invitedFingerprints,
             creatorProfile: request.creatorProfile,
             memberProfiles: request.memberProfiles,
             initialRatchetSecretDistribution: request.initialRatchetSecretDistribution,
@@ -4965,10 +4964,40 @@ final class ClientViewModel: ObservableObject {
         return response.groups ?? []
     }
 
+    private func listRelayGroupInvitations(
+        invitedFingerprint: String,
+        signerIdentity: Identity,
+        relay: RelayEndpoint
+    ) async throws -> [RelayGroupInvitation] {
+        let client = relayClient(for: relay)
+        var request = ListGroupInvitationsRequest(invitedFingerprint: invitedFingerprint, limit: 256)
+        let proof = try makeActorProof(
+            fingerprint: invitedFingerprint,
+            signingKey: signerIdentity.signingKey,
+            publicSigningKey: signerIdentity.signingKey.publicKeyData
+        ) { actorProof in
+            try request.signableData(for: actorProof)
+        }
+        request = ListGroupInvitationsRequest(
+            invitedFingerprint: request.invitedFingerprint,
+            limit: request.limit,
+            invitedProof: proof
+        )
+        let response = try await client.send(.listGroupInvitations(request))
+        if response.type == .error {
+            throw RelayGroupRegistryError.rejected(response.error ?? "Relay rejected invitation list request.")
+        }
+        guard response.type == .groupInvitations else {
+            throw RelayGroupRegistryError.invalidResponse
+        }
+        return response.groupInvitations ?? []
+    }
+
     private func requestRelayGroupJoin(
         groupId: UUID,
         requesterProfile: RelayGroupMemberProfile? = nil,
         requesterSigningKey: SigningKeyPair? = nil,
+        invitedFingerprint: String? = nil,
         relay: RelayEndpoint? = nil
     ) async throws -> RelayGroupJoinRequest {
         let targetRelay = relay ?? state.relay
@@ -4978,7 +5007,11 @@ final class ClientViewModel: ObservableObject {
         guard let publicSigningKey = resolvedProfile.signingPublicKey else {
             throw RelayGroupRegistryError.rejected("Requester profile is missing a signing key.")
         }
-        var request = RequestGroupJoinRequest(groupId: groupId, requesterProfile: resolvedProfile)
+        var request = RequestGroupJoinRequest(
+            groupId: groupId,
+            requesterProfile: resolvedProfile,
+            invitedFingerprint: invitedFingerprint
+        )
         let proof = try makeActorProof(
             fingerprint: resolvedProfile.fingerprint,
             signingKey: signerKey,
@@ -4989,6 +5022,7 @@ final class ClientViewModel: ObservableObject {
         request = RequestGroupJoinRequest(
             groupId: request.groupId,
             requesterProfile: request.requesterProfile,
+            invitedFingerprint: request.invitedFingerprint,
             requesterProof: proof
         )
         let response = try await client.send(
@@ -5179,6 +5213,7 @@ final class ClientViewModel: ObservableObject {
             return
         }
         var descriptorsById: [UUID: RelayGroupDescriptor] = [:]
+        var invitationsById: [UUID: RelayGroupInvitation] = [:]
         do {
             let directDescriptors = try await listRelayGroups(
                 memberFingerprint: profile.identity.fingerprint,
@@ -5187,6 +5222,14 @@ final class ClientViewModel: ObservableObject {
             )
             for descriptor in directDescriptors {
                 descriptorsById[descriptor.id] = descriptor
+            }
+            let invitations = try await listRelayGroupInvitations(
+                invitedFingerprint: profile.identity.fingerprint,
+                signerIdentity: profile.identity,
+                relay: profile.relay
+            )
+            for invitation in invitations {
+                invitationsById[invitation.groupId] = invitation
             }
             for group in profile.groups {
                 guard let scopedIdentity = group.scopedIdentity else { continue }
@@ -5215,9 +5258,14 @@ final class ClientViewModel: ObservableObject {
         let localOnlyGroups = profile.groups.filter { $0.relayInboxId == nil }
         let existingById = Dictionary(uniqueKeysWithValues: profile.groups.map { ($0.id, $0) })
         let identityLineage = Set(identityLineageFingerprints(for: profile))
-        let descriptorIds = Set(visibleDescriptors.map(\.id))
+        let visibleInvitations = invitationsById.values.filter { invitation in
+            !locallyLeftGroupIds.contains(invitation.groupId)
+                && descriptorsById[invitation.groupId] == nil
+        }
+        let visibleRelayGroupIds = Set(visibleDescriptors.map(\.id))
+            .union(visibleInvitations.map(\.groupId))
         let staleRelayGroups = profile.groups.filter { group in
-            group.relayInboxId != nil && !descriptorIds.contains(group.id)
+            group.relayInboxId != nil && !visibleRelayGroupIds.contains(group.id)
         }
         for group in staleRelayGroups {
             let messages = group.messages.isEmpty
@@ -5265,12 +5313,37 @@ final class ClientViewModel: ObservableObject {
             }
             return merged
         }
+        let invitationBackedGroups = visibleInvitations.map { invitation -> GroupConversation in
+            var merged = existingById[invitation.groupId] ?? GroupConversation(
+                id: invitation.groupId,
+                title: invitation.title,
+                memberContactIds: [],
+                relayInboxId: invitation.inboxId,
+                relayEpoch: invitation.epoch,
+                relayTranscriptHash: nil,
+                createdByFingerprint: invitation.createdByFingerprint,
+                memberProfiles: [],
+                isPendingInvitation: true,
+                createdAt: invitation.createdAt
+            )
+            merged.title = invitation.title
+            merged.memberContactIds = []
+            merged.memberProfiles = []
+            merged.relayInboxId = invitation.inboxId
+            merged.relayEpoch = invitation.epoch
+            merged.createdByFingerprint = invitation.createdByFingerprint
+            merged.isPendingInvitation = true
+            return merged
+        }
 
         var mergedById: [UUID: GroupConversation] = [:]
         for group in localOnlyGroups {
             mergedById[group.id] = group
         }
         for group in relayBackedGroups {
+            mergedById[group.id] = group
+        }
+        for group in invitationBackedGroups {
             mergedById[group.id] = group
         }
 
