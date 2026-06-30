@@ -3321,7 +3321,11 @@ private struct SheetGroupMemberRow: View {
     let member: RelayGroupMemberProfile
     let isSelf: Bool
     let isCreator: Bool
+    let isDirectContact: Bool
+    let canPair: Bool
+    let canPromoteDirectly: Bool
     let canKick: Bool
+    let onPair: () -> Void
     let onKick: () -> Void
 
     @Environment(\.appTheme) private var theme
@@ -3337,7 +3341,12 @@ private struct SheetGroupMemberRow: View {
     private var statusText: String {
         if isSelf { return "You" }
         if isCreator { return "Creator" }
+        if isDirectContact { return "Contact" }
         return "Group identity"
+    }
+
+    private var pairLabel: String {
+        canPromoteDirectly ? "Add Contact" : "Request Pair"
     }
 
     var body: some View {
@@ -3370,13 +3379,28 @@ private struct SheetGroupMemberRow: View {
 
             Spacer(minLength: 8)
 
-            if canKick {
-                Button(role: .destructive, action: onKick) {
-                    Image(systemName: "person.crop.circle.badge.minus")
-                        .font(.system(size: 14, weight: .semibold))
+            if canPair || canKick {
+                VStack(alignment: .trailing, spacing: 6) {
+                    if canPair {
+                        Button(action: onPair) {
+                            Label(pairLabel, systemImage: canPromoteDirectly ? "person.badge.plus" : "point.3.connected.trianglepath.dotted")
+                                .labelStyle(.titleAndIcon)
+                                .font(.caption.weight(.semibold))
+                        }
+                        .glassButton(compact: true)
+                        .hoverLift()
+                    }
+
+                    if canKick {
+                        Button(role: .destructive, action: onKick) {
+                            Label("Remove", systemImage: "person.crop.circle.badge.minus")
+                                .labelStyle(.titleAndIcon)
+                                .font(.caption.weight(.semibold))
+                        }
+                        .glassButton(compact: true)
+                        .hoverLift()
+                    }
                 }
-                    .glassButton(compact: true)
-                    .hoverLift()
             }
         }
         .padding(.horizontal, 11)
@@ -3402,6 +3426,7 @@ private struct GroupDetailsView: View {
     @State private var showingLeaveConfirm = false
     @State private var showingKickConfirm = false
     @State private var memberToKick: RelayGroupMemberProfile?
+    @State private var actingMemberFingerprint: String?
     private var canEditRelayGroup: Bool {
         guard let group else { return false }
         return model.canEditRelayGroup(group)
@@ -3504,7 +3529,13 @@ private struct GroupDetailsView: View {
                                             member: member,
                                             isSelf: isSelf(member.fingerprint),
                                             isCreator: member.fingerprint == group?.createdByFingerprint,
+                                            isDirectContact: model.groupMemberIsDirectContact(member),
+                                            canPair: canPair(member),
+                                            canPromoteDirectly: model.canPromoteGroupMember(member),
                                             canKick: canKick(member),
+                                            onPair: {
+                                                pair(member)
+                                            },
                                             onKick: {
                                                 memberToKick = member
                                                 showingKickConfirm = true
@@ -3582,6 +3613,7 @@ private struct GroupDetailsView: View {
                     kick(memberToKick)
                 }
             }
+            .disabled(memberToKick.map { actingMemberFingerprint == $0.fingerprint } ?? false)
         } message: {
             if let memberToKick {
                 Text("This removes \(displayName(for: memberToKick)) from the relay group.")
@@ -3637,14 +3669,34 @@ private struct GroupDetailsView: View {
         canEditRelayGroup
             && !isSelf(member.fingerprint)
             && member.fingerprint != group?.createdByFingerprint
+            && actingMemberFingerprint == nil
+    }
+
+    private func canPair(_ member: RelayGroupMemberProfile) -> Bool {
+        !isSelf(member.fingerprint)
+            && !model.groupMemberIsDirectContact(member)
+            && actingMemberFingerprint == nil
+    }
+
+    private func pair(_ member: RelayGroupMemberProfile) {
+        actingMemberFingerprint = member.fingerprint
+        Task {
+            await model.pairWithGroupMember(groupId: groupId, fingerprint: member.fingerprint)
+            await MainActor.run {
+                actingMemberFingerprint = nil
+            }
+        }
     }
 
     private func kick(_ member: RelayGroupMemberProfile) {
         isSaving = true
+        actingMemberFingerprint = member.fingerprint
         Task {
             await model.kickGroupMember(groupId: groupId, fingerprint: member.fingerprint)
             await MainActor.run {
                 isSaving = false
+                actingMemberFingerprint = nil
+                memberToKick = nil
             }
         }
     }

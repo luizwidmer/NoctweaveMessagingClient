@@ -3032,9 +3032,14 @@ final class ClientViewModel: ObservableObject {
                 addMemberProfiles: [],
                 removeMemberFingerprints: [normalizedFingerprint]
             )
+            guard !descriptor.members.contains(where: { $0.fingerprint == normalizedFingerprint }) else {
+                lastError = "Relay did not remove the selected member. Refresh the group and try again."
+                return
+            }
             group = applyRelayGroupDescriptor(descriptor, to: group, profile: state)
             state.upsert(group: group)
             await save()
+            await syncRelayGroups(for: state.activeIdentityId)
             lastInfo = "Removed member from \(group.title)."
         } catch {
             lastError = "Failed to remove group member: \(error.localizedDescription)"
@@ -3130,6 +3135,55 @@ final class ClientViewModel: ObservableObject {
         )
         await save()
         lastInfo = "Added \(contact.displayName) to contacts."
+    }
+
+    func pairWithGroupMember(groupId: UUID, fingerprint: String) async {
+        guard let group = state.group(for: groupId) else {
+            lastError = "Group not found."
+            return
+        }
+        let normalizedFingerprint = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedFingerprint.isEmpty,
+              normalizedFingerprint != state.identity.fingerprint,
+              normalizedFingerprint != group.scopedIdentity?.fingerprint,
+              let member = group.memberProfiles.first(where: { $0.fingerprint == normalizedFingerprint }) else {
+            lastError = "Group member not found."
+            return
+        }
+        if canPromoteGroupMember(member) {
+            await promoteGroupMemberToContact(groupId: groupId, fingerprint: normalizedFingerprint)
+            return
+        }
+
+        let displayName = member.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = displayName?.isEmpty == false ? displayName! : "Group Member \(abbreviatedFingerprint(normalizedFingerprint))"
+        lastError = nil
+        await sendGroupMessage(
+            text: "Pairing request for \(name): please open Add Contact and use Pairing via Relay or Pair over Federation with me. This group identity is scoped, so Noctyra will not silently add it as a direct contact.",
+            to: groupId
+        )
+        if lastError == nil {
+            lastInfo = "Sent group pairing request to \(name)."
+        }
+    }
+
+    func groupMemberIsDirectContact(_ member: RelayGroupMemberProfile) -> Bool {
+        state.contacts.contains { $0.fingerprint == member.fingerprint }
+    }
+
+    func canPromoteGroupMember(_ member: RelayGroupMemberProfile) -> Bool {
+        guard member.fingerprint != state.identity.fingerprint,
+              !groupMemberIsDirectContact(member),
+              let inboxId = member.inboxId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !inboxId.isEmpty,
+              member.relay != nil,
+              let signingPublicKey = member.signingPublicKey,
+              !signingPublicKey.isEmpty,
+              let agreementPublicKey = member.agreementPublicKey,
+              !agreementPublicKey.isEmpty else {
+            return false
+        }
+        return true
     }
 
     func requestJoin(groupId: UUID) async {
