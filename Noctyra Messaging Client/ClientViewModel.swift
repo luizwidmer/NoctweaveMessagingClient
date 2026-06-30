@@ -944,7 +944,7 @@ final class ClientViewModel: ObservableObject {
             )
             conversation.markMessageProcessed()
             applyRootRatchetIfNeeded(rootRatchet, contact: contact, conversation: &conversation)
-            state.upsert(conversation: conversation)
+            state.mergeUpsert(conversation: conversation)
             try await persistState()
             try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
             lastInfo = "Sent message to \(contact.displayName)."
@@ -1052,7 +1052,7 @@ final class ClientViewModel: ObservableObject {
             conversation.messages.append(message)
             conversation.markMessageProcessed()
             applyRootRatchetIfNeeded(rootRatchet, contact: contact, conversation: &conversation)
-            state.upsert(conversation: conversation)
+            state.mergeUpsert(conversation: conversation)
             try await persistState()
             try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
             recordAttachmentQuotaUsage(
@@ -1176,7 +1176,7 @@ final class ClientViewModel: ObservableObject {
                     attachment: AttachmentInfo(descriptor: descriptor, localFileName: localFileName)
                 )
             )
-            state.upsert(group: group)
+            state.mergeUpsert(group: group)
             recordAttachmentQuotaUsage(
                 bytes: preparedPayload.data.count,
                 contactId: group.id,
@@ -3314,7 +3314,7 @@ final class ClientViewModel: ObservableObject {
                 counter: envelope.messageCounter
             )
         )
-        state.upsert(group: updatedGroup)
+        state.mergeUpsert(group: updatedGroup)
         await save()
         lastInfo = "Sent group message."
     }
