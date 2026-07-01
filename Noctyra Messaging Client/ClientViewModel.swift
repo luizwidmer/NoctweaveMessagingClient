@@ -160,6 +160,7 @@ final class ClientViewModel: ObservableObject {
     private var decryptedAttachmentScopes: [String: AttachmentCacheScope] = [:]
     private static let storageModeKey = "lattice.storageProtection.mode.v1"
     private static let keychainAuthPreflightKey = "noctyra.keychainAuthPreflight.v1"
+    private static let unconfiguredRelay = RelayEndpoint(host: "relay.not-configured.invalid", port: 0)
     private enum AttachmentCacheScope: Hashable {
         case contact(UUID)
         case group(UUID)
@@ -264,15 +265,13 @@ final class ClientViewModel: ObservableObject {
         } else {
             // Placeholder identity: first-run setup will replace this before any relay publish happens.
             let defaultIdentity = Identity(displayName: "Setup Required")
-            let defaultRelay = RelayEndpoint(host: "127.0.0.1", port: 9339)
-            let defaultServer = RelayServerRecord(name: "Local Relay", endpoint: defaultRelay)
             let defaultInbox = InboxAddress.generate()
             self.state = ClientState(
                 identity: defaultIdentity,
-                relay: defaultRelay,
+                relay: Self.unconfiguredRelay,
                 inboxId: defaultInbox,
-                relayServers: [defaultServer],
-                selectedRelayId: defaultServer.id,
+                relayServers: [],
+                selectedRelayId: nil,
                 hasCompletedOnboarding: false,
                 hasAcceptedPrivacyPolicy: false,
                 hasAcceptedTermsOfUse: false
@@ -4430,13 +4429,6 @@ final class ClientViewModel: ObservableObject {
 
     private func ensureRelaySelection() async {
         var didChange = false
-        if state.relayServers.isEmpty {
-            let defaultServer = RelayServerRecord(name: "Current Relay", endpoint: state.relay)
-            state.relayServers = [defaultServer]
-            state.selectedRelayId = defaultServer.id
-            didChange = true
-        }
-
         if let selectedId = state.selectedRelayId,
            let selected = state.relayServers.first(where: { $0.id == selectedId }) {
             if state.relay != selected.endpoint {
@@ -7447,14 +7439,12 @@ final class ClientViewModel: ObservableObject {
         pendingOutboundPairRequestFingerprints.removeAll()
 
         let identity = Identity(displayName: "Setup Required")
-        let relay = RelayEndpoint(host: "127.0.0.1", port: 9339)
-        let relayRecord = RelayServerRecord(name: "Local Relay", endpoint: relay)
-        let profile = makeIdentityProfile(displayName: identity.displayName, relay: relay, relayId: relayRecord.id)
+        let profile = makeIdentityProfile(displayName: identity.displayName, relay: Self.unconfiguredRelay, relayId: nil)
         state.identityProfiles = [profile]
         state.activeIdentityId = profile.id
-        state.relayServers = [relayRecord]
-        state.selectedRelayId = relayRecord.id
-        state.relay = relay
+        state.relayServers = []
+        state.selectedRelayId = nil
+        state.relay = Self.unconfiguredRelay
         state.contacts = []
         state.conversations = []
         state.groups = []
@@ -7559,7 +7549,7 @@ final class ClientViewModel: ObservableObject {
     private func performThrowAroundOperation() async {
         removeAllAttachmentsFromDisk()
         let relaySelection = state.relayServers.first
-        let relay = relaySelection?.endpoint ?? RelayEndpoint(host: "127.0.0.1", port: 9339)
+        let relay = relaySelection?.endpoint ?? Self.unconfiguredRelay
         let relayId = relaySelection?.id
         let profile = makeIdentityProfile(displayName: "Cover \(Int.random(in: 1000...9999))", relay: relay, relayId: relayId)
         var mutated = profile
@@ -7866,7 +7856,7 @@ final class ClientViewModel: ObservableObject {
     private func ensureValidActiveIdentityAfterDestructiveChanges() {
         if state.identityProfiles.isEmpty {
             let relaySelection = state.relayServers.first
-            let relay = relaySelection?.endpoint ?? RelayEndpoint(host: "127.0.0.1", port: 9339)
+            let relay = relaySelection?.endpoint ?? Self.unconfiguredRelay
             let replacement = makeIdentityProfile(
                 displayName: "Recovered Identity",
                 relay: relay,
