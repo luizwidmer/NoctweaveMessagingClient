@@ -447,13 +447,13 @@ struct FirstRunSetupView: View {
                 .pickerStyle(.segmented)
                 .disabled(!privacySettings.secureTypingEnabled)
                 Text(privacySettings.secureTypingKeyboard == .noctyra
-                     ? "Noctyra's keyboard avoids the iOS Passwords shortcut by not using Apple's secure text field."
+                     ? "Noctyra's keyboard is preferred because input stays inside the app instead of using the OS keyboard path."
                      : "Apple's secure keyboard uses native secure text entry. iOS may show the Passwords shortcut.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 #endif
                 Toggle("Use in-app camera capture", isOn: $privacySettings.useSecureCameraCapture)
-                Text("Captures inside Noctyra and avoids automatic Photos persistence.")
+                Text("On by default. Captures inside Noctyra and avoids automatic Photos persistence.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 #if os(macOS)

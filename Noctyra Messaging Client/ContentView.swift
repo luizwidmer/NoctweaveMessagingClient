@@ -7021,13 +7021,13 @@ private struct SettingsView: View {
             .pickerStyle(.segmented)
             .disabled(!privacySettings.secureTypingEnabled)
             Text(privacySettings.secureTypingKeyboard == .noctyra
-                 ? "Noctyra's keyboard avoids the iOS Passwords shortcut by staying outside Apple's password-field path."
+                 ? "Noctyra's keyboard is preferred because input stays inside the app instead of using the OS keyboard path."
                  : "Apple's keyboard keeps native secure text entry. iOS may still show the Passwords shortcut.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             #endif
             Toggle("Use in-app camera capture", isOn: $privacySettings.useSecureCameraCapture)
-            Text("Captures images inside Noctyra without saving to Photos. This adds a camera button in chats. The OS camera stack can still access raw frames.")
+            Text("On by default for new setups. Captures images inside Noctyra without saving to Photos. This adds a camera button in chats. The OS camera stack can still access raw frames.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("If disabled, the camera button will use the system camera which may store photos in your library.")
