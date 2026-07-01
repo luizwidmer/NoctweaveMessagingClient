@@ -1911,20 +1911,11 @@ final class ClientViewModel: ObservableObject {
             }
         }
         if !missingRelayGroupIds.isEmpty {
-            for group in profile.groups where missingRelayGroupIds.contains(group.id) {
-                let messages = group.messages.isEmpty
-                    ? storedGroupMessages(profileId: profile.id, groupId: group.id)
-                    : group.messages
-                removeAttachmentFiles(from: messages)
-                try? threadMessageStore.deleteGroupMessages(profileId: profile.id, groupId: group.id)
-            }
-            profile.groups.removeAll { missingRelayGroupIds.contains($0.id) }
-            if profile.id == state.activeIdentityId,
-               let activeGroupId,
-               missingRelayGroupIds.contains(activeGroupId) {
-                self.activeGroupId = nil
-            }
-            lastInfo = "Removed deleted relay group."
+            // Treat descriptor fetch failures as transient. Removing the local group
+            // here can erase the per-thread history on iPhone when the app is
+            // backgrounded, locked, or switching networks mid-sync. Explicit leave,
+            // clear, and extinguish paths still delete local history intentionally.
+            lastInfo = "Some groups could not be refreshed; local history was kept."
         }
     }
 
@@ -5598,15 +5589,10 @@ final class ClientViewModel: ObservableObject {
         }
         let visibleRelayGroupIds = Set(visibleDescriptors.map(\.id))
             .union(visibleInvitations.map(\.groupId))
-        let staleRelayGroups = profile.groups.filter { group in
-            group.relayInboxId != nil && !visibleRelayGroupIds.contains(group.id)
-        }
-        for group in staleRelayGroups {
-            let messages = group.messages.isEmpty
-                ? storedGroupMessages(profileId: profile.id, groupId: group.id)
-                : group.messages
-            removeAttachmentFiles(from: messages)
-            try? threadMessageStore.deleteGroupMessages(profileId: profile.id, groupId: group.id)
+        let retainedRelayGroups = profile.groups.filter { group in
+            group.relayInboxId != nil
+                && !visibleRelayGroupIds.contains(group.id)
+                && !locallyLeftGroupIds.contains(group.id)
         }
         let relayBackedGroups = visibleDescriptors.map { descriptor -> GroupConversation in
             let memberProfiles = groupMemberProfiles(
@@ -5673,6 +5659,12 @@ final class ClientViewModel: ObservableObject {
 
         var mergedById: [UUID: GroupConversation] = [:]
         for group in localOnlyGroups {
+            mergedById[group.id] = group
+        }
+        for group in retainedRelayGroups {
+            // A relay listing can be temporarily incomplete on mobile lifecycle/network
+            // transitions. Keep local metadata and thread files unless the user
+            // explicitly leaves, clears, or extinguishes the group.
             mergedById[group.id] = group
         }
         for group in relayBackedGroups {
@@ -8079,11 +8071,16 @@ final class ClientViewModel: ObservableObject {
         }
         // Avoid clobbering persisted history when RAM was already evicted by a transient scene change.
         if !conversation.messages.isEmpty {
-            try? threadMessageStore.saveDirectMessages(
-                conversation.messages,
-                profileId: state.activeIdentityId,
-                contactId: contactId
-            )
+            do {
+                try threadMessageStore.saveDirectMessages(
+                    conversation.messages,
+                    profileId: state.activeIdentityId,
+                    contactId: contactId
+                )
+            } catch {
+                lastError = "Failed to secure chat history before hiding it: \(error.localizedDescription)"
+                return
+            }
         }
         conversation.messages.removeAll()
         state.upsert(conversation: conversation)
@@ -8095,11 +8092,16 @@ final class ClientViewModel: ObservableObject {
         }
         // Same protection for group threads.
         if !group.messages.isEmpty {
-            try? threadMessageStore.saveGroupMessages(
-                group.messages,
-                profileId: state.activeIdentityId,
-                groupId: groupId
-            )
+            do {
+                try threadMessageStore.saveGroupMessages(
+                    group.messages,
+                    profileId: state.activeIdentityId,
+                    groupId: groupId
+                )
+            } catch {
+                lastError = "Failed to secure group history before hiding it: \(error.localizedDescription)"
+                return
+            }
         }
         group.messages.removeAll()
         state.upsert(group: group)
