@@ -642,7 +642,15 @@ struct FirstRunSetupView: View {
         let relayId = selectedRelayId ?? model.state.relayServers.first?.id
         let finalPrivacy = privacySettings
         let finalAppLock = appLockSettings
+        let finalStorageMode = storageMode
         Task {
+            let storageReady = await model.updateStorageProtectionMode(finalStorageMode)
+            guard storageReady else {
+                await MainActor.run {
+                    isFinishing = false
+                }
+                return
+            }
             await model.completeOnboarding(
                 displayName: displayName,
                 relayId: relayId,

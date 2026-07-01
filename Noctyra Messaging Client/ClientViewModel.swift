@@ -255,7 +255,7 @@ final class ClientViewModel: ObservableObject {
         self.threadMessageStore = ThreadMessageStore(directory: threadMessageDirectory, useEncryption: useEncryption)
         self.ciphertextPrefetchStore = CiphertextPrefetchStore()
         self.storageProtectionMode = resolvedMode ?? .keychain
-        self.requiresStorageChoice = !isUITest && resolvedMode == nil
+        self.requiresStorageChoice = false
         self.biometricsAvailable = ClientViewModel.detectBiometricAvailability()
         if isUITest {
             self.state = ClientViewModel.makeUITestState()
@@ -278,12 +278,8 @@ final class ClientViewModel: ObservableObject {
             )
             self.requiresOnboarding = false
 
-            if requiresStorageChoice {
-                isReady = false
-            } else {
-                Task {
-                    await load()
-                }
+            Task {
+                await load()
             }
         }
     }
@@ -533,8 +529,12 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
-    func updateStorageProtectionMode(_ mode: StorageProtectionMode) async {
-        guard storageProtectionMode != mode else { return }
+    @discardableResult
+    func updateStorageProtectionMode(_ mode: StorageProtectionMode) async -> Bool {
+        let persistedMode = ClientViewModel.loadStorageProtectionMode()
+        guard storageProtectionMode != mode || persistedMode != mode else {
+            return true
+        }
         let previousStore = store
         let previousAttachmentStore = attachmentStore
         let previousThreadMessageStore = threadMessageStore
@@ -560,6 +560,7 @@ final class ClientViewModel: ObservableObject {
                     storageProtectionStatus = nil
                 }
             }
+            return true
         } catch {
             store = previousStore
             attachmentStore = previousAttachmentStore
@@ -568,6 +569,7 @@ final class ClientViewModel: ObservableObject {
             persistStorageProtectionMode(previousMode)
             lastError = "Failed to update storage protection: \(error.localizedDescription)"
             storageProtectionStatus = "Storage protection update failed."
+            return false
         }
     }
 
@@ -7419,7 +7421,7 @@ final class ClientViewModel: ObservableObject {
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: ClientViewModel.storageModeKey)
         storageProtectionMode = .keychain
-        requiresStorageChoice = true
+        requiresStorageChoice = false
         isLocked = false
         lastInactiveAt = nil
         activeContactId = nil
