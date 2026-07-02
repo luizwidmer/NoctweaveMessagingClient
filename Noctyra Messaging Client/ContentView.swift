@@ -4297,23 +4297,24 @@ private struct AttachmentImagePreviewViewer: View {
                             .overlay(theme.accent.opacity(0.08))
                     )
 
+                    let mediaWidth = max(1, geometry.size.width - 24)
+                    let mediaHeight = max(1, geometry.size.height - 86)
                     ZStack {
                         if let preview {
                             preview.image
                                 .resizable()
                                 .scaledToFit()
-                                .frame(
-                                    maxWidth: max(1, geometry.size.width - 24),
-                                    maxHeight: max(1, geometry.size.height - 86)
-                                )
+                                .frame(width: mediaWidth, height: mediaHeight)
                                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .padding(12)
+                                .clipped()
                         } else {
                             Text("Preview unavailable")
                                 .foregroundStyle(.white.opacity(0.64))
                         }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(width: mediaWidth, height: mediaHeight)
+                    .padding(12)
+                    .clipped()
                 }
             }
         }
@@ -4478,7 +4479,8 @@ private struct AttachmentLibraryView: View {
             messages: [],
             isRevealed: !screenProtection.isSensitiveHidden,
             itemsOverride: items,
-            showsTypeSections: true
+            showsTypeSections: true,
+            showsRevealButton: true
         )
     }
 }
@@ -4490,10 +4492,16 @@ private struct AttachmentGalleryView: View {
     let isRevealed: Bool
     var itemsOverride: [AttachmentGalleryItem]? = nil
     var showsTypeSections = false
+    var showsRevealButton = false
     @State private var selectedItem: AttachmentGalleryItem?
+    @State private var manuallyRevealed = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
+
+    private var effectiveIsRevealed: Bool {
+        showsRevealButton ? (manuallyRevealed && isRevealed) : isRevealed
+    }
 
     private var items: [AttachmentGalleryItem] {
         if let itemsOverride {
@@ -4528,13 +4536,26 @@ private struct AttachmentGalleryView: View {
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Attachments")
+                        Text("Files")
                             .font(.title3.weight(.semibold))
                         Text("\(items.count) in \(title)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
+                    if showsRevealButton {
+                        Button {
+                            manuallyRevealed.toggle()
+                            FeedbackGenerator.light()
+                        } label: {
+                            Image(systemName: effectiveIsRevealed ? "eye.slash" : "eye")
+                                .font(.system(size: 13, weight: .bold))
+                        }
+                        .accessibilityLabel(effectiveIsRevealed ? "Hide Files" : "Reveal Files")
+                        .disabled(!isRevealed)
+                        .glassCircleButton(diameter: 34)
+                        .hoverLift()
+                    }
                     Button {
                         dismiss()
                     } label: {
@@ -4592,9 +4613,14 @@ private struct AttachmentGalleryView: View {
             AttachmentDetailViewer(
                 model: model,
                 item: item,
-                isRevealed: isRevealed
+                isRevealed: effectiveIsRevealed
             )
             .noctyraSheetPresentation()
+        }
+        .onChange(of: isRevealed) { _, newValue in
+            if !newValue {
+                manuallyRevealed = false
+            }
         }
     }
 
@@ -4607,7 +4633,7 @@ private struct AttachmentGalleryView: View {
                     AttachmentGalleryTile(
                         model: model,
                         item: item,
-                        isRevealed: isRevealed,
+                        isRevealed: effectiveIsRevealed,
                         showsSource: showsTypeSections
                     )
                 }
@@ -4629,26 +4655,32 @@ private struct AttachmentGalleryTile: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(item.kind.accent.opacity(colorScheme == .dark ? 0.16 : 0.10))
-                if isRevealed, let preview, item.kind == .image {
-                    preview.image
-                        .resizable()
-                        .scaledToFill()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .clipped()
-                } else {
-                    Image(systemName: item.kind.iconName)
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(item.kind.accent)
-                        .opacity(didFail ? 0.55 : 1)
+            GeometryReader { geometry in
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(item.kind.accent.opacity(colorScheme == .dark ? 0.16 : 0.10))
+                    if isRevealed, let preview, item.kind == .image {
+                        preview.image
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .clipped()
+                    } else {
+                        Image(systemName: item.kind.iconName)
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(item.kind.accent)
+                            .opacity(didFail ? 0.55 : 1)
+                    }
                 }
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipped()
             }
             .aspectRatio(1.18, contentMode: .fit)
             .frame(maxWidth: .infinity)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipped()
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(isRevealed ? item.title : "Hidden attachment")
