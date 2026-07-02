@@ -3946,14 +3946,12 @@ private struct AttachmentBubble: View {
                 loadImageIfNeeded()
             }
         }
-        .sheet(isPresented: $showingImagePreview) {
-            AttachmentImagePreviewSheet(
-                preview: preview,
-                title: title,
-                sizeLabel: sizeLabel
-            )
-            .noctyraSheetPresentation()
-        }
+        .attachmentImagePreviewPresentation(
+            isPresented: $showingImagePreview,
+            preview: preview,
+            title: title,
+            sizeLabel: sizeLabel
+        )
     }
 
     private var normalizedMimeType: String {
@@ -4111,7 +4109,29 @@ private struct AttachmentImagePreview {
     let aspectRatio: CGFloat
 }
 
-private struct AttachmentImagePreviewSheet: View {
+private extension View {
+    @ViewBuilder
+    func attachmentImagePreviewPresentation(
+        isPresented: Binding<Bool>,
+        preview: AttachmentImagePreview?,
+        title: String,
+        sizeLabel: String
+    ) -> some View {
+        #if os(iOS)
+        fullScreenCover(isPresented: isPresented) {
+            AttachmentImagePreviewViewer(preview: preview, title: title, sizeLabel: sizeLabel)
+        }
+        #else
+        sheet(isPresented: isPresented) {
+            AttachmentImagePreviewViewer(preview: preview, title: title, sizeLabel: sizeLabel)
+                .frame(minWidth: 900, minHeight: 680)
+                .noctyraSheetPresentation()
+        }
+        #endif
+    }
+}
+
+private struct AttachmentImagePreviewViewer: View {
     let preview: AttachmentImagePreview?
     let title: String
     let sizeLabel: String
@@ -4119,56 +4139,60 @@ private struct AttachmentImagePreviewSheet: View {
     @Environment(\.appTheme) private var theme
 
     var body: some View {
-        VStack(spacing: 14) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.headline)
-                    Text(sizeLabel)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 13, weight: .bold))
-                }
-                .glassCircleButton(diameter: 30)
-                .hoverLift()
-            }
-
+        GeometryReader { geometry in
             ZStack {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.black.opacity(0.26))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+                Color.black
+                    .opacity(0.94)
+                    .ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(title)
+                                .font(.headline)
+                                .foregroundStyle(.white)
+                            Text(sizeLabel)
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.64))
+                        }
+                        Spacer()
+                        Button {
+                            dismiss()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 13, weight: .bold))
+                        }
+                        .glassCircleButton(diameter: 34)
+                        .hoverLift()
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
+                    .background(
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                            .overlay(theme.accent.opacity(0.08))
                     )
-                if let preview {
-                    preview.image
-                        .resizable()
-                        .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .padding(8)
-                } else {
-                    Text("Preview unavailable")
-                        .foregroundStyle(.secondary)
+
+                    ZStack {
+                        if let preview {
+                            preview.image
+                                .resizable()
+                                .scaledToFit()
+                                .frame(
+                                    maxWidth: max(1, geometry.size.width - 24),
+                                    maxHeight: max(1, geometry.size.height - 86)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .padding(12)
+                        } else {
+                            Text("Preview unavailable")
+                                .foregroundStyle(.white.opacity(0.64))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .frame(maxWidth: 760, maxHeight: 620)
         }
-        .padding(18)
-        .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .fill(theme.accent.opacity(0.08))
-                )
-        )
-        .padding()
     }
 }
 
