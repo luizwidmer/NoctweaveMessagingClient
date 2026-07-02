@@ -3796,7 +3796,7 @@ private struct MessageRow: View {
             bubbleChrome {
                 bubbleContent
             }
-            .frame(maxWidth: bubbleMaxWidth, alignment: .leading)
+            .frame(maxWidth: bubbleMaxWidth, alignment: message.direction == .sent ? .trailing : .leading)
         }
     }
 
@@ -3900,14 +3900,23 @@ private struct AttachmentBubble: View {
     let attachment: AttachmentInfo
     let title: String
     let isRevealed: Bool
-    @State private var image: Image?
+    @State private var preview: AttachmentImagePreview?
     @State private var isLoading = false
     @State private var didFail = false
+    @State private var showingImagePreview = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if isImageAttachment {
-                attachmentPreview
+                Button {
+                    if preview != nil {
+                        showingImagePreview = true
+                    }
+                } label: {
+                    attachmentPreview
+                }
+                .buttonStyle(.plain)
+                .disabled(!isRevealed || preview == nil)
             } else if isAudioAttachment {
                 AudioAttachmentPlayer(
                     model: model,
@@ -3928,7 +3937,7 @@ private struct AttachmentBubble: View {
             loadImageIfNeeded()
         }
         .onChange(of: attachment.localFileName) { _, _ in
-            image = nil
+            preview = nil
             didFail = false
             loadImageIfNeeded()
         }
@@ -3936,6 +3945,14 @@ private struct AttachmentBubble: View {
             if newValue {
                 loadImageIfNeeded()
             }
+        }
+        .sheet(isPresented: $showingImagePreview) {
+            AttachmentImagePreviewSheet(
+                preview: preview,
+                title: title,
+                sizeLabel: sizeLabel
+            )
+            .noctyraSheetPresentation()
         }
     }
 
@@ -3952,7 +3969,7 @@ private struct AttachmentBubble: View {
     }
 
     private var attachmentPreview: some View {
-        let size = previewSize
+        let size = thumbnailSize
         return ZStack {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color.white.opacity(0.08))
@@ -3960,11 +3977,11 @@ private struct AttachmentBubble: View {
                 Text("Hidden attachment")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            } else if let image {
-                image
+            } else if let preview {
+                preview.image
                     .resizable()
                     .scaledToFill()
-                    .frame(width: size, height: size)
+                    .frame(width: size.width, height: size.height)
                     .clipped()
             } else if isLoading {
                 ProgressView()
@@ -3972,10 +3989,21 @@ private struct AttachmentBubble: View {
                 Text(didFail ? "Attachment unavailable" : "Loading")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .frame(width: size.width, height: size.height)
             }
         }
-        .frame(width: size, height: size)
+        .frame(width: size.width, height: size.height)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(alignment: .bottomTrailing) {
+            if isRevealed, preview != nil {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(7)
+                    .background(Circle().fill(Color.black.opacity(0.42)))
+                    .padding(7)
+            }
+        }
     }
 
     private var unsupportedPreview: some View {
@@ -3995,12 +4023,22 @@ private struct AttachmentBubble: View {
         )
     }
 
-    private var previewSize: CGFloat {
+    private var thumbnailSize: CGSize {
+        let ratio = min(max(preview?.aspectRatio ?? 1, 0.35), 2.6)
         #if os(macOS)
-        return 220
+        let maxWidth: CGFloat = 320
+        let maxHeight: CGFloat = 360
         #else
-        return 180
+        let maxWidth: CGFloat = 238
+        let maxHeight: CGFloat = 310
         #endif
+        var width = maxWidth
+        var height = width / ratio
+        if height > maxHeight {
+            height = maxHeight
+            width = height * ratio
+        }
+        return CGSize(width: max(110, width), height: max(94, height))
     }
 
     private var maxPreviewDimension: CGFloat { 4096 }
@@ -4012,7 +4050,7 @@ private struct AttachmentBubble: View {
 
     private func loadImageIfNeeded() {
         guard isRevealed else { return }
-        guard image == nil, !isLoading, !didFail else { return }
+        guard preview == nil, !isLoading, !didFail else { return }
         guard let fileName = attachment.localFileName else {
             didFail = true
             return
@@ -4026,44 +4064,111 @@ private struct AttachmentBubble: View {
                     didFail = true
                     return
                 }
-                let rendered = makeImage(from: decrypted)
+                let rendered = makeImagePreview(from: decrypted)
                 decrypted.secureWipe()
                 data = nil
-                guard let image = rendered else {
+                guard let rendered else {
                     didFail = true
                     return
                 }
-                self.image = image
+                self.preview = rendered
             }
         }
     }
 
-    private func makeImage(from data: Data) -> Image? {
-        guard isPreviewImageWithinLimits(data) else { return nil }
+    private func makeImagePreview(from data: Data) -> AttachmentImagePreview? {
+        guard let aspectRatio = imageAspectRatioIfWithinLimits(data) else { return nil }
         #if os(iOS)
         guard let uiImage = UIImage(data: data) else { return nil }
-        return Image(uiImage: uiImage)
+        return AttachmentImagePreview(image: Image(uiImage: uiImage), aspectRatio: aspectRatio)
         #else
         guard let nsImage = NSImage(data: data) else { return nil }
-        return Image(nsImage: nsImage)
+        return AttachmentImagePreview(image: Image(nsImage: nsImage), aspectRatio: aspectRatio)
         #endif
     }
 
-    private func isPreviewImageWithinLimits(_ data: Data) -> Bool {
+    private func imageAspectRatioIfWithinLimits(_ data: Data) -> CGFloat? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let widthValue = properties[kCGImagePropertyPixelWidth] as? NSNumber,
               let heightValue = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
-            return false
+            return nil
         }
         let width = widthValue.intValue
         let height = heightValue.intValue
-        guard width > 0, height > 0 else { return false }
+        guard width > 0, height > 0 else { return nil }
         guard CGFloat(width) <= maxPreviewDimension, CGFloat(height) <= maxPreviewDimension else {
-            return false
+            return nil
         }
         let pixels = width * height
-        return pixels > 0 && pixels <= maxPreviewPixels
+        guard pixels > 0 && pixels <= maxPreviewPixels else { return nil }
+        return CGFloat(width) / CGFloat(height)
+    }
+}
+
+private struct AttachmentImagePreview {
+    let image: Image
+    let aspectRatio: CGFloat
+}
+
+private struct AttachmentImagePreviewSheet: View {
+    let preview: AttachmentImagePreview?
+    let title: String
+    let sizeLabel: String
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                    Text(sizeLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .glassCircleButton(diameter: 30)
+                .hoverLift()
+            }
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.black.opacity(0.26))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+                    )
+                if let preview {
+                    preview.image
+                        .resizable()
+                        .scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .padding(8)
+                } else {
+                    Text("Preview unavailable")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: 760, maxHeight: 620)
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .fill(theme.accent.opacity(0.08))
+                )
+        )
+        .padding()
     }
 }
 

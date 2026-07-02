@@ -6,6 +6,7 @@ import NoctweaveCore
 import SwiftUI
 import UniformTypeIdentifiers
 import ImageIO
+import AVFoundation
 #if canImport(LocalAuthentication)
 import LocalAuthentication
 #endif
@@ -989,7 +990,7 @@ final class ClientViewModel: ObservableObject {
             }
             let descriptor = AttachmentDescriptor(
                 id: attachmentId,
-                fileName: preparedPayload.fileName,
+                fileName: nil,
                 mimeType: preparedPayload.mimeType,
                 byteCount: preparedPayload.data.count,
                 sha256: AttachmentCrypto.sha256(preparedPayload.data),
@@ -1108,7 +1109,7 @@ final class ClientViewModel: ObservableObject {
             }
             let descriptor = AttachmentDescriptor(
                 id: attachmentId,
-                fileName: preparedPayload.fileName,
+                fileName: nil,
                 mimeType: preparedPayload.mimeType,
                 byteCount: preparedPayload.data.count,
                 sha256: AttachmentCrypto.sha256(preparedPayload.data),
@@ -4103,13 +4104,11 @@ final class ClientViewModel: ObservableObject {
         guard data.count == descriptor.byteCount else {
             throw AttachmentTransferError.invalidSize
         }
-        guard detectSupportedImageFormat(data) != nil else {
-            throw AttachmentTransferError.unsupportedType
-        }
         guard AttachmentCrypto.sha256(data) == descriptor.sha256 else {
             throw AttachmentTransferError.invalidChecksum
         }
-        return try attachmentStore.saveAttachment(data, descriptor: descriptor)
+        let sanitized = try sanitizeDownloadedAttachmentPayload(data, descriptor: descriptor)
+        return try attachmentStore.saveAttachment(sanitized, descriptor: descriptor)
     }
 
     private func downloadGroupAttachment(
@@ -4164,7 +4163,8 @@ final class ClientViewModel: ObservableObject {
         guard AttachmentCrypto.sha256(data) == descriptor.sha256 else {
             throw AttachmentTransferError.invalidChecksum
         }
-        return try attachmentStore.saveAttachment(data, descriptor: descriptor)
+        let sanitized = try sanitizeDownloadedAttachmentPayload(data, descriptor: descriptor)
+        return try attachmentStore.saveAttachment(sanitized, descriptor: descriptor)
     }
 
     private func groupAttachmentAuthenticatedData(
@@ -6869,30 +6869,21 @@ final class ClientViewModel: ObservableObject {
             guard let canonicalJPEG = transcodeImageToCanonicalJPEG(data) else {
                 throw AttachmentTransferError.imageProcessingFailed
             }
-            var updatedName = fileName
-            if let fileName, !fileName.isEmpty {
-                let base = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
-                updatedName = "\(base).jpg"
-            }
-            return (canonicalJPEG, updatedName, "image/jpeg")
+            return (canonicalJPEG, nil, "image/jpeg")
         }
 
         guard normalizedMime.hasPrefix("audio/"),
               let audioFormat = detectSupportedAudioFormat(data, normalizedMimeType: normalizedMime) else {
             throw AttachmentTransferError.unsupportedType
         }
-        var updatedName = fileName
-        if let fileName, !fileName.isEmpty {
-            let base = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
-            updatedName = "\(base).\(audioFormat.fileExtension)"
-        }
-        if updatedName == nil || updatedName?.isEmpty == true {
-            updatedName = "voice.\(audioFormat.fileExtension)"
-        }
-        return (data, updatedName, audioFormat.mimeType)
+        try validateAudioPayload(data)
+        return (data, nil, audioFormat.mimeType)
     }
 
     private func validateInboundAttachmentDescriptor(_ descriptor: AttachmentDescriptor) throws {
+        guard descriptor.fileName?.isEmpty != false else {
+            throw AttachmentTransferError.invalidDescriptor
+        }
         guard descriptor.byteCount > 0 else {
             throw AttachmentTransferError.invalidDescriptor
         }
@@ -6921,9 +6912,6 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func attachmentDisplayTitle(_ descriptor: AttachmentDescriptor, fallback: String) -> String {
-        if let fileName = descriptor.fileName, !fileName.isEmpty {
-            return fileName
-        }
         let normalizedMime = normalizeMimeType(descriptor.mimeType)
         if normalizedMime.hasPrefix("audio/") {
             return "Voice message"
@@ -6932,6 +6920,37 @@ final class ClientViewModel: ObservableObject {
             return "Image"
         }
         return fallback
+    }
+
+    private func sanitizeDownloadedAttachmentPayload(_ data: Data, descriptor: AttachmentDescriptor) throws -> Data {
+        let normalizedMime = normalizeMimeType(descriptor.mimeType)
+        if normalizedMime.hasPrefix("image/") {
+            guard detectSupportedImageFormat(data) != nil else {
+                throw AttachmentTransferError.unsupportedType
+            }
+            try validateImageInputDimensions(data)
+            guard let canonicalJPEG = transcodeImageToCanonicalJPEG(data) else {
+                throw AttachmentTransferError.imageProcessingFailed
+            }
+            return canonicalJPEG
+        }
+        if normalizedMime.hasPrefix("audio/"),
+           detectSupportedAudioFormat(data, normalizedMimeType: normalizedMime) != nil {
+            try validateAudioPayload(data)
+            return data
+        }
+        throw AttachmentTransferError.unsupportedType
+    }
+
+    private func validateAudioPayload(_ data: Data) throws {
+        do {
+            let player = try AVAudioPlayer(data: data)
+            guard player.prepareToPlay() else {
+                throw AttachmentTransferError.imageProcessingFailed
+            }
+        } catch {
+            throw AttachmentTransferError.unsupportedType
+        }
     }
 
     private func isSupportedAudioMimeType(_ normalizedMime: String) -> Bool {
@@ -6943,7 +6962,7 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
-    private func detectSupportedAudioFormat(_ data: Data, normalizedMimeType: String) -> SupportedAudioFormat? {
+    private func detectSupportedAudioFormat(_ data: Data, normalizedMimeType _: String) -> SupportedAudioFormat? {
         let bytes = [UInt8](data.prefix(16))
         if bytes.count >= 12,
            bytes[4] == 0x66, bytes[5] == 0x74, bytes[6] == 0x79, bytes[7] == 0x70 {
@@ -6971,22 +6990,7 @@ final class ClientViewModel: ObservableObject {
            bytes[0] == 0x4F, bytes[1] == 0x67, bytes[2] == 0x67, bytes[3] == 0x53 {
             return .ogg
         }
-        switch normalizedMimeType {
-        case "audio/m4a", "audio/mp4":
-            return .m4a
-        case "audio/wav", "audio/x-wav":
-            return .wav
-        case "audio/x-caf":
-            return .caf
-        case "audio/mpeg", "audio/mp3":
-            return .mp3
-        case "audio/aac":
-            return .aac
-        case "audio/ogg":
-            return .ogg
-        default:
-            return nil
-        }
+        return nil
     }
 
     private func validateAttachmentQuota(
