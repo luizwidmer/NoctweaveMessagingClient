@@ -995,7 +995,8 @@ final class ClientViewModel: ObservableObject {
                 byteCount: preparedPayload.data.count,
                 sha256: AttachmentCrypto.sha256(preparedPayload.data),
                 chunkCount: chunkCount,
-                chunkSize: chunkSize
+                chunkSize: chunkSize,
+                relayTTLSeconds: attachmentUploadTTLSeconds
             )
             let sessionId = conversation.sessionId
             let relayClient = relayClient(for: reachableRelayEndpoint(contact.relay, preferredRelay: state.relay))
@@ -1114,7 +1115,8 @@ final class ClientViewModel: ObservableObject {
                 byteCount: preparedPayload.data.count,
                 sha256: AttachmentCrypto.sha256(preparedPayload.data),
                 chunkCount: chunkCount,
-                chunkSize: chunkSize
+                chunkSize: chunkSize,
+                relayTTLSeconds: attachmentUploadTTLSeconds
             )
             let client = relayClient(for: state.relay)
             for chunkIndex in 0..<chunkCount {
@@ -1418,29 +1420,37 @@ final class ClientViewModel: ObservableObject {
                     if case .attachment(let descriptor) = body {
                         let sessionId = envelope.sessionId ?? conversation.sessionId
                         let localFileName: String?
+                        let attachmentRelay = reachableRelayEndpoint(contact.relay, preferredRelay: profile.relay)
+                        let cryptoContext = AttachmentCryptoContext(
+                            conversationId: conversation.id,
+                            sessionId: sessionId,
+                            messageCounter: envelope.messageCounter
+                        )
                         do {
                             try validateInboundAttachmentDescriptor(descriptor)
-                            try validateAttachmentQuota(
-                                bytes: descriptor.byteCount,
-                                contactId: contact.id,
-                                relay: contact.relay,
-                                direction: .inbound
-                            )
-                            localFileName = try await downloadAttachment(
-                                descriptor: descriptor,
-                                contact: contact,
-                                conversationId: conversation.id,
-                                sessionId: sessionId,
-                                messageCounter: envelope.messageCounter,
-                                messageKey: messageKey
-                            )
-                            if localFileName != nil {
-                                recordAttachmentQuotaUsage(
+                            if state.privacy.autoDownloadAttachments {
+                                try validateAttachmentQuota(
                                     bytes: descriptor.byteCount,
                                     contactId: contact.id,
                                     relay: contact.relay,
                                     direction: .inbound
                                 )
+                                localFileName = try await downloadAttachment(
+                                    descriptor: descriptor,
+                                    relay: attachmentRelay,
+                                    context: cryptoContext,
+                                    messageKey: messageKey
+                                )
+                                if localFileName != nil {
+                                    recordAttachmentQuotaUsage(
+                                        bytes: descriptor.byteCount,
+                                        contactId: contact.id,
+                                        relay: contact.relay,
+                                        direction: .inbound
+                                    )
+                                }
+                            } else {
+                                localFileName = nil
                             }
                         } catch {
                             localFileName = nil
@@ -1452,7 +1462,13 @@ final class ClientViewModel: ObservableObject {
                             body: title,
                             timestamp: envelope.sentAt,
                             counter: envelope.messageCounter,
-                            attachment: AttachmentInfo(descriptor: descriptor, localFileName: localFileName)
+                            attachment: AttachmentInfo(
+                                descriptor: descriptor,
+                                localFileName: localFileName,
+                                relay: attachmentRelay,
+                                cryptoContext: cryptoContext,
+                                messageKeyData: AttachmentCrypto.keyData(messageKey)
+                            )
                         )
                         conversation.messages.append(message)
                         appendedMessage = message
@@ -1780,30 +1796,36 @@ final class ClientViewModel: ObservableObject {
                         acknowledgedIds.insert(envelope.id)
                     case .attachment(let descriptor):
                         let localFileName: String?
+                        let cryptoContext = AttachmentCryptoContext(
+                            conversationId: "group:\(group.id.uuidString)",
+                            sessionId: groupAttachmentSessionId(epoch: envelope.epoch, transcriptHash: envelope.transcriptHash),
+                            messageCounter: envelope.messageCounter
+                        )
                         do {
                             try validateInboundAttachmentDescriptor(descriptor)
-                            try validateAttachmentQuota(
-                                bytes: descriptor.byteCount,
-                                contactId: group.id,
-                                relay: profile.relay,
-                                direction: .inbound
-                            )
-                            localFileName = try await downloadGroupAttachment(
-                                descriptor: descriptor,
-                                groupId: group.id,
-                                epoch: envelope.epoch,
-                                transcriptHash: envelope.transcriptHash,
-                                messageCounter: envelope.messageCounter,
-                                messageKey: decrypted.messageKey,
-                                relay: profile.relay
-                            )
-                            if localFileName != nil {
-                                recordAttachmentQuotaUsage(
+                            if state.privacy.autoDownloadAttachments {
+                                try validateAttachmentQuota(
                                     bytes: descriptor.byteCount,
                                     contactId: group.id,
                                     relay: profile.relay,
                                     direction: .inbound
                                 )
+                                localFileName = try await downloadAttachment(
+                                    descriptor: descriptor,
+                                    relay: profile.relay,
+                                    context: cryptoContext,
+                                    messageKey: decrypted.messageKey
+                                )
+                                if localFileName != nil {
+                                    recordAttachmentQuotaUsage(
+                                        bytes: descriptor.byteCount,
+                                        contactId: group.id,
+                                        relay: profile.relay,
+                                        direction: .inbound
+                                    )
+                                }
+                            } else {
+                                localFileName = nil
                             }
                         } catch {
                             localFileName = nil
@@ -1818,7 +1840,13 @@ final class ClientViewModel: ObservableObject {
                                 body: title,
                                 timestamp: envelope.sentAt,
                                 counter: envelope.messageCounter,
-                                attachment: AttachmentInfo(descriptor: descriptor, localFileName: localFileName)
+                                attachment: AttachmentInfo(
+                                    descriptor: descriptor,
+                                    localFileName: localFileName,
+                                    relay: profile.relay,
+                                    cryptoContext: cryptoContext,
+                                    messageKeyData: AttachmentCrypto.keyData(decrypted.messageKey)
+                                )
                             )
                         )
                         if activeGroupId != group.id {
@@ -4011,6 +4039,37 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
+    func downloadRemoteAttachment(_ attachment: AttachmentInfo) async -> String? {
+        guard attachment.localFileName == nil else {
+            return attachment.localFileName
+        }
+        guard let relay = attachment.relay,
+              let context = attachment.cryptoContext,
+              let messageKeyData = attachment.messageKeyData else {
+            lastError = "Attachment cannot be downloaded on this device. Missing relay or key metadata."
+            return nil
+        }
+        do {
+            let fileName = try await downloadAttachment(
+                descriptor: attachment.descriptor,
+                relay: relay,
+                context: context,
+                messageKey: AttachmentCrypto.key(from: messageKeyData)
+            )
+            guard let fileName else {
+                lastError = "Attachment download failed."
+                return nil
+            }
+            updateLocalAttachmentFileName(attachmentId: attachment.descriptor.id, localFileName: fileName)
+            lastInfo = "Attachment downloaded."
+            await save()
+            return fileName
+        } catch {
+            lastError = "Attachment download failed: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
     func purgeAttachmentDecryptionMemory(contactId: UUID) {
         purgeAttachmentDecryptionMemory(scopes: [.contact(contactId)])
     }
@@ -4059,14 +4118,12 @@ final class ClientViewModel: ObservableObject {
 
     private func downloadAttachment(
         descriptor: AttachmentDescriptor,
-        contact: Contact,
-        conversationId: String,
-        sessionId: String,
-        messageCounter: UInt64,
+        relay: RelayEndpoint,
+        context: AttachmentCryptoContext,
         messageKey: SymmetricKey
     ) async throws -> String? {
         try validateInboundAttachmentDescriptor(descriptor)
-        let client = relayClient(for: contact.relay)
+        let client = relayClient(for: relay)
         var data = Data()
         data.reserveCapacity(descriptor.byteCount)
         for chunkIndex in 0..<descriptor.chunkCount {
@@ -4082,9 +4139,9 @@ final class ClientViewModel: ObservableObject {
                 max(0, descriptor.byteCount - (chunkIndex * descriptor.chunkSize))
             )
             let authenticatedData = AttachmentCrypto.authenticatedData(
-                conversationId: conversationId,
-                sessionId: sessionId,
-                messageCounter: messageCounter,
+                conversationId: context.conversationId,
+                sessionId: context.sessionId,
+                messageCounter: context.messageCounter,
                 attachmentId: descriptor.id,
                 chunkIndex: chunkIndex,
                 byteCount: expectedCount
@@ -8076,6 +8133,61 @@ final class ClientViewModel: ObservableObject {
             group.messages = messages
             state.upsert(group: group)
         }
+    }
+
+    private func updateLocalAttachmentFileName(attachmentId: UUID, localFileName: String) {
+        for profileIndex in state.identityProfiles.indices {
+            let profileId = state.identityProfiles[profileIndex].id
+            for conversationIndex in state.identityProfiles[profileIndex].conversations.indices {
+                let contactId = state.identityProfiles[profileIndex].conversations[conversationIndex].contactId
+                let inMemoryMessages = state.identityProfiles[profileIndex].conversations[conversationIndex].messages
+                let originalMessages = inMemoryMessages.isEmpty
+                    ? storedDirectMessages(profileId: profileId, contactId: contactId)
+                    : inMemoryMessages
+                let updatedMessages = originalMessages.map {
+                    messageWithUpdatedAttachment($0, attachmentId: attachmentId, localFileName: localFileName)
+                }
+                guard updatedMessages != originalMessages else { continue }
+                if inMemoryMessages.isEmpty {
+                    try? threadMessageStore.saveDirectMessages(updatedMessages, profileId: profileId, contactId: contactId)
+                } else {
+                    state.identityProfiles[profileIndex].conversations[conversationIndex].messages = updatedMessages
+                }
+            }
+            for groupIndex in state.identityProfiles[profileIndex].groups.indices {
+                let groupId = state.identityProfiles[profileIndex].groups[groupIndex].id
+                let inMemoryMessages = state.identityProfiles[profileIndex].groups[groupIndex].messages
+                let originalMessages = inMemoryMessages.isEmpty
+                    ? storedGroupMessages(profileId: profileId, groupId: groupId)
+                    : inMemoryMessages
+                let updatedMessages = originalMessages.map {
+                    messageWithUpdatedAttachment($0, attachmentId: attachmentId, localFileName: localFileName)
+                }
+                guard updatedMessages != originalMessages else { continue }
+                if inMemoryMessages.isEmpty {
+                    try? threadMessageStore.saveGroupMessages(updatedMessages, profileId: profileId, groupId: groupId)
+                } else {
+                    state.identityProfiles[profileIndex].groups[groupIndex].messages = updatedMessages
+                }
+            }
+        }
+    }
+
+    private func messageWithUpdatedAttachment(_ message: Message, attachmentId: UUID, localFileName: String) -> Message {
+        guard var attachment = message.attachment, attachment.descriptor.id == attachmentId else {
+            return message
+        }
+        attachment.localFileName = localFileName
+        return Message(
+            id: message.id,
+            direction: message.direction,
+            senderDisplayName: message.senderDisplayName,
+            body: message.body,
+            timestamp: message.timestamp,
+            counter: message.counter,
+            isMismatch: message.isMismatch,
+            attachment: attachment
+        )
     }
 
     private func persistAndEvictConversationMessages(contactId: UUID) {

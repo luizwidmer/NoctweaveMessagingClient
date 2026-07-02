@@ -3930,13 +3930,18 @@ private struct AttachmentBubble: View {
     let isRevealed: Bool
     @State private var preview: AttachmentImagePreview?
     @State private var isLoading = false
+    @State private var isDownloading = false
     @State private var didFail = false
     @State private var showingImagePreview = false
     @State private var showingDocumentPreview = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if isImageAttachment {
+            if !isRevealed {
+                hiddenAttachmentPreview
+            } else if attachment.localFileName == nil {
+                remoteAttachmentPreview
+            } else if isImageAttachment {
                 Button {
                     if preview != nil {
                         showingImagePreview = true
@@ -3969,6 +3974,11 @@ private struct AttachmentBubble: View {
             Text(sizeLabel)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+            if let relayExpirationLabel {
+                Text(relayExpirationLabel)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .onAppear {
             loadImageIfNeeded()
@@ -4054,6 +4064,47 @@ private struct AttachmentBubble: View {
         }
     }
 
+    private var hiddenAttachmentPreview: some View {
+        Text("Hidden attachment")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(width: thumbnailSize.width, height: max(54, min(thumbnailSize.height, 90)))
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.white.opacity(0.08))
+            )
+    }
+
+    private var remoteAttachmentPreview: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "icloud.and.arrow.down")
+                    .font(.system(size: 15, weight: .semibold))
+                Text("Not downloaded")
+                    .font(.caption.weight(.semibold))
+            }
+            .foregroundStyle(.secondary)
+            Button {
+                Task { await downloadAttachment() }
+            } label: {
+                if isDownloading {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Label("Download", systemImage: "arrow.down.circle")
+                }
+            }
+            .glassButton(prominent: true)
+            .disabled(isDownloading || attachment.messageKeyData == nil || attachment.cryptoContext == nil || attachment.relay == nil)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.white.opacity(0.08))
+        )
+    }
+
     private var unsupportedPreview: some View {
         HStack(spacing: 8) {
             Image(systemName: "paperclip")
@@ -4135,6 +4186,40 @@ private struct AttachmentBubble: View {
 
     private var sizeLabel: String {
         ByteCountFormatter.string(fromByteCount: Int64(attachment.descriptor.byteCount), countStyle: .file)
+    }
+
+    private var relayExpirationLabel: String? {
+        guard let ttl = attachment.descriptor.relayTTLSeconds else {
+            return attachment.localFileName == nil ? "Relay copy is temporary." : nil
+        }
+        return "Relay copy expires after about \(formatDuration(ttl))."
+    }
+
+    private func formatDuration(_ seconds: Int) -> String {
+        let value = max(1, seconds)
+        if value < 120 {
+            return "\(value)s"
+        }
+        let minutes = value / 60
+        if minutes < 120 {
+            return "\(minutes)m"
+        }
+        let hours = minutes / 60
+        if hours < 48 {
+            return "\(hours)h"
+        }
+        return "\(hours / 24)d"
+    }
+
+    private func downloadAttachment() async {
+        guard !isDownloading else { return }
+        isDownloading = true
+        defer { isDownloading = false }
+        if await model.downloadRemoteAttachment(attachment) != nil {
+            preview = nil
+            didFail = false
+            loadImageIfNeeded()
+        }
     }
 
     private func loadImageIfNeeded() {
@@ -4773,17 +4858,30 @@ private struct AttachmentDetailViewer: View {
     @Environment(\.dismiss) private var dismiss
     @State private var imagePreview: AttachmentImagePreview?
     @State private var isLoadingImage = false
+    @State private var isDownloading = false
     @State private var didFailImage = false
     @State private var locallyRevealed = false
+    @State private var downloadedLocalFileName: String?
 
     private var effectiveIsRevealed: Bool {
         isRevealed || (canReveal && locallyRevealed)
+    }
+
+    private var currentAttachment: AttachmentInfo {
+        guard let downloadedLocalFileName else {
+            return item.attachment
+        }
+        var attachment = item.attachment
+        attachment.localFileName = downloadedLocalFileName
+        return attachment
     }
 
     var body: some View {
         Group {
             if !effectiveIsRevealed {
                 hiddenView
+            } else if currentAttachment.localFileName == nil {
+                remoteFileView
             } else {
                 switch item.kind {
                 case .image:
@@ -4810,7 +4908,7 @@ private struct AttachmentDetailViewer: View {
                 case .pdf, .text, .office:
                     DocumentAttachmentViewer(
                         model: model,
-                        attachment: item.attachment,
+                        attachment: currentAttachment,
                         title: item.title,
                         sizeLabel: item.sizeLabel
                     )
@@ -4827,6 +4925,46 @@ private struct AttachmentDetailViewer: View {
         #if os(macOS)
         .frame(minWidth: 760, minHeight: 560)
         #endif
+    }
+
+    private var remoteFileView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: item.kind.iconName)
+                .font(.system(size: 34, weight: .semibold))
+                .foregroundStyle(item.kind.accent)
+            Text(item.title)
+                .font(.title3.weight(.semibold))
+            Text(remoteFileSubtitle)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            HStack(spacing: 10) {
+                Button("Close") { dismiss() }
+                    .glassButton()
+                Button {
+                    Task { await downloadAttachment() }
+                } label: {
+                    if isDownloading {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Label("Download File", systemImage: "arrow.down.circle")
+                    }
+                }
+                .glassButton(prominent: true)
+                .disabled(isDownloading || currentAttachment.messageKeyData == nil || currentAttachment.cryptoContext == nil || currentAttachment.relay == nil)
+            }
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(ChatWallpaper().ignoresSafeArea())
+    }
+
+    private var remoteFileSubtitle: String {
+        if let ttl = item.attachment.descriptor.relayTTLSeconds {
+            return "This file has not been downloaded. The relay copy expires after about \(formatDuration(ttl)) from upload."
+        }
+        return "This file has not been downloaded. Relay copies are temporary and may no longer be available."
     }
 
     private var hiddenView: some View {
@@ -4857,6 +4995,34 @@ private struct AttachmentDetailViewer: View {
         .background(ChatWallpaper().ignoresSafeArea())
     }
 
+    private func downloadAttachment() async {
+        guard !isDownloading else { return }
+        isDownloading = true
+        defer { isDownloading = false }
+        if let fileName = await model.downloadRemoteAttachment(currentAttachment) {
+            downloadedLocalFileName = fileName
+            didFailImage = false
+            imagePreview = nil
+            await loadImage()
+        }
+    }
+
+    private func formatDuration(_ seconds: Int) -> String {
+        let value = max(1, seconds)
+        if value < 120 {
+            return "\(value)s"
+        }
+        let minutes = value / 60
+        if minutes < 120 {
+            return "\(minutes)m"
+        }
+        let hours = minutes / 60
+        if hours < 48 {
+            return "\(hours)h"
+        }
+        return "\(hours / 24)d"
+    }
+
     private var audioDetail: some View {
         VStack(spacing: 18) {
             HStack {
@@ -4874,7 +5040,7 @@ private struct AttachmentDetailViewer: View {
                 }
                 .glassCircleButton(diameter: 34)
             }
-            AudioAttachmentPlayer(model: model, attachment: item.attachment, isRevealed: true)
+            AudioAttachmentPlayer(model: model, attachment: currentAttachment, isRevealed: true)
                 .frame(maxWidth: 460)
             Spacer()
         }
@@ -4901,7 +5067,7 @@ private struct AttachmentDetailViewer: View {
 
     private func loadImage() async {
         guard imagePreview == nil, !isLoadingImage else { return }
-        guard let fileName = item.attachment.localFileName else {
+        guard let fileName = currentAttachment.localFileName else {
             didFailImage = true
             return
         }
@@ -8168,6 +8334,11 @@ private struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("If disabled, the camera button will use the system camera which may store photos in your library.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Divider().opacity(0.35)
+            Toggle("Auto-download attachments", isOn: $privacySettings.autoDownloadAttachments)
+            Text("When disabled, Noctyra keeps only encrypted attachment metadata until you manually download a file. Relay copies are temporary and may expire before you fetch them.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             #if os(macOS)
