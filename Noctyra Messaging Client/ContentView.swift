@@ -4613,7 +4613,8 @@ private struct AttachmentGalleryView: View {
             AttachmentDetailViewer(
                 model: model,
                 item: item,
-                isRevealed: effectiveIsRevealed
+                isRevealed: effectiveIsRevealed,
+                canReveal: isRevealed
             )
             .noctyraSheetPresentation()
         }
@@ -4768,14 +4769,20 @@ private struct AttachmentDetailViewer: View {
     @ObservedObject var model: ClientViewModel
     let item: AttachmentGalleryItem
     let isRevealed: Bool
+    let canReveal: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var imagePreview: AttachmentImagePreview?
     @State private var isLoadingImage = false
     @State private var didFailImage = false
+    @State private var locallyRevealed = false
+
+    private var effectiveIsRevealed: Bool {
+        isRevealed || (canReveal && locallyRevealed)
+    }
 
     var body: some View {
         Group {
-            if !isRevealed {
+            if !effectiveIsRevealed {
                 hiddenView
             } else {
                 switch item.kind {
@@ -4812,6 +4819,11 @@ private struct AttachmentDetailViewer: View {
                 }
             }
         }
+        .onChange(of: canReveal) { _, newValue in
+            if !newValue {
+                locallyRevealed = false
+            }
+        }
         #if os(macOS)
         .frame(minWidth: 760, minHeight: 560)
         #endif
@@ -4823,11 +4835,22 @@ private struct AttachmentDetailViewer: View {
                 .font(.system(size: 32, weight: .semibold))
             Text("Attachment Hidden")
                 .font(.title3.weight(.semibold))
-            Text("Reveal messages in the chat before opening attachments.")
+            Text(canReveal ? "Reveal this file to inspect it without revealing the full gallery." : "Screen protection is active. Stop screen capture or mirroring before revealing files.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Button("Close") { dismiss() }
+                .multilineTextAlignment(.center)
+            HStack(spacing: 10) {
+                Button("Close") { dismiss() }
+                    .glassButton()
+                Button {
+                    locallyRevealed = true
+                    FeedbackGenerator.light()
+                } label: {
+                    Label("Reveal File", systemImage: "eye")
+                }
                 .glassButton(prominent: true)
+                .disabled(!canReveal)
+            }
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
