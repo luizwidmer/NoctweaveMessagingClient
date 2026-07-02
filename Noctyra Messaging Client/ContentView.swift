@@ -26,6 +26,7 @@ private enum SidebarItem: Hashable {
     case group(UUID)
     case contactBook
     case myCode
+    case attachments
     case relays
     case identityManagement
     case settings
@@ -36,6 +37,7 @@ private enum IOSMainTab: String, Hashable {
     case chats
     case contacts
     case myCode
+    case attachments
     case relays
     case identity
     case settings
@@ -50,6 +52,8 @@ private enum IOSMainTab: String, Hashable {
                 return .contacts
             case "mycode", "my_code", "code":
                 return .myCode
+            case "attachments", "files", "media":
+                return .attachments
             case "relays":
                 return .relays
             case "identity":
@@ -292,6 +296,11 @@ struct ContentView: View {
                 MyCodeView(model: model)
             }
             .hideSheetNavigationBar()
+        case .attachments:
+            NavigationStack {
+                AttachmentLibraryView(model: model)
+            }
+            .hideSheetNavigationBar()
         case .relays:
             NavigationStack {
                 RelaysView(model: model)
@@ -433,6 +442,9 @@ struct ContentView: View {
                 NavigationLink(value: SidebarItem.myCode) {
                     Label("My Code", systemImage: "qrcode")
                 }
+                NavigationLink(value: SidebarItem.attachments) {
+                    Label("Files", systemImage: "rectangle.stack")
+                }
                 NavigationLink(value: SidebarItem.relays) {
                     Label("Relays", systemImage: "antenna.radiowaves.left.and.right")
                 }
@@ -537,6 +549,8 @@ struct ContentView: View {
                     .tag(SidebarItem.contactBook)
                 MacSidebarRow(title: "My Code", systemImage: "qrcode", isSelected: selection == .myCode)
                     .tag(SidebarItem.myCode)
+                MacSidebarRow(title: "Files", systemImage: "rectangle.stack", isSelected: selection == .attachments)
+                    .tag(SidebarItem.attachments)
                 MacSidebarRow(title: "Relays", systemImage: "antenna.radiowaves.left.and.right", isSelected: selection == .relays)
                     .tag(SidebarItem.relays)
                 MacSidebarRow(title: "Identity Management", systemImage: "person.badge.shield.checkmark", isSelected: selection == .identityManagement)
@@ -574,6 +588,8 @@ struct ContentView: View {
             }
         case .myCode:
             MyCodeView(model: model)
+        case .attachments:
+            AttachmentLibraryView(model: model)
         case .settings:
             SettingsView(model: model)
         case .relays:
@@ -776,6 +792,7 @@ private struct IOSBottomBar: View {
             (.chats, "Chats", "message"),
             (.contacts, "Contacts", "book.closed"),
             (.myCode, "Code", "qrcode"),
+            (.attachments, "Files", "rectangle.stack"),
             (.relays, "Relays", "antenna.radiowaves.left.and.right"),
             (.identity, "Identity", "person.badge.shield.checkmark"),
             (.settings, "Settings", "gearshape")
@@ -856,6 +873,7 @@ private struct IOSSideRail: View {
             (.chats, "Chats", "message"),
             (.contacts, "Contacts", "book.closed"),
             (.myCode, "Code", "qrcode"),
+            (.attachments, "Files", "rectangle.stack"),
             (.relays, "Relays", "antenna.radiowaves.left.and.right"),
             (.identity, "Identity", "person.badge.shield.checkmark"),
             (.settings, "Settings", "gearshape")
@@ -1868,7 +1886,6 @@ private struct ConversationView: View {
     @State private var messageText = ""
     @State private var revealMessages = false
     @State private var showingClearChatConfirm = false
-    @State private var showingAttachmentGallery = false
     @State private var showingVoiceRecorder = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     #if os(iOS)
@@ -1903,15 +1920,6 @@ private struct ConversationView: View {
                 status: isSensitiveHidden ? "Capture active" : "Secure chat",
                 trailing: AnyView(
                     HStack(spacing: chatHeaderSpacing) {
-                        Button {
-                            showingAttachmentGallery = true
-                        } label: {
-                            Image(systemName: "photo.on.rectangle.angled")
-                                .font(.system(size: chatHeaderIconSize, weight: .semibold))
-                        }
-                        .accessibilityLabel("Attachment Gallery")
-                        .glassCircleButton(diameter: chatHeaderButtonDiameter)
-                        .hoverLift()
                         Button {
                             showingClearChatConfirm = true
                         } label: {
@@ -1960,15 +1968,6 @@ private struct ConversationView: View {
                     }
                 }
                 Spacer()
-                Button {
-                    showingAttachmentGallery = true
-                } label: {
-                    Image(systemName: "photo.on.rectangle.angled")
-                        .font(.system(size: 14, weight: .semibold))
-                }
-                .accessibilityLabel("Attachment Gallery")
-                .glassCircleButton(diameter: 30)
-                .hoverLift()
                 Button {
                     showingClearChatConfirm = true
                 } label: {
@@ -2194,15 +2193,6 @@ private struct ConversationView: View {
                 onCancel: {
                     showingVoiceRecorder = false
                 }
-            )
-            .noctyraSheetPresentation()
-        }
-        .sheet(isPresented: $showingAttachmentGallery) {
-            AttachmentGalleryView(
-                model: model,
-                title: isSensitiveHidden ? "Attachments" : contact.displayName,
-                messages: model.directMessagesForDisplay(contactId: contact.id),
-                isRevealed: isRevealed
             )
             .noctyraSheetPresentation()
         }
@@ -2471,7 +2461,6 @@ private struct GroupConversationView: View {
     @State private var revealMessages = false
     @State private var showingClearChatConfirm = false
     @State private var showingGroupDetails = false
-    @State private var showingAttachmentGallery = false
     @State private var showingVoiceRecorder = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     @Environment(\.dismiss) private var dismiss
@@ -2558,15 +2547,6 @@ private struct GroupConversationView: View {
                     HStack(spacing: chatHeaderSpacing) {
                         if !isPendingInvitation {
                             Button {
-                                showingAttachmentGallery = true
-                            } label: {
-                                Image(systemName: "photo.on.rectangle.angled")
-                                    .font(.system(size: chatHeaderIconSize, weight: .semibold))
-                            }
-                            .accessibilityLabel("Attachment Gallery")
-                            .glassCircleButton(diameter: chatHeaderButtonDiameter)
-                            .hoverLift()
-                            Button {
                                 showingGroupDetails = true
                             } label: {
                                 Image(systemName: "slider.horizontal.3")
@@ -2625,15 +2605,6 @@ private struct GroupConversationView: View {
                 }
                 Spacer()
                 if !isPendingInvitation {
-                    Button {
-                        showingAttachmentGallery = true
-                    } label: {
-                        Image(systemName: "photo.on.rectangle.angled")
-                            .font(.system(size: 14, weight: .semibold))
-                    }
-                    .accessibilityLabel("Attachment Gallery")
-                    .glassCircleButton(diameter: 30)
-                    .hoverLift()
                     Button {
                         showingGroupDetails = true
                     } label: {
@@ -2864,15 +2835,6 @@ private struct GroupConversationView: View {
                 closeGroupView()
             }
                 .noctyraSheetPresentation()
-        }
-        .sheet(isPresented: $showingAttachmentGallery) {
-            AttachmentGalleryView(
-                model: model,
-                title: isSensitiveHidden ? "Attachments" : groupTitle,
-                messages: model.groupMessagesForDisplay(groupId: group.id),
-                isRevealed: isRevealed
-            )
-            .noctyraSheetPresentation()
         }
         .sheet(isPresented: $showingVoiceRecorder) {
             VoiceRecorderSheetView(
@@ -3884,6 +3846,7 @@ private struct MessageRow: View {
                     title: message.body,
                     isRevealed: isRevealed
                 )
+                .frame(maxWidth: attachmentBubbleContentMaxWidth, alignment: .leading)
             } else {
                 Text(messageText)
                     .foregroundStyle(isRevealed ? .primary : .secondary)
@@ -3931,9 +3894,17 @@ private struct MessageRow: View {
 
     private var bubbleMaxWidth: CGFloat {
         #if os(iOS)
-        return 330
+        return 300
         #else
         return 560
+        #endif
+    }
+
+    private var attachmentBubbleContentMaxWidth: CGFloat {
+        #if os(iOS)
+        return 236
+        #else
+        return 340
         #endif
     }
 
@@ -4069,6 +4040,8 @@ private struct AttachmentBubble: View {
         }
         .frame(width: size.width, height: size.height)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .clipped()
         .overlay(alignment: .bottomTrailing) {
             if isRevealed, preview != nil {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
@@ -4142,11 +4115,11 @@ private struct AttachmentBubble: View {
     private var thumbnailSize: CGSize {
         let ratio = min(max(preview?.aspectRatio ?? 1, 0.35), 2.6)
         #if os(macOS)
-        let maxWidth: CGFloat = 320
-        let maxHeight: CGFloat = 360
+        let maxWidth: CGFloat = 300
+        let maxHeight: CGFloat = 300
         #else
-        let maxWidth: CGFloat = 238
-        let maxHeight: CGFloat = 310
+        let maxWidth: CGFloat = 220
+        let maxHeight: CGFloat = 240
         #endif
         var width = maxWidth
         var height = width / ratio
@@ -4347,7 +4320,7 @@ private struct AttachmentImagePreviewViewer: View {
     }
 }
 
-private enum AttachmentDisplayKind: Equatable {
+private enum AttachmentDisplayKind: Hashable {
     case image
     case audio
     case pdf
@@ -4394,6 +4367,17 @@ private enum AttachmentDisplayKind: Equatable {
         }
     }
 
+    var sectionTitle: String {
+        switch self {
+        case .image: return "Images"
+        case .audio: return "Voice"
+        case .pdf: return "PDFs"
+        case .text: return "Text"
+        case .office: return "Office"
+        case .other: return "Other"
+        }
+    }
+
     var iconName: String {
         switch self {
         case .image: return "photo"
@@ -4415,12 +4399,17 @@ private enum AttachmentDisplayKind: Equatable {
         case .other: return .secondary
         }
     }
+
+    static var sectionOrder: [AttachmentDisplayKind] {
+        [.image, .audio, .pdf, .text, .office, .other]
+    }
 }
 
 private struct AttachmentGalleryItem: Identifiable {
     let id: UUID
     let message: NoctweaveCore.Message
     let attachment: AttachmentInfo
+    let sourceTitle: String?
 
     var title: String {
         let trimmed = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4441,6 +4430,57 @@ private struct AttachmentGalleryItem: Identifiable {
     var directionLabel: String {
         message.direction == .sent ? "Sent" : "Received"
     }
+
+    var sourceLabel: String {
+        sourceTitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? sourceTitle! : "Chat"
+    }
+}
+
+private struct AttachmentLibraryView: View {
+    @ObservedObject var model: ClientViewModel
+    @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
+
+    private var items: [AttachmentGalleryItem] {
+        var collected: [AttachmentGalleryItem] = []
+        for contact in model.state.contacts {
+            for message in model.directMessagesForDisplay(contactId: contact.id) {
+                guard let attachment = message.attachment else { continue }
+                collected.append(
+                    AttachmentGalleryItem(
+                        id: message.id,
+                        message: message,
+                        attachment: attachment,
+                        sourceTitle: contact.displayName
+                    )
+                )
+            }
+        }
+        for group in model.state.groups {
+            for message in model.groupMessagesForDisplay(groupId: group.id) {
+                guard let attachment = message.attachment else { continue }
+                collected.append(
+                    AttachmentGalleryItem(
+                        id: message.id,
+                        message: message,
+                        attachment: attachment,
+                        sourceTitle: group.title
+                    )
+                )
+            }
+        }
+        return collected.sorted { $0.message.timestamp > $1.message.timestamp }
+    }
+
+    var body: some View {
+        AttachmentGalleryView(
+            model: model,
+            title: "All Chats",
+            messages: [],
+            isRevealed: !screenProtection.isSensitiveHidden,
+            itemsOverride: items,
+            showsTypeSections: true
+        )
+    }
 }
 
 private struct AttachmentGalleryView: View {
@@ -4448,23 +4488,36 @@ private struct AttachmentGalleryView: View {
     let title: String
     let messages: [NoctweaveCore.Message]
     let isRevealed: Bool
+    var itemsOverride: [AttachmentGalleryItem]? = nil
+    var showsTypeSections = false
     @State private var selectedItem: AttachmentGalleryItem?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
     private var items: [AttachmentGalleryItem] {
-        messages.compactMap { message in
+        if let itemsOverride {
+            return itemsOverride
+        }
+        return messages.compactMap { (message: NoctweaveCore.Message) -> AttachmentGalleryItem? in
             guard let attachment = message.attachment else { return nil }
-            return AttachmentGalleryItem(id: message.id, message: message, attachment: attachment)
+            return AttachmentGalleryItem(id: message.id, message: message, attachment: attachment, sourceTitle: nil)
+        }
+    }
+
+    private var sections: [(kind: AttachmentDisplayKind, items: [AttachmentGalleryItem])] {
+        let grouped = Dictionary(grouping: items, by: \.kind)
+        return AttachmentDisplayKind.sectionOrder.compactMap { kind in
+            guard let sectionItems = grouped[kind], !sectionItems.isEmpty else { return nil }
+            return (kind, sectionItems.sorted { $0.message.timestamp > $1.message.timestamp })
         }
     }
 
     private var columns: [GridItem] {
         #if os(iOS)
-        [GridItem(.adaptive(minimum: 142, maximum: 220), spacing: 10)]
+        [GridItem(.adaptive(minimum: 124, maximum: 180), spacing: 10)]
         #else
-        [GridItem(.adaptive(minimum: 168, maximum: 240), spacing: 12)]
+        [GridItem(.adaptive(minimum: 156, maximum: 220), spacing: 12)]
         #endif
     }
 
@@ -4501,24 +4554,32 @@ private struct AttachmentGalleryView: View {
                 if items.isEmpty {
                     EmptyConversationState(
                         title: "No attachments yet",
-                        subtitle: "Images, documents, and voice messages from this chat will appear here."
+                        subtitle: showsTypeSections ? "Images, documents, and voice messages from your chats will appear here." : "Images, documents, and voice messages from this chat will appear here."
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
-                        LazyVGrid(columns: columns, spacing: 12) {
-                            ForEach(items) { item in
-                                Button {
-                                    selectedItem = item
-                                } label: {
-                                    AttachmentGalleryTile(
-                                        model: model,
-                                        item: item,
-                                        isRevealed: isRevealed
-                                    )
+                        VStack(alignment: .leading, spacing: 18) {
+                            if showsTypeSections {
+                                ForEach(sections, id: \.kind) { section in
+                                    VStack(alignment: .leading, spacing: 10) {
+                                        HStack(spacing: 8) {
+                                            Image(systemName: section.kind.iconName)
+                                                .foregroundStyle(section.kind.accent)
+                                            Text(section.kind.sectionTitle)
+                                                .font(.headline)
+                                            Text("\(section.items.count)")
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(.secondary)
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 3)
+                                                .background(Capsule().fill(Color.white.opacity(0.08)))
+                                        }
+                                        attachmentGrid(section.items)
+                                    }
                                 }
-                                .buttonStyle(.plain)
-                                .hoverLift(cornerRadius: 18)
+                            } else {
+                                attachmentGrid(items)
                             }
                         }
                         .padding(16)
@@ -4536,12 +4597,32 @@ private struct AttachmentGalleryView: View {
             .noctyraSheetPresentation()
         }
     }
+
+    private func attachmentGrid(_ gridItems: [AttachmentGalleryItem]) -> some View {
+        LazyVGrid(columns: columns, spacing: 12) {
+            ForEach(gridItems) { item in
+                Button {
+                    selectedItem = item
+                } label: {
+                    AttachmentGalleryTile(
+                        model: model,
+                        item: item,
+                        isRevealed: isRevealed,
+                        showsSource: showsTypeSections
+                    )
+                }
+                .buttonStyle(.plain)
+                .hoverLift(cornerRadius: 18)
+            }
+        }
+    }
 }
 
 private struct AttachmentGalleryTile: View {
     @ObservedObject var model: ClientViewModel
     let item: AttachmentGalleryItem
     let isRevealed: Bool
+    var showsSource = false
     @State private var preview: AttachmentImagePreview?
     @State private var didFail = false
     @Environment(\.colorScheme) private var colorScheme
@@ -4564,15 +4645,17 @@ private struct AttachmentGalleryTile: View {
                         .opacity(didFail ? 0.55 : 1)
                 }
             }
-            .frame(height: 120)
+            .aspectRatio(1.18, contentMode: .fit)
+            .frame(maxWidth: .infinity)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(isRevealed ? item.title : "Hidden attachment")
                     .font(.callout.weight(.semibold))
                     .lineLimit(2)
                     .foregroundStyle(isRevealed ? .primary : .secondary)
-                Text("\(item.directionLabel) · \(item.kind.title) · \(item.sizeLabel)")
+                Text(metadataLine)
                     .font(.caption2)
                     .lineLimit(2)
                     .foregroundStyle(.secondary)
@@ -4595,6 +4678,14 @@ private struct AttachmentGalleryTile: View {
         .task(id: item.id) {
             await loadImageThumbnailIfNeeded()
         }
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var metadataLine: String {
+        if showsSource {
+            return "\(item.sourceLabel) · \(item.directionLabel) · \(item.sizeLabel)"
+        }
+        return "\(item.directionLabel) · \(item.kind.title) · \(item.sizeLabel)"
     }
 
     private func loadImageThumbnailIfNeeded() async {
