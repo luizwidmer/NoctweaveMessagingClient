@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BUILD_DIR="${TMPDIR:-/tmp}/noctyra-attachment-sanitizer-tests"
+mkdir -p "$BUILD_DIR"
+
+xcrun swiftc \
+  "$ROOT_DIR/Noctyra Messaging Client/AttachmentSanitizer.swift" \
+  "$ROOT_DIR/SanitizerTests/AttachmentSanitizerSmokeTests.swift" \
+  -o "$BUILD_DIR/AttachmentSanitizerSmokeTests"
+
+"$BUILD_DIR/AttachmentSanitizerSmokeTests"

@@ -1,5 +1,6 @@
 import Foundation
 import PDFKit
+import Compression
 import UniformTypeIdentifiers
 
 struct SanitizedAttachmentPayload {
@@ -26,6 +27,8 @@ enum AttachmentSanitizerError: LocalizedError {
 
 enum AttachmentSanitizer {
     private static let maxOfficeEntries = 2_000
+    private static let maxOfficeUncompressedBytes = 64 * 1024 * 1024
+    private static let maxOfficeInspectableXMLBytes = 8 * 1024 * 1024
     private static let maxPDFPages = 200
 
     static func sanitizeDocument(data: Data, fileName: String?, mimeType: String) throws -> SanitizedAttachmentPayload {
@@ -173,6 +176,10 @@ enum AttachmentSanitizer {
         guard entries.count <= maxOfficeEntries else {
             throw AttachmentSanitizerError.unsafeDocument("Office package has too many parts.")
         }
+        let totalUncompressedSize = entries.reduce(0) { partial, entry in partial + Int(entry.uncompressedSize) }
+        guard totalUncompressedSize <= maxOfficeUncompressedBytes else {
+            throw AttachmentSanitizerError.unsafeDocument("Office package is too large after decompression.")
+        }
         guard entries.contains(where: { $0.path == kind.requiredPart }) else {
             throw AttachmentSanitizerError.invalidDocument
         }
@@ -187,6 +194,10 @@ enum AttachmentSanitizer {
             if isDangerousOfficeEntry(entry.path) {
                 throw AttachmentSanitizerError.unsafeDocument("Office package contains active or embedded content.")
             }
+            if shouldInspectOfficeXML(entry.path) {
+                let xml = try ZipPackage.entryData(entry, source: data, maxSize: maxOfficeInspectableXMLBytes)
+                try inspectOfficeXML(xml, path: entry.path)
+            }
             return entry
         }
         return try ZipPackage.rewrite(entries: safeEntries, source: data)
@@ -194,6 +205,7 @@ enum AttachmentSanitizer {
 
     private static func shouldDropOfficeEntry(_ path: String) -> Bool {
         path.hasPrefix("docprops/")
+            || path.hasPrefix("customxml/")
             || path.hasSuffix("/.ds_store")
             || path == ".ds_store"
             || path.hasPrefix("__macosx/")
@@ -211,6 +223,38 @@ enum AttachmentSanitizer {
             return true
         }
         return false
+    }
+
+    private static func shouldInspectOfficeXML(_ path: String) -> Bool {
+        path == "[content_types].xml"
+            || path.hasSuffix(".rels")
+            || path.hasSuffix(".xml")
+    }
+
+    private static func inspectOfficeXML(_ data: Data, path: String) throws {
+        guard let xml = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16) else {
+            throw AttachmentSanitizerError.invalidDocument
+        }
+        let lower = xml.lowercased()
+        if lower.contains("targetmode=\"external\"") || lower.contains("targetmode='external'") {
+            throw AttachmentSanitizerError.unsafeDocument("Office package contains external relationships.")
+        }
+        if lower.contains("http://") || lower.contains("https://") || lower.contains("file://") || lower.contains("ftp://") {
+            throw AttachmentSanitizerError.unsafeDocument("Office package contains external references.")
+        }
+        if path == "[content_types].xml" {
+            let dangerousContentTypes = [
+                "application/vnd.ms-office.vbaproject",
+                "application/vnd.ms-office.active",
+                "application/vnd.openxmlformats-officedocument.oleobject",
+                "application/vnd.ms-excel.sheet.macroenabled",
+                "application/vnd.ms-word.document.macroenabled",
+                "application/vnd.ms-powerpoint.presentation.macroenabled"
+            ]
+            if dangerousContentTypes.contains(where: { lower.contains($0) }) {
+                throw AttachmentSanitizerError.unsafeDocument("Office package declares active content.")
+            }
+        }
     }
 }
 
@@ -283,6 +327,7 @@ private enum ZipPackage {
         }
 
         var entries: [Entry] = []
+        var seenPaths = Set<String>()
         var offset = centralDirectoryOffset
         for _ in 0..<entryCount {
             guard offset + 46 <= data.count,
@@ -305,6 +350,9 @@ private enum ZipPackage {
                 throw AttachmentSanitizerError.invalidDocument
             }
             let path = try normalizedZipPath(rawName)
+            guard seenPaths.insert(path).inserted else {
+                throw AttachmentSanitizerError.unsafeDocument("Office package contains duplicate ZIP paths.")
+            }
             guard method == 0 || method == 8 else {
                 throw AttachmentSanitizerError.unsafeDocument("Office package uses an unsupported compression method.")
             }
@@ -336,6 +384,44 @@ private enum ZipPackage {
             offset = nameEnd + extraLength + commentLength
         }
         return entries
+    }
+
+    static func entryData(_ entry: Entry, source: Data, maxSize: Int) throws -> Data {
+        let expectedSize = Int(entry.uncompressedSize)
+        guard expectedSize <= maxSize else {
+            throw AttachmentSanitizerError.unsafeDocument("Office XML part is too large.")
+        }
+        let compressedData = source[entry.compressedDataRange]
+        let output: Data
+        switch entry.method {
+        case 0:
+            guard Int(entry.compressedSize) == expectedSize else {
+                throw AttachmentSanitizerError.invalidDocument
+            }
+            output = Data(compressedData)
+        case 8:
+            var destination = [UInt8](repeating: 0, count: expectedSize)
+            let decodedCount = compressedData.withUnsafeBytes { sourceBuffer in
+                compression_decode_buffer(
+                    &destination,
+                    destination.count,
+                    sourceBuffer.bindMemory(to: UInt8.self).baseAddress!,
+                    compressedData.count,
+                    nil,
+                    COMPRESSION_ZLIB
+                )
+            }
+            guard decodedCount == expectedSize else {
+                throw AttachmentSanitizerError.invalidDocument
+            }
+            output = Data(destination)
+        default:
+            throw AttachmentSanitizerError.invalidDocument
+        }
+        guard crc32(output) == entry.crc32 else {
+            throw AttachmentSanitizerError.invalidDocument
+        }
+        return output
     }
 
     static func rewrite(entries: [Entry], source: Data) throws -> Data {
@@ -434,15 +520,27 @@ private enum ZipPackage {
 
     private static func normalizedZipPath(_ rawName: String) throws -> String {
         let path = rawName.replacingOccurrences(of: "\\", with: "/").lowercased()
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
         guard !path.isEmpty,
               !path.hasPrefix("/"),
-              !path.contains("../"),
-              !path.contains("..\\"),
               !path.contains(":"),
+              !components.contains(where: { $0 == "." || $0 == ".." }),
               !path.unicodeScalars.contains(where: { $0.value < 0x20 }) else {
             throw AttachmentSanitizerError.unsafeDocument("Office package contains an unsafe path.")
         }
         return path
+    }
+
+    private static func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in data {
+            crc ^= UInt32(byte)
+            for _ in 0..<8 {
+                let mask = 0 &- (crc & 1)
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask)
+            }
+        }
+        return crc ^ 0xFFFF_FFFF
     }
 
     private static func readUInt16(_ data: Data, at offset: Int) -> UInt16 {
