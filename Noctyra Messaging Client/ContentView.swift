@@ -3939,6 +3939,9 @@ private struct AttachmentBubble: View {
         VStack(alignment: .leading, spacing: 6) {
             if !isRevealed {
                 hiddenAttachmentPreview
+                if attachment.localFileName == nil {
+                    downloadAttachmentButton(title: "Download Attachment")
+                }
             } else if attachment.localFileName == nil {
                 remoteAttachmentPreview
             } else if isImageAttachment {
@@ -4084,18 +4087,7 @@ private struct AttachmentBubble: View {
                     .font(.caption.weight(.semibold))
             }
             .foregroundStyle(.secondary)
-            Button {
-                Task { await downloadAttachment() }
-            } label: {
-                if isDownloading {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Label("Download", systemImage: "arrow.down.circle")
-                }
-            }
-            .glassButton(prominent: true)
-            .disabled(isDownloading || attachment.messageKeyData == nil || attachment.cryptoContext == nil || attachment.relay == nil)
+            downloadAttachmentButton(title: "Download")
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -4103,6 +4095,21 @@ private struct AttachmentBubble: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(Color.white.opacity(0.08))
         )
+    }
+
+    private func downloadAttachmentButton(title: String) -> some View {
+        Button {
+            Task { await downloadAttachment() }
+        } label: {
+            if isDownloading {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Label(title, systemImage: "arrow.down.circle")
+            }
+        }
+        .glassButton(prominent: true)
+        .disabled(isDownloading || attachment.messageKeyData == nil || attachment.cryptoContext == nil || attachment.relay == nil)
     }
 
     private var unsupportedPreview: some View {
