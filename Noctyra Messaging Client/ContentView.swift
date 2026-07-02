@@ -11044,8 +11044,11 @@ private struct HoverLiftModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         #if os(macOS)
+        let hoverShape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         content
             .scaleEffect(hovering ? 1.02 : 1.0)
+            .clipShape(hoverShape)
+            .contentShape(hoverShape)
             .shadow(
                 color: Color.white.opacity(hovering ? 0.25 : 0),
                 radius: hovering ? 10 : 0,
@@ -11053,7 +11056,7 @@ private struct HoverLiftModifier: ViewModifier {
                 y: hovering ? 4 : 0
             )
             .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                hoverShape
                     .stroke(Color.white.opacity(hovering ? 0.3 : 0), lineWidth: 0.8)
             )
             .animation(.easeOut(duration: 0.15), value: hovering)
