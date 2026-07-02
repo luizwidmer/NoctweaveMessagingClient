@@ -11089,7 +11089,7 @@ private struct GlowCardModifier: ViewModifier {
 }
 
 private extension View {
-    func hoverLift(cornerRadius: CGFloat = 8) -> some View {
+    func hoverLift(cornerRadius: CGFloat = 999) -> some View {
         modifier(HoverLiftModifier(cornerRadius: cornerRadius))
     }
 }
