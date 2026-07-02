@@ -4500,7 +4500,7 @@ private struct AttachmentGalleryView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var effectiveIsRevealed: Bool {
-        showsRevealButton ? (manuallyRevealed && isRevealed) : isRevealed
+        isRevealed && (!showsRevealButton || manuallyRevealed)
     }
 
     private var items: [AttachmentGalleryItem] {
@@ -4653,34 +4653,45 @@ private struct AttachmentGalleryTile: View {
     @State private var didFail = false
     @Environment(\.colorScheme) private var colorScheme
 
+    private var thumbnailSide: CGFloat {
+        #if os(iOS)
+        96
+        #else
+        112
+        #endif
+    }
+
+    private var tileHeight: CGFloat {
+        #if os(iOS)
+        showsSource ? 174 : 158
+        #else
+        showsSource ? 194 : 174
+        #endif
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            GeometryReader { geometry in
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(item.kind.accent.opacity(colorScheme == .dark ? 0.16 : 0.10))
-                    if isRevealed, let preview, item.kind == .image {
-                        preview.image
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: geometry.size.width, height: geometry.size.height)
-                            .clipped()
-                    } else {
-                        Image(systemName: item.kind.iconName)
-                            .font(.system(size: 28, weight: .semibold))
-                            .foregroundStyle(item.kind.accent)
-                            .opacity(didFail ? 0.55 : 1)
-                    }
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(item.kind.accent.opacity(colorScheme == .dark ? 0.16 : 0.10))
+                if isRevealed, let preview, item.kind == .image {
+                    preview.image
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: thumbnailSide, height: thumbnailSide)
+                        .clipped()
+                } else {
+                    Image(systemName: item.kind.iconName)
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(item.kind.accent)
+                        .opacity(didFail ? 0.55 : 1)
                 }
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .clipped()
             }
-            .aspectRatio(1.18, contentMode: .fit)
-            .frame(maxWidth: .infinity)
+            .frame(width: thumbnailSide, height: thumbnailSide)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .clipped()
+            .frame(maxWidth: .infinity, alignment: .center)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(isRevealed ? item.title : "Hidden attachment")
@@ -4695,6 +4706,7 @@ private struct AttachmentGalleryTile: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: tileHeight, alignment: .top)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(.ultraThinMaterial)
@@ -4707,7 +4719,7 @@ private struct AttachmentGalleryTile: View {
                         .stroke(Color.white.opacity(colorScheme == .dark ? 0.15 : 0.26), lineWidth: 0.8)
                 )
         )
-        .task(id: item.id) {
+        .task(id: "\(item.id.uuidString)-\(isRevealed)") {
             await loadImageThumbnailIfNeeded()
         }
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
