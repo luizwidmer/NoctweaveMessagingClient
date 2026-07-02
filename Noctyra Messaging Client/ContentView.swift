@@ -6,6 +6,7 @@ import Darwin
 import StoreKit
 import Combine
 import AVFoundation
+import PDFKit
 #if os(iOS)
 import UIKit
 import PhotosUI
@@ -1867,6 +1868,7 @@ private struct ConversationView: View {
     @State private var messageText = ""
     @State private var revealMessages = false
     @State private var showingClearChatConfirm = false
+    @State private var showingAttachmentGallery = false
     @State private var showingVoiceRecorder = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     #if os(iOS)
@@ -1901,6 +1903,15 @@ private struct ConversationView: View {
                 status: isSensitiveHidden ? "Capture active" : "Secure chat",
                 trailing: AnyView(
                     HStack(spacing: chatHeaderSpacing) {
+                        Button {
+                            showingAttachmentGallery = true
+                        } label: {
+                            Image(systemName: "photo.on.rectangle.angled")
+                                .font(.system(size: chatHeaderIconSize, weight: .semibold))
+                        }
+                        .accessibilityLabel("Attachment Gallery")
+                        .glassCircleButton(diameter: chatHeaderButtonDiameter)
+                        .hoverLift()
                         Button {
                             showingClearChatConfirm = true
                         } label: {
@@ -1949,6 +1960,15 @@ private struct ConversationView: View {
                     }
                 }
                 Spacer()
+                Button {
+                    showingAttachmentGallery = true
+                } label: {
+                    Image(systemName: "photo.on.rectangle.angled")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .accessibilityLabel("Attachment Gallery")
+                .glassCircleButton(diameter: 30)
+                .hoverLift()
                 Button {
                     showingClearChatConfirm = true
                 } label: {
@@ -2174,6 +2194,15 @@ private struct ConversationView: View {
                 onCancel: {
                     showingVoiceRecorder = false
                 }
+            )
+            .noctyraSheetPresentation()
+        }
+        .sheet(isPresented: $showingAttachmentGallery) {
+            AttachmentGalleryView(
+                model: model,
+                title: isSensitiveHidden ? "Attachments" : contact.displayName,
+                messages: model.directMessagesForDisplay(contactId: contact.id),
+                isRevealed: isRevealed
             )
             .noctyraSheetPresentation()
         }
@@ -2442,6 +2471,7 @@ private struct GroupConversationView: View {
     @State private var revealMessages = false
     @State private var showingClearChatConfirm = false
     @State private var showingGroupDetails = false
+    @State private var showingAttachmentGallery = false
     @State private var showingVoiceRecorder = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     @Environment(\.dismiss) private var dismiss
@@ -2528,6 +2558,15 @@ private struct GroupConversationView: View {
                     HStack(spacing: chatHeaderSpacing) {
                         if !isPendingInvitation {
                             Button {
+                                showingAttachmentGallery = true
+                            } label: {
+                                Image(systemName: "photo.on.rectangle.angled")
+                                    .font(.system(size: chatHeaderIconSize, weight: .semibold))
+                            }
+                            .accessibilityLabel("Attachment Gallery")
+                            .glassCircleButton(diameter: chatHeaderButtonDiameter)
+                            .hoverLift()
+                            Button {
                                 showingGroupDetails = true
                             } label: {
                                 Image(systemName: "slider.horizontal.3")
@@ -2586,6 +2625,15 @@ private struct GroupConversationView: View {
                 }
                 Spacer()
                 if !isPendingInvitation {
+                    Button {
+                        showingAttachmentGallery = true
+                    } label: {
+                        Image(systemName: "photo.on.rectangle.angled")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .accessibilityLabel("Attachment Gallery")
+                    .glassCircleButton(diameter: 30)
+                    .hoverLift()
                     Button {
                         showingGroupDetails = true
                     } label: {
@@ -2816,6 +2864,15 @@ private struct GroupConversationView: View {
                 closeGroupView()
             }
                 .noctyraSheetPresentation()
+        }
+        .sheet(isPresented: $showingAttachmentGallery) {
+            AttachmentGalleryView(
+                model: model,
+                title: isSensitiveHidden ? "Attachments" : groupTitle,
+                messages: model.groupMessagesForDisplay(groupId: group.id),
+                isRevealed: isRevealed
+            )
+            .noctyraSheetPresentation()
         }
         .sheet(isPresented: $showingVoiceRecorder) {
             VoiceRecorderSheetView(
@@ -3904,6 +3961,7 @@ private struct AttachmentBubble: View {
     @State private var isLoading = false
     @State private var didFail = false
     @State private var showingImagePreview = false
+    @State private var showingDocumentPreview = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -3923,6 +3981,14 @@ private struct AttachmentBubble: View {
                     attachment: attachment,
                     isRevealed: isRevealed
                 )
+            } else if isDocumentAttachment {
+                Button {
+                    showingDocumentPreview = true
+                } label: {
+                    documentPreview
+                }
+                .buttonStyle(.plain)
+                .disabled(!isRevealed || attachment.localFileName == nil)
             } else {
                 unsupportedPreview
             }
@@ -3952,6 +4018,13 @@ private struct AttachmentBubble: View {
             title: title,
             sizeLabel: sizeLabel
         )
+        .attachmentDocumentPreviewPresentation(
+            isPresented: $showingDocumentPreview,
+            model: model,
+            attachment: attachment,
+            title: title,
+            sizeLabel: sizeLabel
+        )
     }
 
     private var normalizedMimeType: String {
@@ -3964,6 +4037,10 @@ private struct AttachmentBubble: View {
 
     private var isAudioAttachment: Bool {
         normalizedMimeType.hasPrefix("audio/")
+    }
+
+    private var isDocumentAttachment: Bool {
+        AttachmentDisplayKind(mimeType: normalizedMimeType).isDocument
     }
 
     private var attachmentPreview: some View {
@@ -4019,6 +4096,47 @@ private struct AttachmentBubble: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color.white.opacity(0.08))
         )
+    }
+
+    private var documentPreview: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(documentKind.accent.opacity(0.16))
+                Image(systemName: documentKind.iconName)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(documentKind.accent)
+            }
+            .frame(width: 42, height: 42)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(isRevealed ? documentKind.title : "Hidden document")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isRevealed ? .primary : .secondary)
+                Text(isRevealed ? "Tap to view" : "Reveal messages to view")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 9)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.7)
+                )
+        )
+    }
+
+    private var documentKind: AttachmentDisplayKind {
+        AttachmentDisplayKind(mimeType: normalizedMimeType)
     }
 
     private var thumbnailSize: CGSize {
@@ -4131,6 +4249,39 @@ private extension View {
     }
 }
 
+private extension View {
+    @ViewBuilder
+    func attachmentDocumentPreviewPresentation(
+        isPresented: Binding<Bool>,
+        model: ClientViewModel,
+        attachment: AttachmentInfo,
+        title: String,
+        sizeLabel: String
+    ) -> some View {
+        #if os(iOS)
+        fullScreenCover(isPresented: isPresented) {
+            DocumentAttachmentViewer(
+                model: model,
+                attachment: attachment,
+                title: title,
+                sizeLabel: sizeLabel
+            )
+        }
+        #else
+        sheet(isPresented: isPresented) {
+            DocumentAttachmentViewer(
+                model: model,
+                attachment: attachment,
+                title: title,
+                sizeLabel: sizeLabel
+            )
+            .frame(minWidth: 860, minHeight: 660)
+            .noctyraSheetPresentation()
+        }
+        #endif
+    }
+}
+
 private struct AttachmentImagePreviewViewer: View {
     let preview: AttachmentImagePreview?
     let title: String
@@ -4193,6 +4344,705 @@ private struct AttachmentImagePreviewViewer: View {
                 }
             }
         }
+    }
+}
+
+private enum AttachmentDisplayKind: Equatable {
+    case image
+    case audio
+    case pdf
+    case text
+    case office
+    case other
+
+    init(mimeType: String) {
+        let normalized = mimeType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.hasPrefix("image/") {
+            self = .image
+        } else if normalized.hasPrefix("audio/") {
+            self = .audio
+        } else if normalized == "application/pdf" {
+            self = .pdf
+        } else if normalized.hasPrefix("text/")
+                    || normalized == "application/json"
+                    || normalized == "application/xml" {
+            self = .text
+        } else if normalized.contains("officedocument") {
+            self = .office
+        } else {
+            self = .other
+        }
+    }
+
+    var isDocument: Bool {
+        switch self {
+        case .pdf, .text, .office:
+            return true
+        case .image, .audio, .other:
+            return false
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .image: return "Image"
+        case .audio: return "Voice message"
+        case .pdf: return "PDF document"
+        case .text: return "Text document"
+        case .office: return "Office document"
+        case .other: return "Attachment"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .image: return "photo"
+        case .audio: return "waveform"
+        case .pdf: return "doc.richtext"
+        case .text: return "doc.text"
+        case .office: return "doc.zipper"
+        case .other: return "paperclip"
+        }
+    }
+
+    var accent: Color {
+        switch self {
+        case .image: return .cyan
+        case .audio: return .mint
+        case .pdf: return .red
+        case .text: return .blue
+        case .office: return .orange
+        case .other: return .secondary
+        }
+    }
+}
+
+private struct AttachmentGalleryItem: Identifiable {
+    let id: UUID
+    let message: NoctweaveCore.Message
+    let attachment: AttachmentInfo
+
+    var title: String {
+        let trimmed = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+        return kind.title
+    }
+
+    var kind: AttachmentDisplayKind {
+        AttachmentDisplayKind(mimeType: attachment.descriptor.mimeType)
+    }
+
+    var sizeLabel: String {
+        ByteCountFormatter.string(fromByteCount: Int64(attachment.descriptor.byteCount), countStyle: .file)
+    }
+
+    var directionLabel: String {
+        message.direction == .sent ? "Sent" : "Received"
+    }
+}
+
+private struct AttachmentGalleryView: View {
+    @ObservedObject var model: ClientViewModel
+    let title: String
+    let messages: [NoctweaveCore.Message]
+    let isRevealed: Bool
+    @State private var selectedItem: AttachmentGalleryItem?
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var items: [AttachmentGalleryItem] {
+        messages.compactMap { message in
+            guard let attachment = message.attachment else { return nil }
+            return AttachmentGalleryItem(id: message.id, message: message, attachment: attachment)
+        }
+    }
+
+    private var columns: [GridItem] {
+        #if os(iOS)
+        [GridItem(.adaptive(minimum: 142, maximum: 220), spacing: 10)]
+        #else
+        [GridItem(.adaptive(minimum: 168, maximum: 240), spacing: 12)]
+        #endif
+    }
+
+    var body: some View {
+        ZStack {
+            ChatWallpaper()
+                .ignoresSafeArea()
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Attachments")
+                            .font(.title3.weight(.semibold))
+                        Text("\(items.count) in \(title)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .bold))
+                    }
+                    .glassCircleButton(diameter: 34)
+                    .hoverLift()
+                }
+                .padding(16)
+                .background(
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .overlay(theme.accent.opacity(colorScheme == .dark ? 0.10 : 0.06))
+                )
+
+                if items.isEmpty {
+                    EmptyConversationState(
+                        title: "No attachments yet",
+                        subtitle: "Images, documents, and voice messages from this chat will appear here."
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 12) {
+                            ForEach(items) { item in
+                                Button {
+                                    selectedItem = item
+                                } label: {
+                                    AttachmentGalleryTile(
+                                        model: model,
+                                        item: item,
+                                        isRevealed: isRevealed
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .hoverLift(cornerRadius: 18)
+                            }
+                        }
+                        .padding(16)
+                    }
+                }
+            }
+        }
+        .privacySensitive()
+        .sheet(item: $selectedItem) { item in
+            AttachmentDetailViewer(
+                model: model,
+                item: item,
+                isRevealed: isRevealed
+            )
+            .noctyraSheetPresentation()
+        }
+    }
+}
+
+private struct AttachmentGalleryTile: View {
+    @ObservedObject var model: ClientViewModel
+    let item: AttachmentGalleryItem
+    let isRevealed: Bool
+    @State private var preview: AttachmentImagePreview?
+    @State private var didFail = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(item.kind.accent.opacity(colorScheme == .dark ? 0.16 : 0.10))
+                if isRevealed, let preview, item.kind == .image {
+                    preview.image
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                } else {
+                    Image(systemName: item.kind.iconName)
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(item.kind.accent)
+                        .opacity(didFail ? 0.55 : 1)
+                }
+            }
+            .frame(height: 120)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(isRevealed ? item.title : "Hidden attachment")
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(2)
+                    .foregroundStyle(isRevealed ? .primary : .secondary)
+                Text("\(item.directionLabel) · \(item.kind.title) · \(item.sizeLabel)")
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.black.opacity(colorScheme == .dark ? 0.14 : 0.05))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.white.opacity(colorScheme == .dark ? 0.15 : 0.26), lineWidth: 0.8)
+                )
+        )
+        .task(id: item.id) {
+            await loadImageThumbnailIfNeeded()
+        }
+    }
+
+    private func loadImageThumbnailIfNeeded() async {
+        guard isRevealed, item.kind == .image, preview == nil else { return }
+        guard let fileName = item.attachment.localFileName else {
+            didFail = true
+            return
+        }
+        var data = await model.loadAttachmentData(fileName: fileName)
+        defer {
+            data?.secureWipe()
+            data = nil
+        }
+        guard let data else {
+            didFail = true
+            return
+        }
+        #if os(iOS)
+        guard let image = UIImage(data: data) else {
+            didFail = true
+            return
+        }
+        preview = AttachmentImagePreview(image: Image(uiImage: image), aspectRatio: max(image.size.width / max(image.size.height, 1), 0.1))
+        #else
+        guard let image = NSImage(data: data) else {
+            didFail = true
+            return
+        }
+        let ratio = max(image.size.width / max(image.size.height, 1), 0.1)
+        preview = AttachmentImagePreview(image: Image(nsImage: image), aspectRatio: ratio)
+        #endif
+    }
+}
+
+private struct AttachmentDetailViewer: View {
+    @ObservedObject var model: ClientViewModel
+    let item: AttachmentGalleryItem
+    let isRevealed: Bool
+    @Environment(\.dismiss) private var dismiss
+    @State private var imagePreview: AttachmentImagePreview?
+    @State private var isLoadingImage = false
+    @State private var didFailImage = false
+
+    var body: some View {
+        Group {
+            if !isRevealed {
+                hiddenView
+            } else {
+                switch item.kind {
+                case .image:
+                    AttachmentImagePreviewViewer(
+                        preview: imagePreview,
+                        title: item.title,
+                        sizeLabel: item.sizeLabel
+                    )
+                    .task(id: item.id) {
+                        await loadImage()
+                    }
+                    .overlay {
+                        if isLoadingImage {
+                            ProgressView()
+                                .padding(18)
+                                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        } else if didFailImage && imagePreview == nil {
+                            Text("Image unavailable")
+                                .foregroundStyle(.white.opacity(0.72))
+                        }
+                    }
+                case .audio:
+                    audioDetail
+                case .pdf, .text, .office:
+                    DocumentAttachmentViewer(
+                        model: model,
+                        attachment: item.attachment,
+                        title: item.title,
+                        sizeLabel: item.sizeLabel
+                    )
+                case .other:
+                    unsupportedDetail
+                }
+            }
+        }
+        #if os(macOS)
+        .frame(minWidth: 760, minHeight: 560)
+        #endif
+    }
+
+    private var hiddenView: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "eye.slash")
+                .font(.system(size: 32, weight: .semibold))
+            Text("Attachment Hidden")
+                .font(.title3.weight(.semibold))
+            Text("Reveal messages in the chat before opening attachments.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Button("Close") { dismiss() }
+                .glassButton(prominent: true)
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(ChatWallpaper().ignoresSafeArea())
+    }
+
+    private var audioDetail: some View {
+        VStack(spacing: 18) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title)
+                        .font(.headline)
+                    Text(item.sizeLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .glassCircleButton(diameter: 34)
+            }
+            AudioAttachmentPlayer(model: model, attachment: item.attachment, isRevealed: true)
+                .frame(maxWidth: 460)
+            Spacer()
+        }
+        .padding(18)
+        .background(ChatWallpaper().ignoresSafeArea())
+    }
+
+    private var unsupportedDetail: some View {
+        VStack(spacing: 12) {
+            Image(systemName: item.kind.iconName)
+                .font(.system(size: 30, weight: .semibold))
+            Text(item.title)
+                .font(.headline)
+            Text("No in-app viewer is available for this attachment type.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Button("Close") { dismiss() }
+                .glassButton(prominent: true)
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(ChatWallpaper().ignoresSafeArea())
+    }
+
+    private func loadImage() async {
+        guard imagePreview == nil, !isLoadingImage else { return }
+        guard let fileName = item.attachment.localFileName else {
+            didFailImage = true
+            return
+        }
+        isLoadingImage = true
+        var data = await model.loadAttachmentData(fileName: fileName)
+        defer {
+            data?.secureWipe()
+            data = nil
+            isLoadingImage = false
+        }
+        guard let data else {
+            didFailImage = true
+            return
+        }
+        #if os(iOS)
+        guard let uiImage = UIImage(data: data) else {
+            didFailImage = true
+            return
+        }
+        imagePreview = AttachmentImagePreview(image: Image(uiImage: uiImage), aspectRatio: max(uiImage.size.width / max(uiImage.size.height, 1), 0.1))
+        #else
+        guard let nsImage = NSImage(data: data) else {
+            didFailImage = true
+            return
+        }
+        imagePreview = AttachmentImagePreview(image: Image(nsImage: nsImage), aspectRatio: max(nsImage.size.width / max(nsImage.size.height, 1), 0.1))
+        #endif
+    }
+}
+
+private struct DocumentAttachmentViewer: View {
+    @ObservedObject var model: ClientViewModel
+    let attachment: AttachmentInfo
+    let title: String
+    let sizeLabel: String
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
+    @State private var pdfData: Data?
+    @State private var textContent: String?
+    @State private var officeParts: [String] = []
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+
+    private var kind: AttachmentDisplayKind {
+        AttachmentDisplayKind(mimeType: attachment.descriptor.mimeType)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(kind.accent.opacity(0.16))
+                    Image(systemName: kind.iconName)
+                        .foregroundStyle(kind.accent)
+                }
+                .frame(width: 38, height: 38)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                    Text("\(kind.title) · \(sizeLabel)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .glassCircleButton(diameter: 34)
+                .hoverLift()
+            }
+            .padding(16)
+            .background(
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(theme.accent.opacity(0.08))
+            )
+
+            ZStack {
+                if isLoading {
+                    ProgressView()
+                } else if let errorMessage {
+                    Text(errorMessage)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(28)
+                } else {
+                    documentBody
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(ChatWallpaper().ignoresSafeArea())
+        .privacySensitive()
+        .task(id: attachment.localFileName ?? attachment.descriptor.id.uuidString) {
+            await loadDocument()
+        }
+        .onDisappear {
+            wipeLoadedData()
+        }
+    }
+
+    @ViewBuilder
+    private var documentBody: some View {
+        switch kind {
+        case .pdf:
+            if let pdfData {
+                PDFKitDocumentView(data: pdfData)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(12)
+            } else {
+                Text("PDF unavailable")
+                    .foregroundStyle(.secondary)
+            }
+        case .text:
+            ScrollView {
+                Text(textContent ?? "")
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(18)
+            }
+        case .office:
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Sanitized Office Package")
+                        .font(.title3.weight(.semibold))
+                    Text("Active content, metadata, external relationships, and embedded objects are rejected or stripped before storage. The viewer lists the safe package parts available in this attachment.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    ForEach(officeParts, id: \.self) { part in
+                        HStack(spacing: 10) {
+                            Image(systemName: "doc.text")
+                                .foregroundStyle(kind.accent)
+                            Text(part)
+                                .font(.system(.caption, design: .monospaced))
+                                .lineLimit(2)
+                            Spacer()
+                        }
+                        .padding(10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(Color.white.opacity(0.07))
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(18)
+            }
+        default:
+            Text("No document viewer is available for this attachment.")
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func loadDocument() async {
+        guard !isLoading else { return }
+        wipeLoadedData()
+        guard let fileName = attachment.localFileName else {
+            errorMessage = "Attachment is not available on this device."
+            return
+        }
+        isLoading = true
+        errorMessage = nil
+        var data = await model.loadAttachmentData(fileName: fileName)
+        defer {
+            if kind != .pdf {
+                data?.secureWipe()
+                data = nil
+            }
+            isLoading = false
+        }
+        guard let loaded = data else {
+            errorMessage = "Attachment could not be decrypted."
+            return
+        }
+        switch kind {
+        case .pdf:
+            guard PDFDocument(data: loaded) != nil else {
+                errorMessage = "PDF could not be parsed."
+                data?.secureWipe()
+                data = nil
+                return
+            }
+            pdfData = loaded
+            data = nil
+        case .text:
+            textContent = String(data: loaded, encoding: .utf8) ?? "Text could not be decoded."
+        case .office:
+            officeParts = OfficePackageOutline.parts(in: loaded)
+            if officeParts.isEmpty {
+                errorMessage = "Office package could not be inspected."
+            }
+        default:
+            errorMessage = "No document viewer is available for this attachment."
+        }
+    }
+
+    private func wipeLoadedData() {
+        if var pdfData {
+            pdfData.secureWipe()
+        }
+        pdfData = nil
+        textContent = nil
+        officeParts.removeAll(keepingCapacity: false)
+    }
+}
+
+#if os(iOS)
+private struct PDFKitDocumentView: UIViewRepresentable {
+    let data: Data
+
+    func makeUIView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.backgroundColor = .clear
+        return view
+    }
+
+    func updateUIView(_ uiView: PDFView, context: Context) {
+        uiView.document = PDFDocument(data: data)
+    }
+}
+#elseif os(macOS)
+private struct PDFKitDocumentView: NSViewRepresentable {
+    let data: Data
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.backgroundColor = .clear
+        return view
+    }
+
+    func updateNSView(_ nsView: PDFView, context: Context) {
+        nsView.document = PDFDocument(data: data)
+    }
+}
+#endif
+
+private enum OfficePackageOutline {
+    static func parts(in data: Data) -> [String] {
+        guard data.count >= 22,
+              let end = findEndOfCentralDirectory(in: data) else {
+            return []
+        }
+        let count = Int(readUInt16(data, at: end + 10))
+        let directorySize = Int(readUInt32(data, at: end + 12))
+        var offset = Int(readUInt32(data, at: end + 16))
+        guard count > 0, offset >= 0, directorySize >= 0, offset + directorySize <= data.count else {
+            return []
+        }
+        var parts: [String] = []
+        for _ in 0..<count {
+            guard offset + 46 <= data.count,
+                  readUInt32(data, at: offset) == 0x02014B50 else {
+                return []
+            }
+            let nameLength = Int(readUInt16(data, at: offset + 28))
+            let extraLength = Int(readUInt16(data, at: offset + 30))
+            let commentLength = Int(readUInt16(data, at: offset + 32))
+            let nameStart = offset + 46
+            let nameEnd = nameStart + nameLength
+            guard nameEnd + extraLength + commentLength <= data.count,
+                  let name = String(data: data[nameStart..<nameEnd], encoding: .utf8) else {
+                return []
+            }
+            let normalized = name.replacingOccurrences(of: "\\", with: "/")
+            if !normalized.hasSuffix("/") {
+                parts.append(normalized)
+            }
+            offset = nameEnd + extraLength + commentLength
+        }
+        return parts.sorted()
+    }
+
+    private static func findEndOfCentralDirectory(in data: Data) -> Int? {
+        let minimum = 22
+        let maximumCommentLength = min(data.count - minimum, Int(UInt16.max))
+        let start = data.count - minimum - maximumCommentLength
+        for offset in stride(from: data.count - minimum, through: start, by: -1) {
+            if readUInt32(data, at: offset) == 0x06054B50 {
+                return offset
+            }
+        }
+        return nil
+    }
+
+    private static func readUInt16(_ data: Data, at offset: Int) -> UInt16 {
+        UInt16(data[data.index(data.startIndex, offsetBy: offset)])
+            | (UInt16(data[data.index(data.startIndex, offsetBy: offset + 1)]) << 8)
+    }
+
+    private static func readUInt32(_ data: Data, at offset: Int) -> UInt32 {
+        UInt32(readUInt16(data, at: offset)) | (UInt32(readUInt16(data, at: offset + 2)) << 16)
     }
 }
 
