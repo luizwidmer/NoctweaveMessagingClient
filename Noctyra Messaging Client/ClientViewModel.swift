@@ -6872,12 +6872,18 @@ final class ClientViewModel: ObservableObject {
             return (canonicalJPEG, nil, "image/jpeg")
         }
 
-        guard normalizedMime.hasPrefix("audio/"),
-              let audioFormat = detectSupportedAudioFormat(data, normalizedMimeType: normalizedMime) else {
-            throw AttachmentTransferError.unsupportedType
+        if normalizedMime.hasPrefix("audio/"),
+           let audioFormat = detectSupportedAudioFormat(data, normalizedMimeType: normalizedMime) {
+            try validateAudioPayload(data)
+            return (data, nil, audioFormat.mimeType)
         }
-        try validateAudioPayload(data)
-        return (data, nil, audioFormat.mimeType)
+
+        let sanitizedDocument = try AttachmentSanitizer.sanitizeDocument(
+            data: data,
+            fileName: fileName,
+            mimeType: normalizedMime
+        )
+        return (sanitizedDocument.data, nil, sanitizedDocument.mimeType)
     }
 
     private func validateInboundAttachmentDescriptor(_ descriptor: AttachmentDescriptor) throws {
@@ -6906,7 +6912,8 @@ final class ClientViewModel: ObservableObject {
         let normalizedMime = normalizeMimeType(descriptor.mimeType)
         let isImage = normalizedMime.hasPrefix("image/")
         let isAudio = normalizedMime.hasPrefix("audio/") && isSupportedAudioMimeType(normalizedMime)
-        guard isImage || isAudio else {
+        let isDocument = AttachmentSanitizer.isSupportedDocument(mimeType: normalizedMime)
+        guard isImage || isAudio || isDocument else {
             throw AttachmentTransferError.unsupportedType
         }
     }
@@ -6918,6 +6925,9 @@ final class ClientViewModel: ObservableObject {
         }
         if normalizedMime.hasPrefix("image/") {
             return "Image"
+        }
+        if let documentTitle = AttachmentSanitizer.displayTitle(for: normalizedMime) {
+            return documentTitle
         }
         return fallback
     }
@@ -6938,6 +6948,13 @@ final class ClientViewModel: ObservableObject {
            detectSupportedAudioFormat(data, normalizedMimeType: normalizedMime) != nil {
             try validateAudioPayload(data)
             return data
+        }
+        if AttachmentSanitizer.isSupportedDocument(mimeType: normalizedMime) {
+            return try AttachmentSanitizer.sanitizeDocument(
+                data: data,
+                fileName: nil,
+                mimeType: normalizedMime
+            ).data
         }
         throw AttachmentTransferError.unsupportedType
     }

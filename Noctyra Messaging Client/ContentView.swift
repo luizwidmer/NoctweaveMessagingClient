@@ -2241,7 +2241,7 @@ private struct ConversationView: View {
         #else
         .fileImporter(
             isPresented: $showingAttachmentImporter,
-            allowedContentTypes: [.image],
+            allowedContentTypes: supportedAttachmentContentTypes,
             allowsMultipleSelection: false
         ) { result in
             switch result {
@@ -2904,7 +2904,7 @@ private struct GroupConversationView: View {
         #else
         .fileImporter(
             isPresented: $showingAttachmentImporter,
-            allowedContentTypes: [.image],
+            allowedContentTypes: supportedAttachmentContentTypes,
             allowsMultipleSelection: false
         ) { result in
             switch result {
@@ -11370,6 +11370,22 @@ private enum FeedbackGenerator {
         #endif
     }
 }
+
+private let supportedAttachmentContentTypes: [UTType] = {
+    var types: [UTType] = [
+        .image,
+        .pdf,
+        .plainText,
+        .text,
+        .utf8PlainText,
+        .commaSeparatedText
+    ]
+    let extensionTypes = ["txt", "md", "csv", "tsv", "json", "xml", "log", "docx", "xlsx", "pptx"]
+        .compactMap { UTType(filenameExtension: $0) }
+    types.append(contentsOf: extensionTypes)
+    var seen = Set<String>()
+    return types.filter { seen.insert($0.identifier).inserted }
+}()
 
 private func readBoundedFile(_ url: URL, maxBytes: Int) throws -> Data {
     let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
