@@ -966,14 +966,16 @@ final class ClientViewModel: ObservableObject {
             return
         }
         do {
-            let preparedPayload = try prepareAttachmentPayload(data: data, fileName: fileName, mimeType: mimeType)
+            var preparedPayload = try prepareAttachmentPayload(data: data, fileName: fileName, mimeType: mimeType)
+            defer { preparedPayload.data.secureWipe() }
             guard preparedPayload.data.count <= maxAttachmentBytes else {
                 throw AttachmentTransferError.attachmentTooLarge(maxBytes: maxAttachmentBytes)
             }
+            let preparedPayloadByteCount = preparedPayload.data.count
             let contact = normalizedContact(state.contacts[contactIndex], preferredRelay: state.relay)
             let metadataBucketSeconds = metadataBucketSeconds(for: contact.relay, preferredRelay: state.relay)
             try validateAttachmentQuota(
-                bytes: preparedPayload.data.count,
+                bytes: preparedPayloadByteCount,
                 contactId: contact.id,
                 relay: contact.relay,
                 direction: .outbound
@@ -1003,7 +1005,7 @@ final class ClientViewModel: ObservableObject {
             for chunkIndex in 0..<chunkCount {
                 let start = chunkIndex * chunkSize
                 let end = min(start + chunkSize, preparedPayload.data.count)
-                let chunk = preparedPayload.data.subdata(in: start..<end)
+                var chunk = preparedPayload.data.subdata(in: start..<end)
                 let authenticatedData = AttachmentCrypto.authenticatedData(
                     conversationId: conversation.id,
                     sessionId: sessionId,
@@ -1019,6 +1021,7 @@ final class ClientViewModel: ObservableObject {
                     chunkIndex: chunkIndex,
                     authenticatedData: authenticatedData
                 )
+                chunk.secureWipe()
                 let request = UploadAttachmentRequest(
                     attachmentId: attachmentId,
                     chunkIndex: chunkIndex,
@@ -1059,7 +1062,7 @@ final class ClientViewModel: ObservableObject {
             try await persistState()
             try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
             recordAttachmentQuotaUsage(
-                bytes: preparedPayload.data.count,
+                bytes: preparedPayloadByteCount,
                 contactId: contact.id,
                 relay: contact.relay,
                 direction: .outbound
@@ -1080,12 +1083,14 @@ final class ClientViewModel: ObservableObject {
             return
         }
         do {
-            let preparedPayload = try prepareAttachmentPayload(data: data, fileName: fileName, mimeType: mimeType)
+            var preparedPayload = try prepareAttachmentPayload(data: data, fileName: fileName, mimeType: mimeType)
+            defer { preparedPayload.data.secureWipe() }
             guard preparedPayload.data.count <= maxAttachmentBytes else {
                 throw AttachmentTransferError.attachmentTooLarge(maxBytes: maxAttachmentBytes)
             }
+            let preparedPayloadByteCount = preparedPayload.data.count
             try validateAttachmentQuota(
-                bytes: preparedPayload.data.count,
+                bytes: preparedPayloadByteCount,
                 contactId: group.id,
                 relay: state.relay,
                 direction: .outbound
@@ -1122,7 +1127,7 @@ final class ClientViewModel: ObservableObject {
             for chunkIndex in 0..<chunkCount {
                 let start = chunkIndex * chunkSize
                 let end = min(start + chunkSize, preparedPayload.data.count)
-                let chunk = preparedPayload.data.subdata(in: start..<end)
+                var chunk = preparedPayload.data.subdata(in: start..<end)
                 let authenticatedData = groupAttachmentAuthenticatedData(
                     groupId: group.id,
                     epoch: ratchetState.epoch,
@@ -1139,6 +1144,7 @@ final class ClientViewModel: ObservableObject {
                     chunkIndex: chunkIndex,
                     authenticatedData: authenticatedData
                 )
+                chunk.secureWipe()
                 let response = try await client.send(.uploadAttachment(UploadAttachmentRequest(
                     attachmentId: attachmentId,
                     chunkIndex: chunkIndex,
@@ -1182,7 +1188,7 @@ final class ClientViewModel: ObservableObject {
             )
             state.mergeUpsert(group: group)
             recordAttachmentQuotaUsage(
-                bytes: preparedPayload.data.count,
+                bytes: preparedPayloadByteCount,
                 contactId: group.id,
                 relay: state.relay,
                 direction: .outbound
@@ -3405,9 +3411,7 @@ final class ClientViewModel: ObservableObject {
         }
         if let message = conversation.messages.first(where: { $0.id == messageId }),
            let fileName = message.attachment?.localFileName {
-            decryptedAttachmentCache[fileName]?.wipe()
-            decryptedAttachmentCache.removeValue(forKey: fileName)
-            decryptedAttachmentScopes.removeValue(forKey: fileName)
+            purgeAttachmentDecryptionMemory(fileName: fileName)
             try? attachmentStore.deleteAttachment(fileName: fileName)
         }
         conversation.messages.removeAll { $0.id == messageId }
@@ -3440,9 +3444,7 @@ final class ClientViewModel: ObservableObject {
         }
         if let message = group.messages.first(where: { $0.id == messageId }),
            let fileName = message.attachment?.localFileName {
-            decryptedAttachmentCache[fileName]?.wipe()
-            decryptedAttachmentCache.removeValue(forKey: fileName)
-            decryptedAttachmentScopes.removeValue(forKey: fileName)
+            purgeAttachmentDecryptionMemory(fileName: fileName)
             try? attachmentStore.deleteAttachment(fileName: fileName)
         }
         group.messages.removeAll { $0.id == messageId }
@@ -4022,7 +4024,9 @@ final class ClientViewModel: ObservableObject {
     }
 
     func loadAttachmentData(fileName: String) async -> Data? {
-        if let cached = decryptedAttachmentCache[fileName] {
+        let scope = currentAttachmentCacheScope()
+        let cacheKey = attachmentCacheKey(fileName: fileName, scope: scope)
+        if let cached = decryptedAttachmentCache[cacheKey] {
             return cached.snapshot()
         }
         do {
@@ -4031,7 +4035,7 @@ final class ClientViewModel: ObservableObject {
             encrypted.secureWipe()
             let buffer = SecureRAMBuffer(copying: decrypted)
             decrypted.secureWipe()
-            cacheAttachmentBuffer(buffer, for: fileName, scope: currentAttachmentCacheScope())
+            cacheAttachmentBuffer(buffer, for: fileName, scope: scope)
             return buffer.snapshot()
         } catch {
             print("[client] Failed to load attachment: \(error)")
@@ -4087,11 +4091,12 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func cacheAttachmentBuffer(_ buffer: SecureRAMBuffer, for fileName: String, scope: AttachmentCacheScope) {
-        if let existing = decryptedAttachmentCache[fileName] {
+        let cacheKey = attachmentCacheKey(fileName: fileName, scope: scope)
+        if let existing = decryptedAttachmentCache[cacheKey] {
             existing.wipe()
         }
-        decryptedAttachmentCache[fileName] = buffer
-        decryptedAttachmentScopes[fileName] = scope
+        decryptedAttachmentCache[cacheKey] = buffer
+        decryptedAttachmentScopes[cacheKey] = scope
     }
 
     private func currentAttachmentCacheScope() -> AttachmentCacheScope {
@@ -4106,13 +4111,36 @@ final class ClientViewModel: ObservableObject {
 
     private func purgeAttachmentDecryptionMemory(scopes: Set<AttachmentCacheScope>) {
         guard !scopes.isEmpty else { return }
-        let fileNamesToPurge = decryptedAttachmentScopes.compactMap { fileName, scope in
-            scopes.contains(scope) ? fileName : nil
+        let cacheKeysToPurge = decryptedAttachmentScopes.compactMap { cacheKey, scope in
+            scopes.contains(scope) ? cacheKey : nil
         }
-        for fileName in fileNamesToPurge {
-            decryptedAttachmentCache[fileName]?.wipe()
-            decryptedAttachmentCache.removeValue(forKey: fileName)
-            decryptedAttachmentScopes.removeValue(forKey: fileName)
+        for cacheKey in cacheKeysToPurge {
+            decryptedAttachmentCache[cacheKey]?.wipe()
+            decryptedAttachmentCache.removeValue(forKey: cacheKey)
+            decryptedAttachmentScopes.removeValue(forKey: cacheKey)
+        }
+    }
+
+    private func purgeAttachmentDecryptionMemory(fileName: String) {
+        let cacheSuffix = "|\(fileName)"
+        let cacheKeysToPurge = decryptedAttachmentCache.keys.filter { cacheKey in
+            cacheKey == fileName || cacheKey.hasSuffix(cacheSuffix)
+        }
+        for cacheKey in cacheKeysToPurge {
+            decryptedAttachmentCache[cacheKey]?.wipe()
+            decryptedAttachmentCache.removeValue(forKey: cacheKey)
+            decryptedAttachmentScopes.removeValue(forKey: cacheKey)
+        }
+    }
+
+    private func attachmentCacheKey(fileName: String, scope: AttachmentCacheScope) -> String {
+        switch scope {
+        case .contact(let id):
+            return "contact:\(id.uuidString)|\(fileName)"
+        case .group(let id):
+            return "group:\(id.uuidString)|\(fileName)"
+        case .transient:
+            return "transient|\(fileName)"
         }
     }
 
@@ -4125,6 +4153,7 @@ final class ClientViewModel: ObservableObject {
         try validateInboundAttachmentDescriptor(descriptor)
         let client = relayClient(for: relay)
         var data = Data()
+        defer { data.secureWipe() }
         data.reserveCapacity(descriptor.byteCount)
         for chunkIndex in 0..<descriptor.chunkCount {
             let response = try await client.send(.fetchAttachment(FetchAttachmentRequest(
@@ -4146,13 +4175,14 @@ final class ClientViewModel: ObservableObject {
                 chunkIndex: chunkIndex,
                 byteCount: expectedCount
             )
-            let plaintext = try AttachmentCrypto.decryptChunk(
+            var plaintext = try AttachmentCrypto.decryptChunk(
                 payload: chunk.payload,
                 messageKey: messageKey,
                 attachmentId: descriptor.id,
                 chunkIndex: chunkIndex,
                 authenticatedData: authenticatedData
             )
+            defer { plaintext.secureWipe() }
             guard plaintext.count == expectedCount else {
                 throw AttachmentTransferError.invalidChunkSize
             }
@@ -4164,7 +4194,8 @@ final class ClientViewModel: ObservableObject {
         guard AttachmentCrypto.sha256(data) == descriptor.sha256 else {
             throw AttachmentTransferError.invalidChecksum
         }
-        let sanitized = try sanitizeDownloadedAttachmentPayload(data, descriptor: descriptor)
+        var sanitized = try sanitizeDownloadedAttachmentPayload(data, descriptor: descriptor)
+        defer { sanitized.secureWipe() }
         return try attachmentStore.saveAttachment(sanitized, descriptor: descriptor)
     }
 
@@ -4180,6 +4211,7 @@ final class ClientViewModel: ObservableObject {
         try validateInboundAttachmentDescriptor(descriptor)
         let client = relayClient(for: relay)
         var data = Data()
+        defer { data.secureWipe() }
         data.reserveCapacity(descriptor.byteCount)
         for chunkIndex in 0..<descriptor.chunkCount {
             let response = try await client.send(.fetchAttachment(FetchAttachmentRequest(
@@ -4202,13 +4234,14 @@ final class ClientViewModel: ObservableObject {
                 chunkIndex: chunkIndex,
                 byteCount: expectedCount
             )
-            let plaintext = try AttachmentCrypto.decryptChunk(
+            var plaintext = try AttachmentCrypto.decryptChunk(
                 payload: chunk.payload,
                 messageKey: messageKey,
                 attachmentId: descriptor.id,
                 chunkIndex: chunkIndex,
                 authenticatedData: authenticatedData
             )
+            defer { plaintext.secureWipe() }
             guard plaintext.count == expectedCount else {
                 throw AttachmentTransferError.invalidChunkSize
             }
@@ -4220,7 +4253,8 @@ final class ClientViewModel: ObservableObject {
         guard AttachmentCrypto.sha256(data) == descriptor.sha256 else {
             throw AttachmentTransferError.invalidChecksum
         }
-        let sanitized = try sanitizeDownloadedAttachmentPayload(data, descriptor: descriptor)
+        var sanitized = try sanitizeDownloadedAttachmentPayload(data, descriptor: descriptor)
+        defer { sanitized.secureWipe() }
         return try attachmentStore.saveAttachment(sanitized, descriptor: descriptor)
     }
 
@@ -7915,9 +7949,7 @@ final class ClientViewModel: ObservableObject {
     private func removeAttachmentFiles(from messages: [Message]) {
         for message in messages {
             if let fileName = message.attachment?.localFileName {
-                decryptedAttachmentCache[fileName]?.wipe()
-                decryptedAttachmentCache.removeValue(forKey: fileName)
-                decryptedAttachmentScopes.removeValue(forKey: fileName)
+                purgeAttachmentDecryptionMemory(fileName: fileName)
                 try? attachmentStore.deleteAttachment(fileName: fileName)
             }
         }

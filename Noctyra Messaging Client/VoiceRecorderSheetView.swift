@@ -161,20 +161,37 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
         }
 
         #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        switch session.recordPermission {
-        case .granted:
-            permission = .granted
-        case .denied:
-            permission = .denied
-        case .undetermined:
-            session.requestRecordPermission { allowed in
-                Task { @MainActor in
-                    self.permission = allowed ? .granted : .denied
+        if #available(iOS 17.0, *) {
+            switch AVAudioApplication.shared.recordPermission {
+            case .granted:
+                permission = .granted
+            case .denied:
+                permission = .denied
+            case .undetermined:
+                AVAudioApplication.requestRecordPermission { allowed in
+                    Task { @MainActor in
+                        self.permission = allowed ? .granted : .denied
+                    }
                 }
+            @unknown default:
+                permission = .denied
             }
-        @unknown default:
-            permission = .denied
+        } else {
+            let session = AVAudioSession.sharedInstance()
+            switch session.recordPermission {
+            case .granted:
+                permission = .granted
+            case .denied:
+                permission = .denied
+            case .undetermined:
+                session.requestRecordPermission { allowed in
+                    Task { @MainActor in
+                        self.permission = allowed ? .granted : .denied
+                    }
+                }
+            @unknown default:
+                permission = .denied
+            }
         }
         #else
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -210,6 +227,8 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
             throw VoiceRecorderError.noRecording
         }
         let data = try Data(contentsOf: url)
+        try? FileManager.default.removeItem(at: url)
+        recordingURL = nil
         return (data, "voice.m4a", "audio/m4a")
     }
 

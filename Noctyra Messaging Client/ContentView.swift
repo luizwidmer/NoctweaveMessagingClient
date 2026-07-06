@@ -2177,8 +2177,10 @@ private struct ConversationView: View {
             VoiceRecorderSheetView(
                 onRecorded: { data, fileName, mimeType in
                     Task {
+                        var recordingData = data
+                        defer { recordingData.secureWipe() }
                         await model.sendAttachment(
-                            data: data,
+                            data: recordingData,
                             fileName: fileName,
                             mimeType: mimeType,
                             to: contact.id
@@ -2840,8 +2842,10 @@ private struct GroupConversationView: View {
             VoiceRecorderSheetView(
                 onRecorded: { data, fileName, mimeType in
                     Task {
+                        var recordingData = data
+                        defer { recordingData.secureWipe() }
                         await model.sendGroupAttachment(
-                            data: data,
+                            data: recordingData,
                             fileName: fileName,
                             mimeType: mimeType,
                             to: group.id
@@ -12584,7 +12588,7 @@ private func readBoundedFile(_ url: URL, maxBytes: Int) throws -> Data {
           fileSize <= maxBytes else {
         throw CocoaError(.fileReadTooLarge)
     }
-    let data = try Data(contentsOf: url, options: .mappedIfSafe)
+    let data = try Data(contentsOf: url)
     guard data.count <= maxBytes else {
         throw CocoaError(.fileReadTooLarge)
     }
