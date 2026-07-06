@@ -109,6 +109,9 @@ final class ClientViewModel: ObservableObject {
     private var attachmentStore: AttachmentStore
     private var threadMessageStore: ThreadMessageStore
     private let ciphertextPrefetchStore: CiphertextPrefetchStore
+    private var isPersistingState = false
+    private var pendingStatePersistRequested = false
+    private var statePersistenceWaiters: [CheckedContinuation<Void, Error>] = []
     private let notifier = NotificationManager()
     private var autoFetchTask: Task<Void, Never>?
     private var sessionResetCooldown = SessionRecovery.Cooldown(interval: 30)
@@ -626,6 +629,50 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func persistState() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            statePersistenceWaiters.append(continuation)
+            pendingStatePersistRequested = true
+
+            guard !isPersistingState else {
+                return
+            }
+
+            isPersistingState = true
+            Task { @MainActor in
+                await drainStatePersistenceQueue()
+            }
+        }
+    }
+
+    private func drainStatePersistenceQueue() async {
+        var completion: Result<Void, Error> = .success(())
+
+        while pendingStatePersistRequested {
+            pendingStatePersistRequested = false
+            do {
+                try await persistCurrentStateSnapshot()
+            } catch {
+                completion = .failure(error)
+                pendingStatePersistRequested = false
+                break
+            }
+        }
+
+        let waiters = statePersistenceWaiters
+        statePersistenceWaiters.removeAll()
+        isPersistingState = false
+
+        for waiter in waiters {
+            switch completion {
+            case .success:
+                waiter.resume()
+            case .failure(let error):
+                waiter.resume(throwing: error)
+            }
+        }
+    }
+
+    private func persistCurrentStateSnapshot() async throws {
         try persistAllThreadMessagesFromState(state)
         let sanitized = strippedStateForPersistence(state)
         try await store.save(sanitized)
