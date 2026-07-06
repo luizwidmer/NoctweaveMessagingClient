@@ -998,7 +998,7 @@ final class ClientViewModel: ObservableObject {
             try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
             lastInfo = "Sent message to \(contact.displayName)."
         } catch {
-            lastError = "Failed to send message: \(error.localizedDescription)"
+            lastError = "Failed to send message: \(safeActionErrorDescription(error, fallback: "Message could not be prepared locally."))"
         }
     }
 
@@ -1116,7 +1116,7 @@ final class ClientViewModel: ObservableObject {
             )
             lastInfo = "Sent attachment to \(contact.displayName)."
         } catch {
-            lastError = "Failed to send attachment: \(error.localizedDescription)"
+            lastError = "Failed to send attachment: \(safeActionErrorDescription(error, fallback: "Attachment could not be prepared locally."))"
         }
     }
 
@@ -1243,7 +1243,7 @@ final class ClientViewModel: ObservableObject {
             try await persistState()
             lastInfo = "Sent group attachment."
         } catch {
-            lastError = "Failed to send group attachment: \(error.localizedDescription)"
+            lastError = "Failed to send group attachment: \(safeActionErrorDescription(error, fallback: "Group attachment could not be prepared locally."))"
         }
     }
 
@@ -1711,8 +1711,9 @@ final class ClientViewModel: ObservableObject {
             profileSyncStatus[profileId] = .success(Date())
             recordWakeSyncSuccess(for: profileId)
         } catch {
-            lastError = "Failed to fetch messages: \(error.localizedDescription)"
-            profileSyncStatus[profileId] = .error(Date(), error.localizedDescription)
+            let reason = safeActionErrorDescription(error, fallback: "Message sync failed.")
+            lastError = "Failed to fetch messages: \(reason)"
+            profileSyncStatus[profileId] = .error(Date(), reason)
             recordWakeSyncFailure(for: profileId)
         }
     }
@@ -2764,7 +2765,7 @@ final class ClientViewModel: ObservableObject {
                 scopedIdentity: scopedIdentity
             )
         } catch {
-            lastError = "Failed to create relay group: \(error.localizedDescription)"
+            lastError = "Failed to create relay group: \(safeActionErrorDescription(error, fallback: "Group could not be created locally."))"
             return
         }
 
@@ -2873,7 +2874,7 @@ final class ClientViewModel: ObservableObject {
                 lastInfo = "Updated relay-backed group \(group.title)."
                 return
             } catch {
-                lastError = "Failed to update relay group: \(error.localizedDescription)"
+                lastError = "Failed to update relay group: \(safeActionErrorDescription(error, fallback: "Group could not be updated locally."))"
                 return
             }
         }
@@ -2938,7 +2939,7 @@ final class ClientViewModel: ObservableObject {
                     publicSigningKey: actorCredential.publicSigningKey
                 )
             } catch {
-                lastError = "Failed to leave relay-backed group: \(error.localizedDescription)"
+                lastError = "Failed to leave relay-backed group: \(safeActionErrorDescription(error, fallback: "Group leave could not be completed locally."))"
                 return
             }
 
@@ -2959,7 +2960,7 @@ final class ClientViewModel: ObservableObject {
                         actorSigningKey: creatorCredential.signingKey
                     )
                 } catch {
-                    lastError = "Failed to extinguish relay-backed group: \(error.localizedDescription)"
+                    lastError = "Failed to extinguish relay-backed group: \(safeActionErrorDescription(error, fallback: "Group deletion could not be completed locally."))"
                     return
                 }
             } else if let descriptor {
@@ -3116,7 +3117,7 @@ final class ClientViewModel: ObservableObject {
             await syncRelayGroups(for: state.activeIdentityId)
             lastInfo = "Removed member from \(group.title)."
         } catch {
-            lastError = "Failed to remove group member: \(error.localizedDescription)"
+            lastError = "Failed to remove group member: \(safeActionErrorDescription(error, fallback: "Group member could not be removed locally."))"
         }
     }
 
@@ -3270,7 +3271,7 @@ final class ClientViewModel: ObservableObject {
                 ? "Sent group invitation."
                 : "Sent \(inviteFingerprints.count) group invitations."
         } catch {
-            lastError = "Failed to invite group members: \(error.localizedDescription)"
+            lastError = "Failed to invite group members: \(safeActionErrorDescription(error, fallback: "Group invitations could not be prepared locally."))"
         }
     }
 
@@ -3281,7 +3282,7 @@ final class ClientViewModel: ObservableObject {
             await save()
             lastInfo = "Join request sent."
         } catch {
-            lastError = "Failed to request join: \(error.localizedDescription)"
+            lastError = "Failed to request join: \(safeActionErrorDescription(error, fallback: "Join request could not be prepared locally."))"
         }
     }
 
@@ -3290,7 +3291,7 @@ final class ClientViewModel: ObservableObject {
             let requests = try await listRelayGroupJoinRequests(groupId: groupId)
             pendingGroupJoinRequests[groupId] = requests
         } catch {
-            lastError = "Failed to fetch join requests: \(error.localizedDescription)"
+            lastError = "Failed to fetch join requests: \(safeActionErrorDescription(error, fallback: "Join requests could not be loaded locally."))"
         }
     }
 
@@ -3302,7 +3303,7 @@ final class ClientViewModel: ObservableObject {
             pendingGroupJoinRequests[groupId] = requests
             lastInfo = "Join request approved."
         } catch {
-            lastError = "Failed to approve join request: \(error.localizedDescription)"
+            lastError = "Failed to approve join request: \(safeActionErrorDescription(error, fallback: "Join request could not be approved locally."))"
         }
     }
 
@@ -3313,7 +3314,7 @@ final class ClientViewModel: ObservableObject {
             pendingGroupJoinRequests[groupId] = requests
             lastInfo = "Join request rejected."
         } catch {
-            lastError = "Failed to reject join request: \(error.localizedDescription)"
+            lastError = "Failed to reject join request: \(safeActionErrorDescription(error, fallback: "Join request could not be rejected locally."))"
         }
     }
 
@@ -3344,7 +3345,7 @@ final class ClientViewModel: ObservableObject {
         do {
             try await sendRelayGroupRatchetMessage(trimmed, group: group)
         } catch {
-            lastError = "Failed to send group message: \(error.localizedDescription)"
+            lastError = "Failed to send group message: \(safeActionErrorDescription(error, fallback: "Group message could not be prepared locally."))"
         }
     }
 
@@ -4891,6 +4892,14 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func redactedRelayErrorDescription(_ error: Error) -> String {
+        redactedRelayErrorDescriptionIfRelay(error) ?? "Relay connection failed."
+    }
+
+    private func safeActionErrorDescription(_ error: Error, fallback: String) -> String {
+        redactedRelayErrorDescriptionIfRelay(error) ?? fallback
+    }
+
+    private func redactedRelayErrorDescriptionIfRelay(_ error: Error) -> String? {
         if let urlError = error as? URLError {
             switch urlError.code {
             case .timedOut:
@@ -4906,6 +4915,26 @@ final class ClientViewModel: ObservableObject {
             }
         }
 
+        if let mailboxError = error as? RelayMailboxError {
+            switch mailboxError {
+            case .rejected(let message):
+                return redactedRelayRejectionMessage(message)
+            }
+        }
+
+        if let registryError = error as? RelayGroupRegistryError {
+            switch registryError {
+            case .rejected(let message):
+                return redactedRelayRejectionMessage(message)
+            case .invalidResponse:
+                return "Relay returned an invalid payload."
+            }
+        }
+
+        if case RelayInfoError.missing = error {
+            return "Relay did not report its configuration."
+        }
+
         let description = error.localizedDescription
         if description.hasPrefix("Relay returned HTTP ")
             || description.hasPrefix("Cloudflare blocked relay traffic")
@@ -4915,7 +4944,30 @@ final class ClientViewModel: ObservableObject {
             || description == "Relay returned an invalid payload." {
             return description
         }
-        return "Relay connection failed."
+        return nil
+    }
+
+    private func redactedRelayRejectionMessage(_ message: String) -> String {
+        let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else {
+            return "Relay rejected the request."
+        }
+        if normalized.contains("auth") || normalized.contains("token") || normalized.contains("proof") || normalized.contains("signature") || normalized.contains("forbidden") || normalized.contains("unauthorized") {
+            return "Relay rejected authentication."
+        }
+        if normalized.contains("rate") || normalized.contains("limit") {
+            return "Relay rate limit reached."
+        }
+        if normalized.contains("policy") || normalized.contains("not allowed") || normalized.contains("disabled") {
+            return "Relay policy rejected the request."
+        }
+        if normalized.contains("not found") || normalized.contains("missing") {
+            return "Relay could not find the requested item."
+        }
+        if normalized.contains("invalid") || normalized.contains("malformed") || normalized.contains("bad request") {
+            return "Relay rejected an invalid request."
+        }
+        return "Relay rejected the request."
     }
 
     private func makeActorProof(
