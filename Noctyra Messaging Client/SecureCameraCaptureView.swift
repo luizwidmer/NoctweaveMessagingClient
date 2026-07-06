@@ -196,7 +196,7 @@ private final class SecureCameraViewController: UIViewController, AVCapturePhoto
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.onError("Camera input error: \(error.localizedDescription)")
+                    self.onError("Unable to initialize the camera input.")
                 }
                 self.captureSession.commitConfiguration()
                 return
@@ -232,9 +232,9 @@ private final class SecureCameraViewController: UIViewController, AVCapturePhoto
         didFinishProcessingPhoto photo: AVCapturePhoto,
         error: Error?
     ) {
-        if let error {
+        if error != nil {
             DispatchQueue.main.async {
-                self.onError("Capture failed: \(error.localizedDescription)")
+                self.onError("Capture failed. Try again.")
             }
             return
         }

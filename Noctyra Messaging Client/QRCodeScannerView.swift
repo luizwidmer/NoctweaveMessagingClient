@@ -212,7 +212,7 @@ private final class Coordinator: NSObject, AVCaptureMetadataOutputObjectsDelegat
                 return
             }
         } catch {
-            reportError("Camera error: \(error.localizedDescription)")
+            reportError("Unable to initialize the camera input.")
             return
         }
 
