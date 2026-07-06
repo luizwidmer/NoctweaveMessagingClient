@@ -981,11 +981,11 @@ private struct ChatsListView: View {
     let onAddGroup: () -> Void
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     @State private var searchText = ""
-    @AppStorage("noctyra.chat.sortMode.v1") private var sortModeRaw = ChatSortMode.unread.rawValue
-    @AppStorage("noctyra.chat.pinnedContacts.v1") private var pinnedContactsRaw = ""
-    @AppStorage("noctyra.chat.pinnedGroups.v1") private var pinnedGroupsRaw = ""
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
+    private static let legacySortModeKey = "noctyra.chat.sortMode.v1"
+    private static let legacyPinnedContactsKey = "noctyra.chat.pinnedContacts.v1"
+    private static let legacyPinnedGroupsKey = "noctyra.chat.pinnedGroups.v1"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -998,7 +998,7 @@ private struct ChatsListView: View {
                             Section("Sort") {
                                 ForEach(ChatSortMode.allCases) { mode in
                                     Button {
-                                        sortModeRaw = mode.rawValue
+                                        Task { await model.updateChatListSortMode(mode.rawValue) }
                                     } label: {
                                         if sortMode == mode {
                                             Label(mode.title, systemImage: "checkmark")
@@ -1010,7 +1010,7 @@ private struct ChatsListView: View {
                             }
                             Section {
                                 Button("Clear All Pins", role: .destructive) {
-                                    clearAllPins()
+                                    Task { await clearAllPins() }
                                 }
                                 .disabled(pinnedContactIds.isEmpty && pinnedGroupIds.isEmpty)
                             }
@@ -1142,6 +1142,9 @@ private struct ChatsListView: View {
         }
         .glassBackgroundIfNeeded()
         .toolbar(.hidden, for: .navigationBar)
+        .onAppear {
+            scrubLegacyChatListDefaults()
+        }
     }
 
     private var hasActiveSearch: Bool {
@@ -1264,15 +1267,15 @@ private struct ChatsListView: View {
     }
 
     private var sortMode: ChatSortMode {
-        ChatSortMode(rawValue: sortModeRaw) ?? .unread
+        ChatSortMode(rawValue: model.state.chatList.sortModeRaw) ?? .unread
     }
 
     private var pinnedContactIds: Set<UUID> {
-        Self.decodePinnedIDs(from: pinnedContactsRaw)
+        Set(model.state.chatList.pinnedContactIds)
     }
 
     private var pinnedGroupIds: Set<UUID> {
-        Self.decodePinnedIDs(from: pinnedGroupsRaw)
+        Set(model.state.chatList.pinnedGroupIds)
     }
 
     private var filteredGroups: [GroupConversation] {
@@ -1382,7 +1385,7 @@ private struct ChatsListView: View {
         } else {
             ids.insert(id)
         }
-        pinnedContactsRaw = Self.encodePinnedIDs(ids)
+        Task { await model.setPinnedContactIds(ids) }
         FeedbackGenerator.light()
     }
 
@@ -1393,14 +1396,20 @@ private struct ChatsListView: View {
         } else {
             ids.insert(id)
         }
-        pinnedGroupsRaw = Self.encodePinnedIDs(ids)
+        Task { await model.setPinnedGroupIds(ids) }
         FeedbackGenerator.light()
     }
 
-    private func clearAllPins() {
-        pinnedContactsRaw = ""
-        pinnedGroupsRaw = ""
+    private func clearAllPins() async {
+        await model.clearChatListPins()
         FeedbackGenerator.light()
+    }
+
+    private func scrubLegacyChatListDefaults() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: Self.legacySortModeKey)
+        defaults.removeObject(forKey: Self.legacyPinnedContactsKey)
+        defaults.removeObject(forKey: Self.legacyPinnedGroupsKey)
     }
 
     private func lastGroupTimestamp(for group: GroupConversation) -> Date? {
@@ -1437,19 +1446,6 @@ private struct ChatsListView: View {
         return formatter
     }()
 
-    private static func decodePinnedIDs(from raw: String) -> Set<UUID> {
-        Set(
-            raw.split(separator: ",")
-                .compactMap { UUID(uuidString: String($0)) }
-        )
-    }
-
-    private static func encodePinnedIDs(_ ids: Set<UUID>) -> String {
-        ids
-            .map(\.uuidString)
-            .sorted()
-            .joined(separator: ",")
-    }
 }
 
 private struct ContactBookTabView: View {

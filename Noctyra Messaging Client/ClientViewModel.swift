@@ -2380,6 +2380,27 @@ final class ClientViewModel: ObservableObject {
         await save()
     }
 
+    func updateChatListSortMode(_ rawValue: String) async {
+        state.chatList.sortModeRaw = rawValue
+        await save()
+    }
+
+    func setPinnedContactIds(_ ids: Set<UUID>) async {
+        state.chatList.pinnedContactIds = ids.sorted { $0.uuidString < $1.uuidString }
+        await save()
+    }
+
+    func setPinnedGroupIds(_ ids: Set<UUID>) async {
+        state.chatList.pinnedGroupIds = ids.sorted { $0.uuidString < $1.uuidString }
+        await save()
+    }
+
+    func clearChatListPins() async {
+        state.chatList.pinnedContactIds = []
+        state.chatList.pinnedGroupIds = []
+        await save()
+    }
+
     func updatePrivacy(_ settings: PrivacySettings) async {
         state.privacy = settings
         await save()
