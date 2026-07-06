@@ -17,7 +17,7 @@ final class AttachmentStore {
 
     func saveAttachment(_ data: Data, descriptor: AttachmentDescriptor) throws -> String {
         let fileName = "\(descriptor.id.uuidString).bin"
-        let url = directory.appendingPathComponent(fileName)
+        let url = try attachmentURL(fileName: fileName)
         let payload = try encryptIfNeeded(data)
         try writeData(payload, to: url)
         return fileName
@@ -29,7 +29,7 @@ final class AttachmentStore {
     }
 
     func loadEncryptedAttachment(fileName: String) throws -> Data {
-        let url = directory.appendingPathComponent(fileName)
+        let url = try attachmentURL(fileName: fileName)
         return try Data(contentsOf: url)
     }
 
@@ -38,7 +38,7 @@ final class AttachmentStore {
     }
 
     func deleteAttachment(fileName: String) throws {
-        let url = directory.appendingPathComponent(fileName)
+        let url = try attachmentURL(fileName: fileName)
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
@@ -91,6 +91,17 @@ final class AttachmentStore {
         applyPrivacyAttributes(url: url)
     }
 
+    private func attachmentURL(fileName: String) throws -> URL {
+        let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed == (trimmed as NSString).lastPathComponent,
+              trimmed.hasSuffix(".bin"),
+              UUID(uuidString: String(trimmed.dropLast(4))) != nil else {
+            throw AttachmentStoreError.invalidFileName
+        }
+        return directory.appendingPathComponent(trimmed, isDirectory: false)
+    }
+
     private func applyPrivacyAttributes(url: URL) {
         do {
             var values = URLResourceValues()
@@ -111,6 +122,7 @@ private struct AttachmentEnvelope: Codable {
 
 private enum AttachmentStoreError: Error {
     case encryptionFailed
+    case invalidFileName
     case unexpectedPlaintextInEncryptedMode
 }
 
