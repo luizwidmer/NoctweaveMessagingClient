@@ -789,7 +789,7 @@ final class ClientViewModel: ObservableObject {
                 return try ContactOfferCode.encode(offer)
             }.value
         } catch {
-            lastError = "Failed to encode contact offer: \(error.localizedDescription)"
+            lastError = "Failed to encode contact offer: Contact code could not be prepared."
             return ""
         }
     }
@@ -806,7 +806,7 @@ final class ClientViewModel: ObservableObject {
                 try ContactShare.encode(offer, password: password)
             }.value
         } catch {
-            lastError = "Failed to create contact share file: \(error.localizedDescription)"
+            lastError = "Failed to create contact share file: \(safeStorageErrorDescription(error, fallback: "Contact share could not be prepared."))"
             return nil
         }
     }
@@ -829,7 +829,7 @@ final class ClientViewModel: ObservableObject {
             try await persistState()
             lastInfo = wasKnown ? "Updated \(contact.displayName)." : "Added \(contact.displayName)."
         } catch {
-            lastError = "Failed to add contact: \(error.localizedDescription)"
+            lastError = "Failed to add contact: Contact code could not be verified."
         }
     }
 
@@ -853,7 +853,7 @@ final class ClientViewModel: ObservableObject {
             try await persistState()
             lastInfo = wasKnown ? "Updated \(contact.displayName)." : "Added \(contact.displayName)."
         } catch {
-            lastError = "Failed to import contact: \(error.localizedDescription)"
+            lastError = "Failed to import contact: Contact share could not be verified."
         }
     }
 
@@ -942,7 +942,7 @@ final class ClientViewModel: ObservableObject {
         do {
             return try MessageEngine.createRootRatchet(contact: contact, conversation: conversation)
         } catch {
-            lastError = "Failed to start root ratchet: \(error.localizedDescription)"
+            lastError = "Failed to start root ratchet: Secure session recovery could not be prepared."
             return nil
         }
     }
@@ -1507,7 +1507,7 @@ final class ClientViewModel: ObservableObject {
                             }
                         } catch {
                             localFileName = nil
-                            lastError = "Attachment download failed: \(error.localizedDescription)"
+                            lastError = "Attachment download failed: \(safeAttachmentTransferErrorDescription(error, fallback: "Attachment could not be downloaded."))"
                         }
                         let title = attachmentDisplayTitle(descriptor, fallback: "Attachment received")
                         let message = Message(
@@ -1619,7 +1619,7 @@ final class ClientViewModel: ObservableObject {
                                 conversation: &conversation
                             )
                         } catch {
-                            lastError = "Failed to apply root ratchet: \(error.localizedDescription)"
+                            lastError = "Failed to apply root ratchet: Secure session recovery could not be applied."
                         }
                     }
                     contact = normalizedContact(contact, preferredRelay: profile.relay)
@@ -1642,7 +1642,7 @@ final class ClientViewModel: ObservableObject {
                             acknowledgedEnvelopeIds.insert(envelope.id)
                             continue
                         } catch {
-                            lastError = "Failed to apply root ratchet: \(error.localizedDescription)"
+                            lastError = "Failed to apply root ratchet: Secure session recovery could not be applied."
                         }
                     }
                     switch RatchetRecoveryPolicy.decision(for: error) {
@@ -1662,7 +1662,7 @@ final class ClientViewModel: ObservableObject {
                         acknowledgedEnvelopeIds.insert(envelope.id)
                         continue
                     case .retryLater:
-                        lastError = "Failed to process envelope: \(error.localizedDescription)"
+                        lastError = "Failed to process envelope: Secure message state is not ready yet."
                     }
                 }
             }
@@ -1883,7 +1883,7 @@ final class ClientViewModel: ObservableObject {
                             }
                         } catch {
                             localFileName = nil
-                            lastError = "Group attachment download failed: \(error.localizedDescription)"
+                            lastError = "Group attachment download failed: \(safeAttachmentTransferErrorDescription(error, fallback: "Group attachment could not be downloaded."))"
                         }
                         let title = attachmentDisplayTitle(descriptor, fallback: "Attachment received")
                         group.messages.append(
@@ -2070,7 +2070,7 @@ final class ClientViewModel: ObservableObject {
                 lastError = "Rotated keys, but delivery failed for: \(failedContacts.joined(separator: ", "))."
             }
         } catch {
-            lastError = "Failed to rotate keys: \(error.localizedDescription)"
+            lastError = "Failed to rotate keys: Key rotation could not be completed."
         }
     }
 
@@ -2182,7 +2182,7 @@ final class ClientViewModel: ObservableObject {
                 rebuiltConversations.append(merged)
                 updatedContacts.append(contact)
             } catch {
-                lastError = "Failed to notify \(contact.displayName): \(error.localizedDescription)"
+                lastError = "Failed to notify \(contact.displayName): \(safeActionErrorDescription(error, fallback: "Identity update could not be prepared locally."))"
             }
         }
 
@@ -3026,7 +3026,7 @@ final class ClientViewModel: ObservableObject {
                         )
                         removedAnyMembership = true
                     } catch {
-                        lastMembershipError = error.localizedDescription
+                        lastMembershipError = safeActionErrorDescription(error, fallback: "Group leave could not be completed locally.")
                     }
                 }
 
@@ -3090,7 +3090,7 @@ final class ClientViewModel: ObservableObject {
                 await save()
                 lastInfo = "Renamed group \(group.title)."
             } catch {
-                lastError = "Failed to rename relay group: \(error.localizedDescription)"
+                lastError = "Failed to rename relay group: \(safeActionErrorDescription(error, fallback: "Group could not be renamed locally."))"
             }
             return
         }
@@ -3173,7 +3173,7 @@ final class ClientViewModel: ObservableObject {
             await save()
             lastInfo = "Joined \(group.title)."
         } catch {
-            lastError = "Failed to accept group invitation: \(error.localizedDescription)"
+            lastError = "Failed to accept group invitation: \(safeActionErrorDescription(error, fallback: "Group invitation could not be accepted locally."))"
         }
     }
 
@@ -3356,7 +3356,7 @@ final class ClientViewModel: ObservableObject {
         do {
             _ = try await makeGroupAuthenticatedContext(forSending: &group)
         } catch {
-            lastError = "Failed to prepare group security context: \(error.localizedDescription)"
+            lastError = "Failed to prepare group security context: Group security state could not be prepared."
             return
         }
         guard group.relayInboxId != nil, group.groupRatchetState != nil else {
@@ -3843,7 +3843,7 @@ final class ClientViewModel: ObservableObject {
             let announceResponse = try await relayClient(for: relay)
                 .send(.announce(AnnounceRequest(offer: offer, ttlSeconds: 120)))
             if announceResponse.type == .error, let error = announceResponse.error {
-                throw InsecureSelfTestFailure(message: "Announce error: \(error)")
+                throw InsecureSelfTestFailure(message: "Announce error: \(redactedRelayRejectionMessage(error))")
             }
             guard announceResponse.type == .announcements,
                   let announced = announceResponse.announcements,
@@ -3856,7 +3856,7 @@ final class ClientViewModel: ObservableObject {
             let listResponse = try await relayClient(for: relay)
                 .send(.listAnnouncements(ListAnnouncementsRequest(limit: 50)))
             if listResponse.type == .error, let error = listResponse.error {
-                throw InsecureSelfTestFailure(message: "List error: \(error)")
+                throw InsecureSelfTestFailure(message: "List error: \(redactedRelayRejectionMessage(error))")
             }
             guard listResponse.type == .announcements else {
                 throw InsecureSelfTestFailure(message: "List failed with \(listResponse.type).")
@@ -3874,9 +3874,9 @@ final class ClientViewModel: ObservableObject {
                 .send(.sendPairRequest(try makeSendPairRequest(
                     targetFingerprint: state.identity.fingerprint,
                     offer: offer
-                )))
+            )))
             if pairResponse.type == .error, let error = pairResponse.error {
-                throw InsecureSelfTestFailure(message: "Pair request error: \(error)")
+                throw InsecureSelfTestFailure(message: "Pair request error: \(redactedRelayRejectionMessage(error))")
             }
             guard pairResponse.type == .ok else {
                 throw InsecureSelfTestFailure(message: "Pair request failed with \(pairResponse.type).")
@@ -3887,7 +3887,7 @@ final class ClientViewModel: ObservableObject {
             let fetchResponse = try await relayClient(for: relay)
                 .send(.fetchPairRequests(fetchRequest))
             if fetchResponse.type == .error, let error = fetchResponse.error {
-                throw InsecureSelfTestFailure(message: "Fetch error: \(error)")
+                throw InsecureSelfTestFailure(message: "Fetch error: \(redactedRelayRejectionMessage(error))")
             }
             guard fetchResponse.type == .pairRequests else {
                 throw InsecureSelfTestFailure(message: "Fetch failed with \(fetchResponse.type).")
@@ -3905,7 +3905,7 @@ final class ClientViewModel: ObservableObject {
             insecureSelfTestStep = nil
             insecureSelfTestToken = nil
         } catch {
-            let message = "Self-test failed: \(error.localizedDescription)"
+            let message = "Self-test failed: \(safePairingSelfTestErrorDescription(error))"
             lastError = message
             insecureLastError = message
             insecureLastSelfTestResult = message
@@ -3958,19 +3958,15 @@ final class ClientViewModel: ObservableObject {
             )
             let response = try await relayClient(for: relay).send(.sendPairRequest(request))
             if response.type == .error, let error = response.error {
-                throw NSError(domain: "Noctyra.InsecurePairing", code: 1, userInfo: [NSLocalizedDescriptionKey: error])
+                throw RelayMailboxError.rejected(error)
             }
             guard response.type == .ok else {
-                throw NSError(
-                    domain: "Noctyra.InsecurePairing",
-                    code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Relay rejected pair request (\(response.type))."]
-                )
+                throw RelayMailboxError.rejected("Relay rejected pair request.")
             }
             pendingOutboundPairRequestFingerprints.insert(announcement.offer.fingerprint)
             lastInfo = "Pairing request sent to \(announcement.offer.displayName)."
         } catch {
-            lastError = "Failed to send pairing request: \(error.localizedDescription)"
+            lastError = "Failed to send pairing request: \(safeActionErrorDescription(error, fallback: "Pairing request could not be prepared locally."))"
         }
     }
 
@@ -4015,7 +4011,7 @@ final class ClientViewModel: ObservableObject {
             contact = try validatedContact(from: request.from)
         } catch {
             insecureRequests.removeAll { $0.id == request.id }
-            lastError = "Rejected pairing request: \(error.localizedDescription)"
+            lastError = "Rejected pairing request: Contact offer could not be verified."
             insecureLastError = lastError
             return
         }
@@ -4050,12 +4046,12 @@ final class ClientViewModel: ObservableObject {
                 )
                 let response = try await relayClient(for: relay).send(.sendPairRequest(requestPayload))
                 if response.type == .error {
-                    reciprocalError = response.error ?? "Relay rejected reciprocal pairing request."
+                    reciprocalError = redactedRelayRejectionMessage(response.error ?? "")
                 } else if response.type != .ok {
-                    reciprocalError = "Relay rejected reciprocal pairing request (\(response.type))."
+                    reciprocalError = "Relay rejected reciprocal pairing request."
                 }
             } catch {
-                reciprocalError = error.localizedDescription
+                reciprocalError = safeActionErrorDescription(error, fallback: "Reciprocal pairing request could not be prepared locally.")
             }
         }
 
@@ -4088,7 +4084,7 @@ final class ClientViewModel: ObservableObject {
             state.upsert(conversation: rebuilt)
             await save()
         } catch {
-            lastError = "Retry failed: \(error.localizedDescription)"
+            lastError = "Retry failed: \(safeActionErrorDescription(error, fallback: "Retry could not be prepared locally."))"
         }
     }
 
@@ -4138,7 +4134,7 @@ final class ClientViewModel: ObservableObject {
             await save()
             return fileName
         } catch {
-            lastError = "Attachment download failed: \(error.localizedDescription)"
+            lastError = "Attachment download failed: \(safeAttachmentTransferErrorDescription(error, fallback: "Attachment could not be downloaded."))"
             return nil
         }
     }
@@ -4572,7 +4568,7 @@ final class ClientViewModel: ObservableObject {
             await save()
             lastInfo = "Fetched \(records.count) servers from \(source.name)."
         } catch {
-            lastError = "Failed to fetch master servers: \(error.localizedDescription)"
+            lastError = "Failed to fetch master servers: \(safeMasterSourceErrorDescription(error))"
         }
     }
 
@@ -4918,6 +4914,63 @@ final class ClientViewModel: ObservableObject {
 
     private func safeActionErrorDescription(_ error: Error, fallback: String) -> String {
         redactedRelayErrorDescriptionIfRelay(error) ?? fallback
+    }
+
+    private func safePairingSelfTestErrorDescription(_ error: Error) -> String {
+        if let failure = error as? InsecureSelfTestFailure {
+            return failure.message
+        }
+        return redactedRelayErrorDescription(error)
+    }
+
+    private func safeAttachmentTransferErrorDescription(_ error: Error, fallback: String) -> String {
+        if let relayDescription = redactedRelayErrorDescriptionIfRelay(error) {
+            return relayDescription
+        }
+        if let attachmentError = error as? AttachmentTransferError {
+            switch attachmentError {
+            case .invalidDescriptor:
+                return "Invalid attachment descriptor."
+            case .missingChunk:
+                return "Attachment data is incomplete."
+            case .invalidChunkSize, .invalidSize, .invalidChecksum:
+                return "Attachment integrity check failed."
+            case .unsupportedType:
+                return "Unsupported attachment type."
+            case .imageProcessingFailed:
+                return "Failed to process image securely."
+            case .attachmentTooLarge(let maxBytes):
+                let formatter = ByteCountFormatter()
+                formatter.countStyle = .file
+                return "Attachment exceeds size limit (\(formatter.string(fromByteCount: Int64(maxBytes))))."
+            case .quotaExceeded(let message):
+                return message
+            case .uploadFailed:
+                return "Attachment transfer failed."
+            }
+        }
+        return safeStorageErrorDescription(error, fallback: fallback)
+    }
+
+    private func safeMasterSourceErrorDescription(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut:
+                return "Master source request timed out."
+            case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+                return "Master source network connection failed."
+            case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid, .clientCertificateRejected, .clientCertificateRequired:
+                return "Master source TLS validation failed."
+            case .appTransportSecurityRequiresSecureConnection:
+                return "Master source transport is blocked by App Transport Security."
+            default:
+                return "Master source fetch failed."
+            }
+        }
+        if let sourceError = error as? MasterSourceError {
+            return sourceError.errorDescription ?? "Master source fetch failed."
+        }
+        return "Master source fetch failed."
     }
 
     private func safeStorageErrorDescription(_ error: Error, fallback: String) -> String {
