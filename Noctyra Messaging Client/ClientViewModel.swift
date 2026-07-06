@@ -3650,7 +3650,7 @@ final class ClientViewModel: ObservableObject {
                 }
             }
         } catch {
-            let message = "Relay pairing failed: \(error.localizedDescription)"
+            let message = "Relay pairing failed: \(redactedRelayErrorDescription(error))"
             lastError = message
             insecureLastError = message
         }
@@ -3732,7 +3732,7 @@ final class ClientViewModel: ObservableObject {
                     }
                 }
             } catch {
-                firstError = firstError ?? "\(relay.name): \(error.localizedDescription)"
+                firstError = firstError ?? "\(relay.name): \(redactedRelayErrorDescription(error))"
             }
         }
 
@@ -3774,7 +3774,7 @@ final class ClientViewModel: ObservableObject {
                 insecureLastAnnounceAt = Date()
             }
         } catch {
-            let message = "Relay pairing announce failed: \(error.localizedDescription)"
+            let message = "Relay pairing announce failed: \(redactedRelayErrorDescription(error))"
             lastError = message
             insecureLastError = message
         }
@@ -4085,7 +4085,7 @@ final class ClientViewModel: ObservableObject {
             cacheAttachmentBuffer(buffer, for: fileName, scope: scope)
             return buffer.snapshot()
         } catch {
-            print("[client] Failed to load attachment: \(error)")
+            print("[client] Failed to load attachment")
             return nil
         }
     }
@@ -4438,7 +4438,7 @@ final class ClientViewModel: ObservableObject {
             await refreshCoordinatorDirectoryIfNeeded(force: true)
             await syncRelayGroups(for: state.activeIdentityId)
         } catch {
-            lastError = "Relay info fetch failed: \(error.localizedDescription)"
+            lastError = "Relay info fetch failed: \(redactedRelayErrorDescription(error))"
         }
     }
 
@@ -4463,8 +4463,9 @@ final class ClientViewModel: ObservableObject {
                 lastError = "Relay returned unexpected response."
             }
         } catch {
-            recordRelayHealth(endpoint: endpoint, latencyMs: elapsedMilliseconds(since: start), isReachable: false, failureReason: error.localizedDescription)
-            lastError = "Relay connection failed: \(error.localizedDescription)"
+            let reason = redactedRelayErrorDescription(error)
+            recordRelayHealth(endpoint: endpoint, latencyMs: elapsedMilliseconds(since: start), isReachable: false, failureReason: reason)
+            lastError = "Relay connection failed: \(reason)"
         }
     }
 
@@ -4488,7 +4489,7 @@ final class ClientViewModel: ObservableObject {
             await save()
             await refreshCoordinatorDirectoryIfNeeded(force: true)
         } catch {
-            lastError = "Relay info fetch failed: \(error.localizedDescription)"
+            lastError = "Relay info fetch failed: \(redactedRelayErrorDescription(error))"
         }
     }
 
@@ -4864,7 +4865,7 @@ final class ClientViewModel: ObservableObject {
                 endpoint: endpoint,
                 latencyMs: elapsedMilliseconds(since: startedAt),
                 isReachable: false,
-                failureReason: error.localizedDescription
+                failureReason: redactedRelayErrorDescription(error)
             )
             throw error
         }
@@ -4887,6 +4888,34 @@ final class ClientViewModel: ObservableObject {
             isReachable: isReachable,
             failureReason: failureReason
         )
+    }
+
+    private func redactedRelayErrorDescription(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut:
+                return "Relay request timed out."
+            case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+                return "Relay network connection failed."
+            case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid, .clientCertificateRejected, .clientCertificateRequired:
+                return "Relay TLS validation failed."
+            case .appTransportSecurityRequiresSecureConnection:
+                return "Relay transport is blocked by App Transport Security."
+            default:
+                return "Relay connection failed."
+            }
+        }
+
+        let description = error.localizedDescription
+        if description.hasPrefix("Relay returned HTTP ")
+            || description.hasPrefix("Cloudflare blocked relay traffic")
+            || description == "Relay request timed out."
+            || description == "Relay returned an invalid HTTP response."
+            || description == "Relay returned a non-JSON payload."
+            || description == "Relay returned an invalid payload." {
+            return description
+        }
+        return "Relay connection failed."
     }
 
     private func makeActorProof(

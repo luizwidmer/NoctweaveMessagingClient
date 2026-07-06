@@ -110,7 +110,7 @@ final class AttachmentStore {
             try mutableURL.setResourceValues(values)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         } catch {
-            print("[client] Failed to apply attachment privacy attributes: \(error)")
+            print("[client] Failed to apply attachment privacy attributes")
         }
     }
 }

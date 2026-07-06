@@ -123,7 +123,7 @@ final class ThreadMessageStore {
             try mutableURL.setResourceValues(values)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         } catch {
-            print("[client] Failed to apply thread message attributes: \(error)")
+            print("[client] Failed to apply thread message attributes")
         }
     }
 
