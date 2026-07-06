@@ -2267,7 +2267,7 @@ private struct ConversationView: View {
                     Task { await handleAttachmentURL(url) }
                 }
             case .failure(let error):
-                model.lastError = "Failed to import attachment: \(error.localizedDescription)"
+                model.lastError = "Failed to import attachment: \(safeFileImportErrorDescription(error, fallback: "Attachment import failed."))"
             }
         }
         #endif
@@ -2396,7 +2396,7 @@ private struct ConversationView: View {
             await model.sendAttachment(data: data, fileName: nil, mimeType: mimeType, to: contact.id)
         } catch {
             await MainActor.run {
-                model.lastError = "Failed to load photo: \(error.localizedDescription)"
+                model.lastError = "Failed to load photo: \(safeFileImportErrorDescription(error, fallback: "Photo could not be loaded."))"
             }
         }
         await MainActor.run {
@@ -2418,7 +2418,7 @@ private struct ConversationView: View {
             await model.sendAttachment(data: data, fileName: fileName, mimeType: mimeType, to: contact.id)
         } catch {
             await MainActor.run {
-                model.lastError = "Failed to read attachment: \(error.localizedDescription)"
+                model.lastError = "Failed to read attachment: \(safeFileImportErrorDescription(error, fallback: "Attachment could not be read."))"
             }
         }
     }
@@ -2932,7 +2932,7 @@ private struct GroupConversationView: View {
                     Task { await handleAttachmentURL(url) }
                 }
             case .failure(let error):
-                model.lastError = "Failed to import attachment: \(error.localizedDescription)"
+                model.lastError = "Failed to import attachment: \(safeFileImportErrorDescription(error, fallback: "Attachment import failed."))"
             }
         }
         #endif
@@ -3054,7 +3054,7 @@ private struct GroupConversationView: View {
             await model.sendGroupAttachment(data: data, fileName: nil, mimeType: mimeType, to: group.id)
         } catch {
             await MainActor.run {
-                model.lastError = "Failed to load photo: \(error.localizedDescription)"
+                model.lastError = "Failed to load photo: \(safeFileImportErrorDescription(error, fallback: "Photo could not be loaded."))"
             }
         }
         await MainActor.run {
@@ -3076,7 +3076,7 @@ private struct GroupConversationView: View {
             await model.sendGroupAttachment(data: data, fileName: fileName, mimeType: mimeType, to: group.id)
         } catch {
             await MainActor.run {
-                model.lastError = "Failed to read attachment: \(error.localizedDescription)"
+                model.lastError = "Failed to read attachment: \(safeFileImportErrorDescription(error, fallback: "Attachment could not be read."))"
             }
         }
     }
@@ -6753,7 +6753,7 @@ private struct MyCodeView: View {
             case .success:
                 model.lastInfo = "Contact file exported."
             case .failure(let error):
-                model.lastError = "Export failed: \(error.localizedDescription)"
+                model.lastError = "Export failed: \(safeFileImportErrorDescription(error, fallback: "Contact file export failed."))"
             }
         }
         .sheet(isPresented: $showingFullScreenQR) {
@@ -6824,7 +6824,7 @@ private struct MyCodeView: View {
             scheduleShareFileCleanup(for: url)
             showingShareSheet = true
         } catch {
-            model.lastError = "Failed to prepare AirDrop file: \(error.localizedDescription)"
+            model.lastError = "Failed to prepare AirDrop file: \(safeFileImportErrorDescription(error, fallback: "AirDrop file could not be prepared."))"
         }
     }
 
@@ -7249,11 +7249,11 @@ private struct AddContactView: View {
                             importedFileData = data
                             importedFileName = url.lastPathComponent
                         } catch {
-                            model.lastError = "Failed to read contact file: \(error.localizedDescription)"
+                            model.lastError = "Failed to read contact file: \(safeFileImportErrorDescription(error, fallback: "Contact file could not be read."))"
                         }
                     }
                 case .failure(let error):
-                    model.lastError = "Import failed: \(error.localizedDescription)"
+                    model.lastError = "Import failed: \(safeFileImportErrorDescription(error, fallback: "Contact file import failed."))"
                 }
             }
             .sheet(isPresented: $showingScanner) {
@@ -12638,6 +12638,51 @@ private let supportedAttachmentContentTypes: [UTType] = {
     var seen = Set<String>()
     return types.filter { seen.insert($0.identifier).inserted }
 }()
+
+private func safeFileImportErrorDescription(_ error: Error, fallback: String) -> String {
+    let nsError = error as NSError
+    if nsError.domain == NSCocoaErrorDomain {
+        switch nsError.code {
+        case NSUserCancelledError:
+            return "Operation cancelled."
+        case NSFileNoSuchFileError, NSFileReadNoSuchFileError:
+            return "Selected file was not found."
+        case NSFileReadNoPermissionError, NSFileWriteNoPermissionError:
+            return "Selected file permission was denied."
+        case NSFileReadTooLargeError, NSFileWriteOutOfSpaceError:
+            return "Selected file is too large."
+        case NSFileReadCorruptFileError:
+            return "Selected file appears to be unreadable."
+        default:
+            return fallback
+        }
+    }
+
+    if nsError.domain == NSURLErrorDomain {
+        switch URLError.Code(rawValue: nsError.code) {
+        case .timedOut:
+            return "File provider timed out."
+        case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost:
+            return "File provider is unavailable."
+        case .userAuthenticationRequired, .userCancelledAuthentication:
+            return "File provider authentication was not completed."
+        default:
+            return fallback
+        }
+    }
+
+    let description = error.localizedDescription.lowercased()
+    if description.contains("permission") || description.contains("denied") {
+        return "Selected file permission was denied."
+    }
+    if description.contains("too large") {
+        return "Selected file is too large."
+    }
+    if description.contains("cancel") {
+        return "Operation cancelled."
+    }
+    return fallback
+}
 
 private func readBoundedFile(_ url: URL, maxBytes: Int) throws -> Data {
     let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
