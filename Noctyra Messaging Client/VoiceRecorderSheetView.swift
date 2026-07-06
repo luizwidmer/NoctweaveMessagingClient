@@ -37,7 +37,7 @@ struct VoiceRecorderSheetView: View {
                     }
 
                     SheetSection(title: "Privacy", icon: "lock.shield.fill") {
-                        Text("Audio is recorded into the app’s temporary storage and sent through the encrypted attachment pipeline. The temporary file is discarded when this sheet closes.")
+                        Text("Audio is recorded into the app’s temporary storage and sent through the encrypted attachment pipeline. The temporary file is overwritten before removal when the sheet closes or the recording is sent.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
@@ -227,7 +227,7 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
             throw VoiceRecorderError.noRecording
         }
         let data = try Data(contentsOf: url)
-        try? FileManager.default.removeItem(at: url)
+        try? securelyRemoveRecordingFile(at: url)
         recordingURL = nil
         return (data, "voice.m4a", "audio/m4a")
     }
@@ -241,7 +241,7 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
         isRecording = false
         elapsed = 0
         if let url = recordingURL {
-            try? FileManager.default.removeItem(at: url)
+            try? securelyRemoveRecordingFile(at: url)
         }
         recordingURL = nil
         #if os(iOS)
@@ -319,6 +319,39 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
     private func stopTicker() {
         tickerTask?.cancel()
         tickerTask = nil
+    }
+
+    private func securelyRemoveRecordingFile(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return
+        }
+        bestEffortOverwriteRecordingFile(at: url)
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private func bestEffortOverwriteRecordingFile(at url: URL) {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+              values.isRegularFile == true,
+              let byteCount = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value,
+              byteCount > 0,
+              let handle = try? FileHandle(forWritingTo: url) else {
+            return
+        }
+        defer { try? handle.close() }
+        let chunkSize = 64 * 1024
+        let zeroChunk = Data(repeating: 0, count: chunkSize)
+        var remaining = byteCount
+        try? handle.seek(toOffset: 0)
+        while remaining > 0 {
+            let writeCount = min(UInt64(chunkSize), remaining)
+            if writeCount == UInt64(chunkSize) {
+                try? handle.write(contentsOf: zeroChunk)
+            } else {
+                try? handle.write(contentsOf: Data(repeating: 0, count: Int(writeCount)))
+            }
+            remaining -= writeCount
+        }
+        try? handle.synchronize()
     }
 }
 
