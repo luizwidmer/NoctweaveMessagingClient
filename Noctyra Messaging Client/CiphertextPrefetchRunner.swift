@@ -62,7 +62,7 @@ struct CiphertextPrefetchRunner {
                     try store.appendDirectEnvelopes(records)
                     fetchedCount += records.count
                 } catch {
-                    failures.append("\(profileLabel(for: profile)): \(error.localizedDescription)")
+                    failures.append("Prefetch failed: \(redactedPrefetchErrorDescription(error))")
                 }
             }
 
@@ -89,7 +89,11 @@ struct CiphertextPrefetchRunner {
                     lastResult: "Encrypted ciphertext prefetch failed."
                 )
             )
-            return CiphertextPrefetchResult(fetchedEnvelopeCount: 0, profileCount: 0, failures: [error.localizedDescription])
+            return CiphertextPrefetchResult(
+                fetchedEnvelopeCount: 0,
+                profileCount: 0,
+                failures: [redactedPrefetchErrorDescription(error)]
+            )
         }
     }
 
@@ -120,14 +124,38 @@ struct CiphertextPrefetchRunner {
             throw NSError(
                 domain: "Noctyra.CiphertextPrefetch",
                 code: 1,
-                userInfo: [NSLocalizedDescriptionKey: response.error ?? "Relay did not return encrypted messages."]
+                userInfo: [NSLocalizedDescriptionKey: "Relay did not return encrypted messages."]
             )
         }
         return Array((response.messages ?? []).prefix(maxEnvelopeCountPerProfile))
     }
 
-    private func profileLabel(for profile: NoctyraPrefetchProfile) -> String {
-        "Profile \(profile.id.uuidString.prefix(8))"
+    private func redactedPrefetchErrorDescription(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut:
+                return "Relay request timed out."
+            case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+                return "Relay network connection failed."
+            case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid, .clientCertificateRejected, .clientCertificateRequired:
+                return "Relay TLS validation failed."
+            case .appTransportSecurityRequiresSecureConnection:
+                return "Relay transport is blocked by App Transport Security."
+            default:
+                return "Relay connection failed."
+            }
+        }
+
+        let description = error.localizedDescription
+        if description.hasPrefix("Relay returned HTTP ")
+            || description == "Relay request timed out."
+            || description == "Relay returned an invalid HTTP response."
+            || description == "Relay returned a non-JSON payload."
+            || description == "Relay returned an invalid payload."
+            || description == "Relay did not return encrypted messages." {
+            return description
+        }
+        return "Relay prefetch failed."
     }
 
     private func makeActorProof(
