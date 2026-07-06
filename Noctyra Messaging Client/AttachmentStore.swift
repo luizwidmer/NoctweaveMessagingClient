@@ -18,13 +18,15 @@ final class AttachmentStore {
     func saveAttachment(_ data: Data, descriptor: AttachmentDescriptor) throws -> String {
         let fileName = "\(descriptor.id.uuidString).bin"
         let url = try attachmentURL(fileName: fileName)
-        let payload = try encryptIfNeeded(data)
+        var payload = try encryptIfNeeded(data)
+        defer { payload.secureWipe() }
         try writeData(payload, to: url)
         return fileName
     }
 
     func loadAttachment(fileName: String) throws -> Data {
-        let encrypted = try loadEncryptedAttachment(fileName: fileName)
+        var encrypted = try loadEncryptedAttachment(fileName: fileName)
+        defer { encrypted.secureWipe() }
         return try decryptAttachmentPayload(encrypted)
     }
 
@@ -55,9 +57,10 @@ final class AttachmentStore {
         }
         let key = try AttachmentKeychain.loadOrCreateKey()
         let sealed = try AES.GCM.seal(payload, using: key)
-        guard let combined = sealed.combined else {
+        guard var combined = sealed.combined else {
             throw AttachmentStoreError.encryptionFailed
         }
+        defer { combined.secureWipe() }
         let envelope = AttachmentEnvelope(version: 1, sealed: combined)
         return try NoctweaveCoder.encode(envelope)
     }
@@ -154,14 +157,16 @@ private enum AttachmentKeychain {
         if status == errSecItemNotFound {
             return nil
         }
-        guard status == errSecSuccess, let data = item as? Data else {
+        guard status == errSecSuccess, var data = item as? Data else {
             throw AttachmentKeychainError.unavailable(status: status)
         }
+        defer { data.secureWipe() }
         return SymmetricKey(data: data)
     }
 
     private static func saveKey(_ key: SymmetricKey, service: String, account: String) throws {
-        let data = key.withUnsafeBytes { Data($0) }
+        var data = key.withUnsafeBytes { Data($0) }
+        defer { data.secureWipe() }
         var attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -205,3 +210,15 @@ private enum AttachmentKeychain {
     }
 }
 #endif
+
+private extension Data {
+    mutating func secureWipe() {
+        guard !isEmpty else { return }
+        let byteCount = count
+        withUnsafeMutableBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            _ = memset_s(baseAddress, byteCount, 0, byteCount)
+        }
+        removeAll(keepingCapacity: false)
+    }
+}

@@ -1053,6 +1053,7 @@ final class ClientViewModel: ObservableObject {
                 let start = chunkIndex * chunkSize
                 let end = min(start + chunkSize, preparedPayload.data.count)
                 var chunk = preparedPayload.data.subdata(in: start..<end)
+                defer { chunk.secureWipe() }
                 let authenticatedData = AttachmentCrypto.authenticatedData(
                     conversationId: conversation.id,
                     sessionId: sessionId,
@@ -1068,7 +1069,6 @@ final class ClientViewModel: ObservableObject {
                     chunkIndex: chunkIndex,
                     authenticatedData: authenticatedData
                 )
-                chunk.secureWipe()
                 let request = UploadAttachmentRequest(
                     attachmentId: attachmentId,
                     chunkIndex: chunkIndex,
@@ -1175,6 +1175,7 @@ final class ClientViewModel: ObservableObject {
                 let start = chunkIndex * chunkSize
                 let end = min(start + chunkSize, preparedPayload.data.count)
                 var chunk = preparedPayload.data.subdata(in: start..<end)
+                defer { chunk.secureWipe() }
                 let authenticatedData = groupAttachmentAuthenticatedData(
                     groupId: group.id,
                     epoch: ratchetState.epoch,
@@ -1191,7 +1192,6 @@ final class ClientViewModel: ObservableObject {
                     chunkIndex: chunkIndex,
                     authenticatedData: authenticatedData
                 )
-                chunk.secureWipe()
                 let response = try await client.send(.uploadAttachment(UploadAttachmentRequest(
                     attachmentId: attachmentId,
                     chunkIndex: chunkIndex,
@@ -4078,8 +4078,8 @@ final class ClientViewModel: ObservableObject {
         }
         do {
             var encrypted = try attachmentStore.loadEncryptedAttachment(fileName: fileName)
+            defer { encrypted.secureWipe() }
             var decrypted = try attachmentStore.decryptAttachmentPayload(encrypted)
-            encrypted.secureWipe()
             let buffer = SecureRAMBuffer(copying: decrypted)
             decrypted.secureWipe()
             cacheAttachmentBuffer(buffer, for: fileName, scope: scope)
