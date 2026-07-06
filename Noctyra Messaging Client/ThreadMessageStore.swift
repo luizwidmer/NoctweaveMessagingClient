@@ -66,16 +66,20 @@ final class ThreadMessageStore {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return []
         }
-        let data = try Data(contentsOf: url)
-        let payload = try decryptIfNeeded(data)
+        var data = try Data(contentsOf: url)
+        defer { data.secureWipe() }
+        var payload = try decryptIfNeeded(data)
+        defer { payload.secureWipe() }
         let decoded = try NoctweaveCoder.decode(ThreadMessagePayload.self, from: payload)
         return decoded.messages
     }
 
     private func saveMessages(_ messages: [Message], to url: URL) throws {
         let payload = ThreadMessagePayload(messages: messages)
-        let encoded = try NoctweaveCoder.encode(payload)
-        let encrypted = try encryptIfNeeded(encoded)
+        var encoded = try NoctweaveCoder.encode(payload)
+        defer { encoded.secureWipe() }
+        var encrypted = try encryptIfNeeded(encoded)
+        defer { encrypted.secureWipe() }
         try writeData(encrypted, to: url)
     }
 
@@ -129,9 +133,10 @@ final class ThreadMessageStore {
         }
         let key = try ThreadMessageKeychain.loadOrCreateKey()
         let sealed = try AES.GCM.seal(payload, using: key)
-        guard let combined = sealed.combined else {
+        guard var combined = sealed.combined else {
             throw ThreadMessageStoreError.encryptionFailed
         }
+        defer { combined.secureWipe() }
         let envelope = ThreadMessageEnvelope(version: 1, sealed: combined)
         return try NoctweaveCoder.encode(envelope)
     }
@@ -160,6 +165,18 @@ private struct ThreadMessageEnvelope: Codable {
 
 private struct ThreadMessagePayload: Codable {
     let messages: [Message]
+}
+
+private extension Data {
+    mutating func secureWipe() {
+        guard !isEmpty else { return }
+        let byteCount = count
+        withUnsafeMutableBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            _ = memset_s(baseAddress, byteCount, 0, byteCount)
+        }
+        removeAll(keepingCapacity: false)
+    }
 }
 
 private enum ThreadMessageStoreError: Error {
@@ -195,14 +212,16 @@ private enum ThreadMessageKeychain {
         if status == errSecItemNotFound {
             return nil
         }
-        guard status == errSecSuccess, let data = item as? Data else {
+        guard status == errSecSuccess, var data = item as? Data else {
             throw ThreadMessageKeychainError.unavailable(status: status)
         }
+        defer { data.secureWipe() }
         return SymmetricKey(data: data)
     }
 
     private static func saveKey(_ key: SymmetricKey, service: String, account: String) throws {
-        let data = key.withUnsafeBytes { Data($0) }
+        var data = key.withUnsafeBytes { Data($0) }
+        defer { data.secureWipe() }
         var attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

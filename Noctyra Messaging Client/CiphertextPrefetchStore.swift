@@ -84,7 +84,8 @@ final class CiphertextPrefetchStore {
     }
 
     func loadConfig() throws -> NoctyraPrefetchConfig? {
-        guard let payload = try readPayload(from: configURL) else { return nil }
+        guard var payload = try readPayload(from: configURL) else { return nil }
+        defer { payload.secureWipe() }
         let decoded = try NoctweaveCoder.decode(NoctyraPrefetchConfig.self, from: payload)
         let config = sanitizedPrefetchConfig(decoded)
         if prefetchConfigPayloadNeedsSanitization(payload) || decoded.profiles.count != config.profiles.count {
@@ -98,7 +99,8 @@ final class CiphertextPrefetchStore {
     }
 
     func loadStatus() throws -> NoctyraPrefetchStatus {
-        guard let payload = try readPayload(from: statusURL) else { return .empty }
+        guard var payload = try readPayload(from: statusURL) else { return .empty }
+        defer { payload.secureWipe() }
         let decoded = try NoctweaveCoder.decode(NoctyraPrefetchStatus.self, from: payload)
         let status = sanitizedPrefetchStatus(decoded)
         if prefetchStatusPayloadNeedsSanitization(payload) || status != decoded {
@@ -261,7 +263,8 @@ final class CiphertextPrefetchStore {
     }
 
     private func read<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
-        guard let payload = try readPayload(from: url) else { return nil }
+        guard var payload = try readPayload(from: url) else { return nil }
+        defer { payload.secureWipe() }
         return try NoctweaveCoder.decode(type, from: payload)
     }
 
@@ -272,7 +275,8 @@ final class CiphertextPrefetchStore {
            size.intValue > Self.maxEncryptedFileBytes {
             throw CiphertextPrefetchStoreError.fileTooLarge
         }
-        let data = try Data(contentsOf: url)
+        var data = try Data(contentsOf: url)
+        defer { data.secureWipe() }
         guard data.count <= Self.maxEncryptedFileBytes else {
             throw CiphertextPrefetchStoreError.fileTooLarge
         }
@@ -325,8 +329,10 @@ final class CiphertextPrefetchStore {
         protection: FileProtectionType
     ) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let payload = try NoctweaveCoder.encode(value, sortedKeys: true)
-        let data = try encrypt(payload)
+        var payload = try NoctweaveCoder.encode(value, sortedKeys: true)
+        defer { payload.secureWipe() }
+        var data = try encrypt(payload)
+        defer { data.secureWipe() }
         guard data.count <= Self.maxEncryptedFileBytes else {
             throw CiphertextPrefetchStoreError.fileTooLarge
         }
@@ -340,9 +346,10 @@ final class CiphertextPrefetchStore {
     private func encrypt(_ payload: Data) throws -> Data {
         let key = try CiphertextPrefetchKeychain.loadOrCreateKey()
         let sealed = try AES.GCM.seal(payload, using: key)
-        guard let combined = sealed.combined else {
+        guard var combined = sealed.combined else {
             throw CiphertextPrefetchStoreError.encryptionFailed
         }
+        defer { combined.secureWipe() }
         return try NoctweaveCoder.encode(CiphertextPrefetchFileEnvelope(version: 1, sealed: combined))
     }
 
@@ -375,6 +382,18 @@ final class CiphertextPrefetchStore {
 private struct CiphertextPrefetchFileEnvelope: Codable {
     let version: Int
     let sealed: Data
+}
+
+private extension Data {
+    mutating func secureWipe() {
+        guard !isEmpty else { return }
+        let byteCount = count
+        withUnsafeMutableBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            _ = memset_s(baseAddress, byteCount, 0, byteCount)
+        }
+        removeAll(keepingCapacity: false)
+    }
 }
 
 private enum CiphertextPrefetchStoreError: Error {
@@ -411,14 +430,16 @@ private enum CiphertextPrefetchKeychain {
         if status == errSecItemNotFound {
             return nil
         }
-        guard status == errSecSuccess, let data = item as? Data else {
+        guard status == errSecSuccess, var data = item as? Data else {
             throw CiphertextPrefetchKeychainError.unavailable(status: status)
         }
+        defer { data.secureWipe() }
         return SymmetricKey(data: data)
     }
 
     private static func saveKey(_ key: SymmetricKey) throws {
-        let data = key.withUnsafeBytes { Data($0) }
+        var data = key.withUnsafeBytes { Data($0) }
+        defer { data.secureWipe() }
         var attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
