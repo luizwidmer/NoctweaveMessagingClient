@@ -339,7 +339,7 @@ final class ClientViewModel: ObservableObject {
                 startAutoFetch()
             }
         } catch {
-            lastError = "Failed to load state: \(error.localizedDescription)"
+            lastError = "Failed to load state: \(safeStorageErrorDescription(error, fallback: "Local state could not be opened."))"
         }
     }
 
@@ -498,10 +498,10 @@ final class ClientViewModel: ObservableObject {
             let client = relayClient(for: relay)
             let response = try await client.send(.uploadPrekeys(request))
             if response.type != .ok {
-                lastError = "Failed to publish prekeys: \(response.error ?? "Relay error")"
+                lastError = "Failed to publish prekeys: \(redactedRelayRejectionMessage(response.error ?? ""))"
             }
         } catch {
-            lastError = "Failed to publish prekeys: \(error.localizedDescription)"
+            lastError = "Failed to publish prekeys: \(safeActionErrorDescription(error, fallback: "Prekey publication failed."))"
         }
     }
 
@@ -528,7 +528,7 @@ final class ClientViewModel: ObservableObject {
                 // Keep chooser visible so user can pick device-only mode if keychain access fails.
                 requiresStorageChoice = true
                 storageProtectionStatus = nil
-                lastError = "Unable to access Keychain: \(error.localizedDescription)"
+                lastError = "Unable to access Keychain: \(safeStorageErrorDescription(error, fallback: "Secure key storage is unavailable."))"
             }
         }
     }
@@ -571,7 +571,7 @@ final class ClientViewModel: ObservableObject {
             threadMessageStore = previousThreadMessageStore
             storageProtectionMode = previousMode
             persistStorageProtectionMode(previousMode)
-            lastError = "Failed to update storage protection: \(error.localizedDescription)"
+            lastError = "Failed to update storage protection: \(safeStorageErrorDescription(error, fallback: "Storage protection could not be updated."))"
             storageProtectionStatus = "Storage protection update failed."
             return false
         }
@@ -624,7 +624,7 @@ final class ClientViewModel: ObservableObject {
         do {
             try await persistState()
         } catch {
-            lastError = "Failed to save state: \(error.localizedDescription)"
+            lastError = "Failed to save state: \(safeStorageErrorDescription(error, fallback: "Local state could not be saved."))"
         }
     }
 
@@ -698,7 +698,7 @@ final class ClientViewModel: ObservableObject {
         do {
             try ciphertextPrefetchStore.saveConfig(config)
         } catch {
-            lastError = "Failed to publish prefetch config: \(error.localizedDescription)"
+            lastError = "Failed to publish prefetch config: \(safeStorageErrorDescription(error, fallback: "Ciphertext prefetch storage failed."))"
         }
     }
 
@@ -4920,6 +4920,54 @@ final class ClientViewModel: ObservableObject {
         redactedRelayErrorDescriptionIfRelay(error) ?? fallback
     }
 
+    private func safeStorageErrorDescription(_ error: Error, fallback: String) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut:
+                return "Local storage operation timed out."
+            case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+                return "Network-backed storage is unavailable."
+            case .userAuthenticationRequired, .userCancelledAuthentication:
+                return "Secure key storage authentication was not completed."
+            default:
+                return fallback
+            }
+        }
+
+        let nsError = error as NSError
+        switch nsError.domain {
+        case NSCocoaErrorDomain:
+            switch nsError.code {
+            case NSFileNoSuchFileError, NSFileReadNoSuchFileError:
+                return "Local storage item was not found."
+            case NSFileReadNoPermissionError, NSFileWriteNoPermissionError:
+                return "Local storage permission was denied."
+            case NSFileWriteOutOfSpaceError:
+                return "Device storage is full."
+            case NSFileReadCorruptFileError:
+                return "Local encrypted storage is unreadable."
+            default:
+                return fallback
+            }
+        case NSOSStatusErrorDomain:
+            return "Secure key storage is unavailable."
+        default:
+            break
+        }
+
+        let description = error.localizedDescription.lowercased()
+        if description.contains("keychain") || description.contains("osstatus") {
+            return "Secure key storage is unavailable."
+        }
+        if description.contains("authenticate") || description.contains("authentication") {
+            return "Secure key storage authentication was not completed."
+        }
+        if description.contains("decrypt") || description.contains("cipher") || description.contains("encrypted") {
+            return "Local encrypted storage is unreadable."
+        }
+        return fallback
+    }
+
     private func redactedRelayErrorDescriptionIfRelay(_ error: Error) -> String? {
         if let urlError = error as? URLError {
             switch urlError.code {
@@ -6325,7 +6373,7 @@ final class ClientViewModel: ObservableObject {
         do {
             return try ciphertextPrefetchStore.directEnvelopeRecords(profileId: profileId)
         } catch {
-            lastError = "Failed to load prefetched ciphertext: \(error.localizedDescription)"
+            lastError = "Failed to load prefetched ciphertext: \(safeStorageErrorDescription(error, fallback: "Ciphertext prefetch storage failed."))"
             return []
         }
     }
@@ -6334,7 +6382,7 @@ final class ClientViewModel: ObservableObject {
         do {
             try ciphertextPrefetchStore.removeDirectEnvelopeIds(ids, profileId: profileId)
         } catch {
-            lastError = "Failed to clear prefetched ciphertext: \(error.localizedDescription)"
+            lastError = "Failed to clear prefetched ciphertext: \(safeStorageErrorDescription(error, fallback: "Ciphertext prefetch storage failed."))"
         }
     }
 
@@ -6342,7 +6390,7 @@ final class ClientViewModel: ObservableObject {
         do {
             return try ciphertextPrefetchStore.groupEnvelopeRecords(profileId: profileId, groupId: groupId)
         } catch {
-            lastError = "Failed to load prefetched group ciphertext: \(error.localizedDescription)"
+            lastError = "Failed to load prefetched group ciphertext: \(safeStorageErrorDescription(error, fallback: "Ciphertext prefetch storage failed."))"
             return []
         }
     }
@@ -6351,7 +6399,7 @@ final class ClientViewModel: ObservableObject {
         do {
             try ciphertextPrefetchStore.removeGroupEnvelopeIds(ids, profileId: profileId, groupId: groupId)
         } catch {
-            lastError = "Failed to clear prefetched group ciphertext: \(error.localizedDescription)"
+            lastError = "Failed to clear prefetched group ciphertext: \(safeStorageErrorDescription(error, fallback: "Ciphertext prefetch storage failed."))"
         }
     }
 
@@ -8384,7 +8432,7 @@ final class ClientViewModel: ObservableObject {
                     contactId: contactId
                 )
             } catch {
-                lastError = "Failed to secure chat history before hiding it: \(error.localizedDescription)"
+                lastError = "Failed to secure chat history before hiding it: \(safeStorageErrorDescription(error, fallback: "Secure history storage failed."))"
                 return
             }
         }
@@ -8405,7 +8453,7 @@ final class ClientViewModel: ObservableObject {
                     groupId: groupId
                 )
             } catch {
-                lastError = "Failed to secure group history before hiding it: \(error.localizedDescription)"
+                lastError = "Failed to secure group history before hiding it: \(safeStorageErrorDescription(error, fallback: "Secure history storage failed."))"
                 return
             }
         }
