@@ -52,7 +52,7 @@ final class ThreadMessageStore {
         for file in files {
             let name = file.lastPathComponent.lowercased()
             if name.contains(prefix) {
-                try? FileManager.default.removeItem(at: file)
+                try? securelyRemoveFile(at: file)
             }
         }
     }
@@ -87,7 +87,7 @@ final class ThreadMessageStore {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return
         }
-        try FileManager.default.removeItem(at: url)
+        try securelyRemoveFile(at: url)
     }
 
     private func directURL(profileId: UUID, contactId: UUID) -> URL {
@@ -155,6 +155,36 @@ final class ThreadMessageStore {
             throw ThreadMessageStoreError.encryptionFailed
         }
         return opened
+    }
+
+    private func securelyRemoveFile(at url: URL) throws {
+        bestEffortOverwriteFile(at: url)
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private func bestEffortOverwriteFile(at url: URL) {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+              values.isRegularFile == true,
+              let byteCount = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value,
+              byteCount > 0,
+              let handle = try? FileHandle(forWritingTo: url) else {
+            return
+        }
+        defer { try? handle.close() }
+        let chunkSize = 64 * 1024
+        let zeroChunk = Data(repeating: 0, count: chunkSize)
+        var remaining = byteCount
+        try? handle.seek(toOffset: 0)
+        while remaining > 0 {
+            let writeCount = min(UInt64(chunkSize), remaining)
+            if writeCount == UInt64(chunkSize) {
+                try? handle.write(contentsOf: zeroChunk)
+            } else {
+                try? handle.write(contentsOf: Data(repeating: 0, count: Int(writeCount)))
+            }
+            remaining -= writeCount
+        }
+        try? handle.synchronize()
     }
 }
 
