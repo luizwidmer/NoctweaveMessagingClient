@@ -7604,8 +7604,8 @@ final class ClientViewModel: ObservableObject {
     private func performAppResetOperation() async {
         stopAutoFetch()
         removeAllAttachmentsFromDisk()
-        try? FileManager.default.removeItem(at: stateFileURL)
-        try? FileManager.default.removeItem(at: corruptionKillSwitchURL)
+        try? securelyRemoveLocalFile(at: stateFileURL)
+        try? securelyRemoveLocalFile(at: corruptionKillSwitchURL)
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: ClientViewModel.storageModeKey)
         storageProtectionMode = .keychain
@@ -8034,10 +8034,10 @@ final class ClientViewModel: ObservableObject {
     private func removeAllAttachmentsFromDisk() {
         purgeAllAttachmentDecryptionMemory()
         if FileManager.default.fileExists(atPath: attachmentDirectory.path) {
-            try? FileManager.default.removeItem(at: attachmentDirectory)
+            try? securelyRemoveDirectoryTree(at: attachmentDirectory)
         }
         if FileManager.default.fileExists(atPath: threadMessageDirectory.path) {
-            try? FileManager.default.removeItem(at: threadMessageDirectory)
+            try? securelyRemoveDirectoryTree(at: threadMessageDirectory)
         }
     }
 
@@ -8388,9 +8388,62 @@ final class ClientViewModel: ObservableObject {
         let supportDirectory = stateFileURL.deletingLastPathComponent()
         if let files = try? FileManager.default.contentsOfDirectory(at: supportDirectory, includingPropertiesForKeys: nil) {
             for file in files where file.pathExtension.lowercased() == "noctweave" {
-                try? FileManager.default.removeItem(at: file)
+                try? securelyRemoveLocalFile(at: file)
             }
         }
+    }
+
+    private func securelyRemoveDirectoryTree(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return
+        }
+        let resourceKeys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey]
+        if let files = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: resourceKeys,
+            options: []
+        ) {
+            for case let file as URL in files {
+                let values = try? file.resourceValues(forKeys: Set(resourceKeys))
+                if values?.isRegularFile == true {
+                    try? securelyRemoveLocalFile(at: file)
+                }
+            }
+        }
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private func securelyRemoveLocalFile(at url: URL) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return
+        }
+        bestEffortOverwriteLocalFile(at: url)
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private func bestEffortOverwriteLocalFile(at url: URL) {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+              values.isRegularFile == true,
+              let byteCount = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value,
+              byteCount > 0,
+              let handle = try? FileHandle(forWritingTo: url) else {
+            return
+        }
+        defer { try? handle.close() }
+        let chunkSize = 64 * 1024
+        let zeroChunk = Data(repeating: 0, count: chunkSize)
+        var remaining = byteCount
+        try? handle.seek(toOffset: 0)
+        while remaining > 0 {
+            let writeCount = min(UInt64(chunkSize), remaining)
+            if writeCount == UInt64(chunkSize) {
+                try? handle.write(contentsOf: zeroChunk)
+            } else {
+                try? handle.write(contentsOf: Data(repeating: 0, count: Int(writeCount)))
+            }
+            remaining -= writeCount
+        }
+        try? handle.synchronize()
     }
 
     private static func loadStorageProtectionMode() -> StorageProtectionMode? {
