@@ -6532,6 +6532,7 @@ private struct MyCodeView: View {
     @State private var showingFullScreenQR = false
     @State private var showingShareSheet = false
     @State private var shareURL: URL?
+    @State private var shareCleanupTask: Task<Void, Never>?
     @State private var showingCode = false
     @State private var isPreparingCode = false
 
@@ -6569,6 +6570,7 @@ private struct MyCodeView: View {
                 showingExporter = false
                 showingFullScreenQR = false
                 showingShareSheet = false
+                cleanupShareFile()
                 showingCode = false
             }
         }
@@ -6763,7 +6765,7 @@ private struct MyCodeView: View {
                 .noctyraSheetPresentation()
         }
         #if os(iOS)
-        .sheet(isPresented: $showingShareSheet) {
+        .sheet(isPresented: $showingShareSheet, onDismiss: { cleanupShareFile() }) {
             if let shareURL {
                 ShareSheet(activityItems: [shareURL])
             }
@@ -6773,6 +6775,9 @@ private struct MyCodeView: View {
             ShareSheet(items: shareURL.map { [$0] } ?? [], isPresented: $showingShareSheet)
         )
         #endif
+        .onDisappear {
+            cleanupShareFile()
+        }
     }
 
     private func refreshCode() {
@@ -6812,12 +6817,15 @@ private struct MyCodeView: View {
             model.lastError = "Password required for AirDrop."
             return
         }
-        guard let data = await model.contactShareData(password: sharePassword) else {
+        guard var data = await model.contactShareData(password: sharePassword) else {
             return
         }
+        defer { data.secureWipe() }
         do {
+            cleanupShareFile()
             let url = try writeShareFile(data: data)
             shareURL = url
+            scheduleShareFileCleanup(for: url)
             showingShareSheet = true
         } catch {
             model.lastError = "Failed to prepare AirDrop file: \(error.localizedDescription)"
@@ -6911,6 +6919,61 @@ private struct MyCodeView: View {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         try data.write(to: url, options: [.atomic])
         return url
+    }
+
+    private func scheduleShareFileCleanup(for url: URL) {
+        shareCleanupTask?.cancel()
+        shareCleanupTask = Task {
+            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                if shareURL == url {
+                    cleanupShareFile(cancelScheduled: false)
+                }
+            }
+        }
+    }
+
+    private func cleanupShareFile(cancelScheduled: Bool = true) {
+        if cancelScheduled {
+            shareCleanupTask?.cancel()
+            shareCleanupTask = nil
+        }
+        guard let url = shareURL else {
+            return
+        }
+        try? securelyRemoveFile(at: url)
+        shareURL = nil
+    }
+
+    private func securelyRemoveFile(at url: URL) throws {
+        bestEffortOverwriteFile(at: url)
+        try FileManager.default.removeItem(at: url)
+    }
+
+    private func bestEffortOverwriteFile(at url: URL) {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+              values.isRegularFile == true,
+              let byteCount = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.uint64Value,
+              byteCount > 0,
+              let handle = try? FileHandle(forWritingTo: url) else {
+            return
+        }
+        defer { try? handle.close() }
+        let chunkSize = 64 * 1024
+        let zeroChunk = Data(repeating: 0, count: chunkSize)
+        var remaining = byteCount
+        try? handle.seek(toOffset: 0)
+        while remaining > 0 {
+            let writeCount = min(UInt64(chunkSize), remaining)
+            if writeCount == UInt64(chunkSize) {
+                try? handle.write(contentsOf: zeroChunk)
+            } else {
+                try? handle.write(contentsOf: Data(repeating: 0, count: Int(writeCount)))
+            }
+            remaining -= writeCount
+        }
+        try? handle.synchronize()
     }
 }
 
