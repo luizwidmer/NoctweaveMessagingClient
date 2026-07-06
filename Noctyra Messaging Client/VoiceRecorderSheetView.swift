@@ -69,7 +69,7 @@ struct VoiceRecorderSheetView: View {
             let payload = try recorder.finishAndLoad()
             onRecorded(payload.data, payload.fileName, payload.mimeType)
         } catch {
-            onError(error.localizedDescription)
+            onError(VoiceRecorderError.safeDescription(for: error))
         }
     }
 
@@ -357,6 +357,26 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
 
 private enum VoiceRecorderError: LocalizedError {
     case noRecording
+
+    static func safeDescription(for error: Error) -> String {
+        if let voiceError = error as? VoiceRecorderError {
+            return voiceError.errorDescription ?? "Voice recording could not be prepared."
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain {
+            switch nsError.code {
+            case NSFileNoSuchFileError, NSFileReadNoSuchFileError:
+                return "Voice recording file was not found."
+            case NSFileReadNoPermissionError, NSFileWriteNoPermissionError:
+                return "Voice recording file permission was denied."
+            case NSFileWriteOutOfSpaceError:
+                return "Device storage is full."
+            default:
+                return "Voice recording could not be prepared."
+            }
+        }
+        return "Voice recording could not be prepared."
+    }
 
     var errorDescription: String? {
         switch self {

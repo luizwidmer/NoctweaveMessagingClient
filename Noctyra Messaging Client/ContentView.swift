@@ -8697,7 +8697,7 @@ private final class ClientDonationStore: ObservableObject {
                 statusMessage = nil
             }
         } catch {
-            statusMessage = "Unable to load donation products: \(error.localizedDescription)"
+            statusMessage = "Unable to load donation products: \(safeStoreKitErrorDescription(error, fallback: "Donation products could not be loaded."))"
         }
     }
 
@@ -8713,7 +8713,7 @@ private final class ClientDonationStore: ObservableObject {
                     await transaction.finish()
                     statusMessage = "Thanks for supporting Noctyra."
                 case .unverified(_, let error):
-                    statusMessage = "Purchase could not be verified: \(error.localizedDescription)"
+                    statusMessage = "Purchase could not be verified: \(safeStoreKitErrorDescription(error, fallback: "Purchase verification failed."))"
                 }
             case .pending:
                 statusMessage = "Purchase is pending approval."
@@ -8723,8 +8723,36 @@ private final class ClientDonationStore: ObservableObject {
                 statusMessage = "Purchase failed. Try again."
             }
         } catch {
-            statusMessage = "Purchase failed: \(error.localizedDescription)"
+            statusMessage = "Purchase failed: \(safeStoreKitErrorDescription(error, fallback: "Purchase could not be completed."))"
         }
+    }
+
+    private func safeStoreKitErrorDescription(_ error: Error, fallback: String) -> String {
+        if let storeError = error as? StoreKitError {
+            switch storeError {
+            case .networkError:
+                return "Store network connection failed."
+            case .notAvailableInStorefront:
+                return "Donations are not available in this storefront."
+            case .notEntitled:
+                return "This Apple account is not allowed to complete the purchase."
+            case .systemError:
+                return "Store purchase service failed."
+            case .unsupported:
+                return "Store purchases are not supported on this device."
+            case .userCancelled:
+                return "Purchase cancelled."
+            case .unknown:
+                return fallback
+            @unknown default:
+                return fallback
+            }
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            return "Store network connection failed."
+        }
+        return fallback
     }
 }
 

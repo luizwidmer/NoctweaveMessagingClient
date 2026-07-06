@@ -1347,8 +1347,9 @@ final class ClientViewModel: ObservableObject {
             )
             guard response.type == .messages else {
                 if let error = response.error {
-                    lastError = "Relay error: \(error)"
-                    profileSyncStatus[profileId] = .error(Date(), error)
+                    let reason = redactedRelayRejectionMessage(error)
+                    lastError = "Relay error: \(reason)"
+                    profileSyncStatus[profileId] = .error(Date(), reason)
                     recordWakeSyncFailure(for: profileId)
                 } else {
                     profileSyncStatus[profileId] = .error(Date(), "Relay returned an unexpected response.")
@@ -1786,7 +1787,7 @@ final class ClientViewModel: ObservableObject {
             let response = try await relayClient(for: profile.relay).send(.fetchGroupMessages(fetchRequest))
             guard response.type == .groupMessages else {
                 if let error = response.error {
-                    lastError = "Relay group message error: \(error)"
+                    lastError = "Relay group message error: \(redactedRelayRejectionMessage(error))"
                 }
                 profile.groups[index] = group
                 continue
