@@ -1,4 +1,5 @@
 import ActivityKit
+import AppIntents
 import SwiftUI
 import WidgetKit
 
@@ -133,6 +134,15 @@ private struct NoctyraSyncWidgetView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
 
+            if #available(iOSApplicationExtension 17.0, *) {
+                Button(intent: NoctyraWidgetFetchIntent()) {
+                    Label(snapshot.isFetching ? "Fetching" : "Fetch Now", systemImage: "arrow.down.circle")
+                }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
+            }
+
             if let lastSuccess = snapshot.lastSuccessAt {
                 Text("Last success \(lastSuccess, style: .relative)")
                     .font(.caption2)
@@ -191,6 +201,15 @@ private struct NoctyraSyncDashboardView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+
+            if #available(iOSApplicationExtension 17.0, *) {
+                Button(intent: NoctyraWidgetFetchIntent()) {
+                    Label(state.isFetching ? "Fetching" : "Fetch Now", systemImage: "arrow.down.circle")
+                }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
+            }
         }
         .padding()
     }

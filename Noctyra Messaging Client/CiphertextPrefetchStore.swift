@@ -440,6 +440,9 @@ private enum CiphertextPrefetchStoreError: Error {
 private enum CiphertextPrefetchKeychain {
     private static let service = "com.noctyra.ciphertext-prefetch"
     private static let account = "prefetch-store-key-v1"
+    #if os(iOS)
+    private static let accessGroup = "9MY7SXN56X.com.noctyra.prefetch"
+    #endif
 
     static func loadOrCreateKey() throws -> SymmetricKey {
         if let existing = try loadKey() {
@@ -451,7 +454,7 @@ private enum CiphertextPrefetchKeychain {
     }
 
     private static func loadKey() throws -> SymmetricKey? {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -459,6 +462,9 @@ private enum CiphertextPrefetchKeychain {
             kSecReturnData as String: true,
             kSecAttrSynchronizable as String: kCFBooleanFalse as Any
         ]
+        #if os(iOS)
+        query[kSecAttrAccessGroup as String] = accessGroup
+        #endif
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound {
@@ -483,6 +489,7 @@ private enum CiphertextPrefetchKeychain {
         ]
         #if os(iOS)
         attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        attributes[kSecAttrAccessGroup as String] = accessGroup
         #endif
         let status = SecItemAdd(attributes as CFDictionary, nil)
         if status == errSecDuplicateItem {
