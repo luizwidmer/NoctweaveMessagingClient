@@ -18,8 +18,8 @@ struct NoctyraSyncDashboardWidget: Widget {
                 .containerBackground(
                     LinearGradient(
                         colors: [
-                            Color(red: 0.08, green: 0.09, blue: 0.14),
-                            Color(red: 0.05, green: 0.10, blue: 0.13)
+                            Color(red: 0.11, green: 0.10, blue: 0.17),
+                            Color(red: 0.05, green: 0.14, blue: 0.16)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -82,7 +82,7 @@ private struct NoctyraSyncWidgetView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 icon(size: 26, symbolSize: 13)
-                Text("Sync")
+                Text("Inbox")
                     .font(.headline.weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 4)
@@ -98,7 +98,7 @@ private struct NoctyraSyncWidgetView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.70)
                     .contentTransition(.numericText())
-                Text("ciphertext staged")
+                Text(snapshot.stagedEnvelopeCount == 1 ? "note waiting" : "waiting for you")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.62))
                     .lineLimit(1)
@@ -128,7 +128,7 @@ private struct NoctyraSyncWidgetView: View {
                         Text("Noctyra Sync")
                             .font(.headline.weight(.semibold))
                             .lineLimit(1)
-                        Text(snapshot.isFetching ? "Fetching ciphertext" : "Widget dashboard")
+                        Text(snapshot.isFetching ? "Checking for notes" : "Quiet mailbox")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.white.opacity(0.56))
                             .lineLimit(1)
@@ -143,7 +143,7 @@ private struct NoctyraSyncWidgetView: View {
                         .monospacedDigit()
                         .lineLimit(1)
                         .minimumScaleFactor(0.70)
-                    Text("encrypted envelopes staged")
+                    Text(snapshot.stagedEnvelopeCount == 1 ? "private note waiting" : "waiting for you")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.white.opacity(0.62))
                         .lineLimit(1)
@@ -153,8 +153,8 @@ private struct NoctyraSyncWidgetView: View {
 
             VStack(alignment: .trailing, spacing: 8) {
                 statusPill
-                statChip(title: "Profiles", value: snapshot.profileCount)
-                statChip(title: "Fetched", value: snapshot.fetchedEnvelopeCount)
+                statChip(title: "Boxes", value: snapshot.profileCount)
+                statChip(title: "Found", value: snapshot.fetchedEnvelopeCount)
                 Spacer(minLength: 0)
                 Text(statusText)
                     .font(.caption2.weight(.medium))
@@ -169,13 +169,13 @@ private struct NoctyraSyncWidgetView: View {
     }
 
     private func icon(size: CGFloat, symbolSize: CGFloat) -> some View {
-        Image(systemName: snapshot.isFetching ? "arrow.triangle.2.circlepath" : "shield.lefthalf.filled")
+        Image(systemName: snapshot.isFetching ? "sparkles" : "moon.stars.fill")
             .font(.system(size: symbolSize, weight: .semibold))
             .foregroundStyle(.white)
             .frame(width: size, height: size)
             .background(
                 Circle()
-                    .fill(Color.indigo.opacity(0.38))
+                    .fill(Color.purple.opacity(0.34))
                     .overlay(Circle().stroke(Color.white.opacity(0.14), lineWidth: 0.8))
             )
     }
@@ -188,54 +188,14 @@ private struct NoctyraSyncWidgetView: View {
     }
 
     private var statusPill: some View {
-        Text(snapshot.isFetching ? "Syncing" : "Ready")
+        Text(snapshot.isFetching ? "Checking" : "Settled")
             .font(.caption2.weight(.semibold))
-            .foregroundStyle(snapshot.isFetching ? Color.cyan : Color.green)
+            .foregroundStyle(snapshot.isFetching ? Color.cyan : Color.mint)
             .lineLimit(1)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(.white.opacity(0.08), in: Capsule())
             .overlay(Capsule().stroke(.white.opacity(0.10), lineWidth: 0.7))
-    }
-
-    private var header: some View {
-        HStack(spacing: 9) {
-            icon(size: 28, symbolSize: 14)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Noctyra")
-                    .font(.headline.weight(.semibold))
-                    .lineLimit(1)
-                Text(snapshot.isFetching ? "Fetching ciphertext" : "Sync dashboard")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.58))
-                    .lineLimit(1)
-            }
-
-            Spacer(minLength: 4)
-
-            Text(snapshot.isFetching ? "Syncing" : "Ready")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(snapshot.isFetching ? Color.cyan : Color.green)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(.white.opacity(0.08), in: Capsule())
-                .overlay(Capsule().stroke(.white.opacity(0.10), lineWidth: 0.7))
-        }
-    }
-
-    private var mediumDetails: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                statChip(title: "Profiles", value: snapshot.profileCount)
-                statChip(title: "Fetched", value: snapshot.fetchedEnvelopeCount)
-            }
-
-            Text(statusText)
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.58))
-                .lineLimit(1)
-        }
     }
 
     private func statChip(title: String, value: Int) -> some View {
@@ -261,11 +221,11 @@ private struct NoctyraSyncWidgetView: View {
             if #available(iOSApplicationExtension 17.0, *) {
                 Button(intent: NoctyraWidgetFetchIntent()) {
                     if compact {
-                        Image(systemName: snapshot.isFetching ? "arrow.triangle.2.circlepath" : "arrow.down.circle.fill")
+                        Image(systemName: snapshot.isFetching ? "sparkles" : "tray.and.arrow.down.fill")
                             .font(.system(size: 16, weight: .semibold))
                             .frame(width: 30, height: 30)
                     } else {
-                        Label(snapshot.isFetching ? "Fetching" : "Fetch", systemImage: "arrow.down.circle.fill")
+                        Label(snapshot.isFetching ? "Checking" : "Check", systemImage: "tray.and.arrow.down.fill")
                             .lineLimit(1)
                     }
                 }
@@ -274,7 +234,7 @@ private struct NoctyraSyncWidgetView: View {
                 .buttonStyle(.plain)
                 .padding(.horizontal, compact ? 0 : 12)
                 .padding(.vertical, compact ? 0 : 7)
-                .background(Color.indigo.opacity(0.92), in: Capsule())
+                .background(Color.purple.opacity(0.88), in: Capsule())
                 .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 0.8))
             }
         }
@@ -282,17 +242,17 @@ private struct NoctyraSyncWidgetView: View {
 
     private var compactFooterText: String {
         if snapshot.profileCount == 0 {
-            return "No identities configured"
+            return "Nothing set up yet"
         }
         return shortStatusText
     }
 
     private var statusText: String {
         if let lastSuccess = snapshot.lastSuccessAt {
-            return "Last success \(Self.relativeFormatter.localizedString(for: lastSuccess, relativeTo: Date()))"
+            return "Last check \(Self.relativeFormatter.localizedString(for: lastSuccess, relativeTo: Date()))"
         }
         if let lastAttempt = snapshot.lastAttemptAt {
-            return "Last attempt \(Self.relativeFormatter.localizedString(for: lastAttempt, relativeTo: Date()))"
+            return "Last check \(Self.relativeFormatter.localizedString(for: lastAttempt, relativeTo: Date()))"
         }
         return snapshot.status
     }
