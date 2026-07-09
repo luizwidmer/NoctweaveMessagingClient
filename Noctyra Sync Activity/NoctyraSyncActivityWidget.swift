@@ -120,50 +120,48 @@ private struct NoctyraSyncWidgetView: View {
     }
 
     private var mediumLayout: some View {
-        HStack(alignment: .top, spacing: 16) {
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(spacing: 9) {
-                    icon(size: 28, symbolSize: 14)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Noctyra Sync")
-                            .font(.headline.weight(.semibold))
-                            .lineLimit(1)
-                        Text(snapshot.isFetching ? "Checking for notes" : "Quiet mailbox")
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.white.opacity(0.56))
-                            .lineLimit(1)
-                    }
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                icon(size: 30, symbolSize: 15)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Inbox")
+                        .font(.headline.weight(.semibold))
+                        .lineLimit(1)
+                    Text(snapshot.isFetching ? "Checking quietly" : "Noctyra is quiet")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.56))
+                        .lineLimit(1)
                 }
+                Spacer(minLength: 8)
+                statusPill
+            }
 
-                Spacer(minLength: 0)
+            Spacer(minLength: 0)
 
+            HStack(alignment: .bottom, spacing: 18) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("\(snapshot.stagedEnvelopeCount)")
-                        .font(.system(size: 40, weight: .semibold, design: .rounded))
+                        .font(.system(size: 42, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                         .lineLimit(1)
                         .minimumScaleFactor(0.70)
-                    Text(snapshot.stagedEnvelopeCount == 1 ? "private note waiting" : "waiting for you")
-                        .font(.caption2.weight(.semibold))
+                    Text(snapshot.stagedEnvelopeCount == 1 ? "note waiting" : "waiting for you")
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(.white.opacity(0.62))
                         .lineLimit(1)
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(alignment: .trailing, spacing: 8) {
-                statusPill
-                statChip(title: "Boxes", value: snapshot.profileCount)
-                statChip(title: "Found", value: snapshot.fetchedEnvelopeCount)
-                Spacer(minLength: 0)
-                Text(statusText)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.white.opacity(0.56))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-                fetchButton(compact: false)
+                Spacer(minLength: 8)
+
+                VStack(alignment: .trailing, spacing: 8) {
+                    Text(shortStatusText)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.56))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                    fetchButton(compact: false)
+                }
             }
-            .frame(width: 118, alignment: .trailing)
         }
         .foregroundStyle(.white)
     }
@@ -188,7 +186,7 @@ private struct NoctyraSyncWidgetView: View {
     }
 
     private var statusPill: some View {
-        Text(snapshot.isFetching ? "Checking" : "Settled")
+        Text(snapshot.isFetching ? "Checking" : "Quiet")
             .font(.caption2.weight(.semibold))
             .foregroundStyle(snapshot.isFetching ? Color.cyan : Color.mint)
             .lineLimit(1)
@@ -196,24 +194,6 @@ private struct NoctyraSyncWidgetView: View {
             .padding(.vertical, 5)
             .background(.white.opacity(0.08), in: Capsule())
             .overlay(Capsule().stroke(.white.opacity(0.10), lineWidth: 0.7))
-    }
-
-    private func statChip(title: String, value: Int) -> some View {
-        HStack(spacing: 5) {
-            Text("\(value)")
-                .font(.caption.weight(.semibold))
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-            Text(title)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.white.opacity(0.56))
-                .lineLimit(1)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(.white.opacity(0.07), in: Capsule())
-        .overlay(Capsule().stroke(.white.opacity(0.10), lineWidth: 0.7))
     }
 
     private func fetchButton(compact: Bool) -> some View {
@@ -245,16 +225,6 @@ private struct NoctyraSyncWidgetView: View {
             return "Nothing set up yet"
         }
         return shortStatusText
-    }
-
-    private var statusText: String {
-        if let lastSuccess = snapshot.lastSuccessAt {
-            return "Last check \(Self.relativeFormatter.localizedString(for: lastSuccess, relativeTo: Date()))"
-        }
-        if let lastAttempt = snapshot.lastAttemptAt {
-            return "Last check \(Self.relativeFormatter.localizedString(for: lastAttempt, relativeTo: Date()))"
-        }
-        return snapshot.status
     }
 
     private var shortStatusText: String {
