@@ -15,7 +15,17 @@ struct NoctyraSyncDashboardWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: NoctyraSyncTimelineProvider()) { entry in
             NoctyraSyncWidgetView(snapshot: entry.snapshot)
-                .containerBackground(Color(red: 0.07, green: 0.08, blue: 0.12), for: .widget)
+                .containerBackground(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.08, green: 0.09, blue: 0.14),
+                            Color(red: 0.05, green: 0.10, blue: 0.13)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    for: .widget
+                )
         }
         .configurationDisplayName("Noctyra Sync")
         .description("Shows encrypted relay fetch status without message content.")
@@ -58,59 +68,136 @@ private struct NoctyraSyncTimelineProvider: TimelineProvider {
 
 private struct NoctyraSyncWidgetView: View {
     let snapshot: NoctyraSyncWidgetSnapshot
+    @Environment(\.widgetFamily) private var family
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: snapshot.isFetching ? "arrow.triangle.2.circlepath" : "shield.lefthalf.filled")
-                    .foregroundStyle(.indigo)
-                Text("Noctyra Sync")
+        VStack(alignment: .leading, spacing: family == .systemSmall ? 9 : 12) {
+            header
+
+            Spacer(minLength: 0)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(snapshot.stagedEnvelopeCount)")
+                    .font(.system(size: family == .systemSmall ? 38 : 44, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                Text(snapshot.stagedEnvelopeCount == 1 ? "encrypted envelope staged" : "encrypted envelopes staged")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.70))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.76)
+            }
+
+            if family == .systemMedium {
+                mediumDetails
+            } else {
+                Text(compactFooterText)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.58))
+                    .lineLimit(1)
+            }
+
+            fetchButton
+        }
+        .foregroundStyle(.white)
+    }
+
+    private var header: some View {
+        HStack(spacing: 9) {
+            Image(systemName: snapshot.isFetching ? "arrow.triangle.2.circlepath" : "shield.lefthalf.filled")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(
+                    Circle()
+                        .fill(Color.indigo.opacity(0.38))
+                        .overlay(Circle().stroke(Color.white.opacity(0.14), lineWidth: 0.8))
+                )
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Noctyra")
                     .font(.headline.weight(.semibold))
-                Spacer()
+                    .lineLimit(1)
+                Text(snapshot.isFetching ? "Fetching ciphertext" : "Sync dashboard")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.58))
+                    .lineLimit(1)
             }
 
-            HStack(spacing: 10) {
-                metric("Profiles", snapshot.profileCount)
-                metric("Fetched", snapshot.fetchedEnvelopeCount)
-                metric("Staged", snapshot.stagedEnvelopeCount)
+            Spacer(minLength: 4)
+
+            Text(snapshot.isFetching ? "Syncing" : "Ready")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(snapshot.isFetching ? Color.cyan : Color.green)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(.white.opacity(0.08), in: Capsule())
+                .overlay(Capsule().stroke(.white.opacity(0.10), lineWidth: 0.7))
+        }
+    }
+
+    private var mediumDetails: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                statChip(title: "Profiles", value: snapshot.profileCount)
+                statChip(title: "Fetched", value: snapshot.fetchedEnvelopeCount)
             }
 
-            Text(snapshot.status)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+            Text(statusText)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.58))
+                .lineLimit(1)
+        }
+    }
 
+    private func statChip(title: String, value: Int) -> some View {
+        HStack(spacing: 5) {
+            Text("\(value)")
+                .font(.caption.weight(.semibold))
+                .monospacedDigit()
+            Text(title)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.white.opacity(0.56))
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(.white.opacity(0.07), in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.10), lineWidth: 0.7))
+    }
+
+    private var fetchButton: some View {
+        Group {
             if #available(iOSApplicationExtension 17.0, *) {
                 Button(intent: NoctyraWidgetFetchIntent()) {
-                    Label(snapshot.isFetching ? "Fetching" : "Fetch Now", systemImage: "arrow.down.circle")
+                    Label(snapshot.isFetching ? "Fetching" : "Fetch", systemImage: "arrow.down.circle.fill")
                 }
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.borderedProminent)
                 .tint(.indigo)
             }
-
-            if let lastSuccess = snapshot.lastSuccessAt {
-                Text("Last success \(lastSuccess, style: .relative)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            } else if let lastAttempt = snapshot.lastAttemptAt {
-                Text("Last attempt \(lastAttempt, style: .relative)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
         }
-        .foregroundStyle(.white)
     }
 
-    private func metric(_ title: String, _ value: Int) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("\(value)")
-                .font(.headline.weight(.semibold))
-                .monospacedDigit()
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+    private var compactFooterText: String {
+        if snapshot.profileCount == 0 {
+            return "No identities configured"
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        return statusText
     }
+
+    private var statusText: String {
+        if let lastSuccess = snapshot.lastSuccessAt {
+            return "Last success \(Self.relativeFormatter.localizedString(for: lastSuccess, relativeTo: Date()))"
+        }
+        if let lastAttempt = snapshot.lastAttemptAt {
+            return "Last attempt \(Self.relativeFormatter.localizedString(for: lastAttempt, relativeTo: Date()))"
+        }
+        return snapshot.status
+    }
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
 }
