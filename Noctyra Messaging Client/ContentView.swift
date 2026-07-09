@@ -72,6 +72,7 @@ private enum IOSMainTab: String, Hashable {
 struct ContentView: View {
     @StateObject private var model = ClientViewModel()
     @StateObject private var screenProtection = ScreenProtectionMonitor()
+    @StateObject private var syncDashboard = NoctyraSyncDashboardController()
     @State private var selection: SidebarItem?
     @State private var showingAddContact = ProcessInfo.processInfo.arguments.contains("SHOW_ADD_CONTACT")
     @State private var showingCreateGroup = ProcessInfo.processInfo.arguments.contains("SHOW_CREATE_GROUP")
@@ -189,6 +190,7 @@ struct ContentView: View {
         }
         .onAppear {
             screenProtection.refresh()
+            syncDashboard.refreshFromStore()
             #if os(macOS)
             screenProtection.setHideWhenUnfocusedEnabled(model.state.privacy.hideSensitiveWhenUnfocused)
             screenProtection.setAppInFocus(windowController.isAppActive)
@@ -199,6 +201,8 @@ struct ContentView: View {
             model.handleScenePhaseChange(newValue)
             if newValue == .active {
                 screenProtection.refresh()
+                syncDashboard.refreshFromStore()
+                Task { await syncDashboard.updateLiveActivityIfRunning() }
             }
         }
         #if os(macOS)
@@ -313,7 +317,7 @@ struct ContentView: View {
             .hideSheetNavigationBar()
         case .settings:
             NavigationStack {
-                SettingsView(model: model)
+                SettingsView(model: model, syncDashboard: syncDashboard)
             }
             .toolbar(.hidden, for: .navigationBar)
         }
@@ -591,7 +595,7 @@ struct ContentView: View {
         case .attachments:
             AttachmentLibraryView(model: model)
         case .settings:
-            SettingsView(model: model)
+            SettingsView(model: model, syncDashboard: syncDashboard)
         case .relays:
             RelaysView(model: model)
         case .identityManagement:
@@ -7913,6 +7917,7 @@ private struct NoctyraMenuCard<TitleAccessory: View, TrailingAccessory: View>: V
 
 private struct SettingsView: View {
     @ObservedObject var model: ClientViewModel
+    @ObservedObject var syncDashboard: NoctyraSyncDashboardController
     @State private var selectedTheme: ThemePalette = .glacier
     @State private var privacySettings = PrivacySettings()
     @State private var appLockSettings = AppLockSettings()
@@ -7938,6 +7943,7 @@ private struct SettingsView: View {
         case appearance
         case privacy
         case appLock
+        case sync
         case storage
         case legal
         case donate
@@ -7952,6 +7958,8 @@ private struct SettingsView: View {
                 return "Privacy"
             case .appLock:
                 return "App Lock"
+            case .sync:
+                return "Sync Dashboard"
             case .storage:
                 return "Storage"
             case .legal:
@@ -7969,6 +7977,8 @@ private struct SettingsView: View {
                 return "Typing, camera, and capture safeguards"
             case .appLock:
                 return "Biometrics, PIN, and timeout controls"
+            case .sync:
+                return "Live Activity and ciphertext prefetch"
             case .storage:
                 return "Encryption and local data protection"
             case .legal:
@@ -7986,6 +7996,8 @@ private struct SettingsView: View {
                 return "lock.shield"
             case .appLock:
                 return "key.viewfinder"
+            case .sync:
+                return "antenna.radiowaves.left.and.right"
             case .storage:
                 return "externaldrive.fill"
             case .legal:
@@ -8209,6 +8221,8 @@ private struct SettingsView: View {
             privacyFields
         case .appLock:
             appLockFields
+        case .sync:
+            syncDashboardFields
         case .storage:
             storageFields
         case .legal:
@@ -8248,6 +8262,7 @@ private struct SettingsView: View {
                 appLockSettings = model.state.appLock
                 lockScreenMessageDraft = model.state.appLock.lockScreenMessage
                 storageMode = model.storageProtectionMode
+                syncDashboard.refreshFromStore()
             }
             .onChange(of: selectedTheme) { _, newValue in
                 Task { await model.updateTheme(newValue) }
@@ -8446,6 +8461,126 @@ private struct SettingsView: View {
             }
         }
     }
+
+    @ViewBuilder
+    private var syncDashboardFields: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: syncDashboard.isFetching ? "arrow.triangle.2.circlepath" : "shield.lefthalf.filled")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(ThemeStyle(palette: model.state.appearance.theme).accent)
+                    .frame(width: 34, height: 34)
+                    .background(.thinMaterial, in: Circle())
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(syncDashboard.isFetching ? "Fetching encrypted envelopes" : "Ciphertext dashboard")
+                        .font(.headline)
+                    Text(syncDashboard.statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 10)], spacing: 10) {
+                syncMetric("Profiles", "\(syncDashboard.profileCount)")
+                syncMetric("Fetched", "\(syncDashboard.fetchedEnvelopeCount)")
+                syncMetric("Staged", "\(syncDashboard.stagedEnvelopeCount)")
+            }
+
+            if let lastAttempt = syncDashboard.lastAttemptAt {
+                Text("Last attempt: \(formatSyncDashboardDate(lastAttempt))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let lastSuccess = syncDashboard.lastSuccessAt {
+                Text("Last success: \(formatSyncDashboardDate(lastSuccess))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("This dashboard stages encrypted relay envelopes only. No message content is decrypted and no delivery acknowledgement is sent until Noctyra opens and processes the ciphertext.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let error = syncDashboard.liveActivityError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await syncDashboard.prefetchNow() }
+                    FeedbackGenerator.light()
+                } label: {
+                    Label(syncDashboard.isFetching ? "Fetching" : "Fetch Now", systemImage: "arrow.down.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(syncDashboard.isFetching)
+
+                #if os(iOS)
+                Button {
+                    if syncDashboard.isLiveActivityRunning {
+                        syncDashboard.stopLiveActivity()
+                    } else {
+                        syncDashboard.startLiveActivity()
+                    }
+                    FeedbackGenerator.light()
+                } label: {
+                    Label(
+                        syncDashboard.isLiveActivityRunning ? "Stop Live Activity" : "Start Live Activity",
+                        systemImage: "rectangle.inset.filled.and.person.filled"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .disabled(!syncDashboard.liveActivitiesAvailable)
+                #endif
+            }
+
+            #if os(iOS)
+            if !syncDashboard.liveActivitiesAvailable {
+                Text("Live Activities are disabled or unavailable on this device. Enable them in iOS Settings to show the sync dashboard on the Lock Screen and Dynamic Island.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            #else
+            Text("Live Activities are iPhone-only. macOS can still run the same ciphertext prefetch from this screen.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            #endif
+        }
+        .onAppear {
+            syncDashboard.refreshFromStore()
+        }
+    }
+
+    private func syncMetric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(value)
+                .font(.title3.weight(.semibold))
+                .monospacedDigit()
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func formatSyncDashboardDate(_ date: Date) -> String {
+        Self.syncDashboardDateFormatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    private static let syncDashboardDateFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
 
     private var appLockFields: some View {
         VStack(alignment: .leading, spacing: 12) {

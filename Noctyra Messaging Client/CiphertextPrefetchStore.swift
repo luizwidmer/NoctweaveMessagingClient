@@ -192,6 +192,10 @@ final class CiphertextPrefetchStore {
         }
     }
 
+    func prefetchedRecordCount() throws -> Int {
+        try loadPrefetchRecords().count
+    }
+
     func removeDirectEnvelopeIds(_ ids: Set<UUID>, profileId: UUID) throws {
         guard !ids.isEmpty else { return }
         let profileInboxId = try loadConfig()?.profiles.first(where: { $0.id == profileId })?.inboxId

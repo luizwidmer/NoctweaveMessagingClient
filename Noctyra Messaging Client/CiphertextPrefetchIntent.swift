@@ -10,7 +10,8 @@ struct NoctyraCiphertextPrefetchIntent: AppIntent {
     static var openAppWhenRun = false
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        _ = await CiphertextPrefetchRunner.runDefault()
+        let result = await CiphertextPrefetchRunner.runDefault()
+        await NoctyraSyncDashboardController.refreshLiveActivitiesFromStore(fetchedEnvelopeCount: result.fetchedEnvelopeCount)
         return .result(dialog: "Noctyra ciphertext sync finished. Open Noctyra to review sync status.")
     }
 }
