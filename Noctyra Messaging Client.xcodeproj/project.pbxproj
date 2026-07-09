@@ -521,8 +521,6 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Noctyra needs camera access to scan QR contact codes or to send taken pictures.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Noctyra uses Face ID to re-authenticate before changing app security settings and to unlock protected content.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Noctyra needs microphone access to record encrypted voice messages.";
-				"INFOPLIST_KEY_NSSupportsLiveActivities[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_NSSupportsLiveActivities[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -581,8 +579,6 @@
 				INFOPLIST_KEY_NSCameraUsageDescription = "Noctyra needs camera access to scan QR contact codes or to send taken pictures.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Noctyra uses Face ID to re-authenticate before changing app security settings and to unlock protected content.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Noctyra needs microphone access to record encrypted voice messages.";
-				"INFOPLIST_KEY_NSSupportsLiveActivities[sdk=iphoneos*]" = YES;
-				"INFOPLIST_KEY_NSSupportsLiveActivities[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;

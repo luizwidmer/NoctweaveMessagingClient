@@ -197,12 +197,12 @@ struct ContentView: View {
             windowController.setBlockWindowCapture(model.state.privacy.macBlockWindowCapture)
             #endif
         }
-        .onChange(of: scenePhase) { _, newValue in
-            model.handleScenePhaseChange(newValue)
-            if newValue == .active {
+        .onChange(of: scenePhase) {
+            model.handleScenePhaseChange(scenePhase)
+            if scenePhase == .active {
                 screenProtection.refresh()
                 syncDashboard.refreshFromStore()
-                Task { await syncDashboard.updateLiveActivityIfRunning() }
+                syncDashboard.reloadWidgetTimeline()
             }
         }
         #if os(macOS)
@@ -7978,7 +7978,7 @@ private struct SettingsView: View {
             case .appLock:
                 return "Biometrics, PIN, and timeout controls"
             case .sync:
-                return "Live Activity, widget, and ciphertext fetch"
+                return "Widget dashboard and ciphertext fetch"
             case .storage:
                 return "Encryption and local data protection"
             case .legal:
@@ -8474,7 +8474,7 @@ private struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(syncDashboard.isFetching ? "Fetching encrypted envelopes" : "Ciphertext dashboard")
                         .font(.headline)
-                    Text("The dashboard is shown in the Noctyra Sync widget and Live Activity. This page only controls ciphertext fetching.")
+                    Text("The dashboard is shown in the Noctyra Sync widget. This page only controls ciphertext fetching.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -8491,7 +8491,7 @@ private struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
 
-            if let error = syncDashboard.liveActivityError {
+            if let error = syncDashboard.syncError {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -8507,35 +8507,15 @@ private struct SettingsView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(syncDashboard.isFetching)
-
-                #if os(iOS)
-                Button {
-                    if syncDashboard.isLiveActivityRunning {
-                        syncDashboard.stopLiveActivity()
-                    } else {
-                        syncDashboard.startLiveActivity()
-                    }
-                    FeedbackGenerator.light()
-                } label: {
-                    Label(
-                        syncDashboard.isLiveActivityRunning ? "Stop Live Activity" : "Start Live Activity",
-                        systemImage: "rectangle.inset.filled.and.person.filled"
-                    )
-                }
-                .buttonStyle(.bordered)
-                .disabled(!syncDashboard.liveActivitiesAvailable)
-                #endif
             }
 
             #if os(iOS)
-            if !syncDashboard.liveActivitiesAvailable {
-                Text("Live Activities are disabled or unavailable on this device. Enable them in iOS Settings to show the sync dashboard on the Lock Screen and Dynamic Island.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text("Add the Noctyra Sync widget to your Home Screen or Lock Screen to run ciphertext fetches without opening the full app. iOS still controls widget execution time and refresh budget.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             #else
-            Text("Live Activities and widgets are iPhone-only. macOS can still run the same ciphertext prefetch from this screen.")
+            Text("Widgets are iPhone-only. macOS can still run the same ciphertext prefetch from this screen.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

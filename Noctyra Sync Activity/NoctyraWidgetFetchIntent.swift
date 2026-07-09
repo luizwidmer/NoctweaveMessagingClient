@@ -1,4 +1,3 @@
-import ActivityKit
 import AppIntents
 import CryptoKit
 import Foundation
@@ -229,7 +228,7 @@ private enum NoctyraWidgetPrefetchKeychain {
     }
 
     private static func loadKey() throws -> SymmetricKey? {
-        var query: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
@@ -434,20 +433,6 @@ private struct NoctyraWidgetPrefetchRunner {
             status: status
         )
         NoctyraWidgetPrefetchStore.writeSnapshot(snapshot)
-        let state = NoctyraSyncActivityAttributes.ContentState(
-            isFetching: isFetching,
-            lastAttemptAt: lastAttemptAt,
-            lastSuccessAt: lastSuccessAt,
-            fetchedEnvelopeCount: fetchedEnvelopeCount,
-            stagedEnvelopeCount: stagedEnvelopeCount,
-            profileCount: profileCount,
-            status: status
-        )
-        if #available(iOS 16.2, *) {
-            for activity in Activity<NoctyraSyncActivityAttributes>.activities {
-                await activity.update(ActivityContent(state: state, staleDate: Date().addingTimeInterval(15 * 60)))
-            }
-        }
     }
 }
 

@@ -11,7 +11,7 @@ struct NoctyraCiphertextPrefetchIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let result = await CiphertextPrefetchRunner.runDefault()
-        await NoctyraSyncDashboardController.refreshLiveActivitiesFromStore(fetchedEnvelopeCount: result.fetchedEnvelopeCount)
+        await NoctyraSyncDashboardController.refreshWidgetFromStore(fetchedEnvelopeCount: result.fetchedEnvelopeCount)
         return .result(dialog: "Noctyra ciphertext sync finished. Open Noctyra to review sync status.")
     }
 }
