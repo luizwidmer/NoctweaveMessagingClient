@@ -114,6 +114,7 @@ final class ClientViewModel: ObservableObject {
     private var statePersistenceWaiters: [CheckedContinuation<Void, Error>] = []
     private let notifier = NotificationManager()
     private var autoFetchTask: Task<Void, Never>?
+    private var foregroundSyncTask: Task<Void, Never>?
     private var sessionResetCooldown = SessionRecovery.Cooldown(interval: 30)
     private let resendRequestCount = 32
     private let attachmentChunkSize = 64 * 1024
@@ -336,7 +337,8 @@ final class ClientViewModel: ObservableObject {
             isReady = true
             if !isLocked {
                 await notifier.requestAuthorization()
-                startAutoFetch()
+                startAutoFetchIfEligible()
+                requestForegroundSyncIfEligible()
             }
         } catch {
             lastError = "Failed to load state: \(safeStorageErrorDescription(error, fallback: "Local state could not be opened."))"
@@ -2643,6 +2645,7 @@ final class ClientViewModel: ObservableObject {
         isLocked = false
         lastInactiveAt = nil
         startAutoFetchIfEligible()
+        requestForegroundSyncIfEligible()
     }
 
     func handleScenePhaseChange(_ phase: ScenePhase) {
@@ -2665,6 +2668,7 @@ final class ClientViewModel: ObservableObject {
         guard state.appLock.mode != .off else {
             if phase == .active {
                 startAutoFetchIfEligible()
+                requestForegroundSyncIfEligible()
             }
             return
         }
@@ -2675,6 +2679,7 @@ final class ClientViewModel: ObservableObject {
             }
             if !isLocked {
                 startAutoFetchIfEligible()
+                requestForegroundSyncIfEligible()
             }
         case .inactive, .background:
             break
@@ -6553,6 +6558,28 @@ final class ClientViewModel: ObservableObject {
         startAutoFetch()
     }
 
+    private func requestForegroundSyncIfEligible() {
+        guard isReady,
+              !requiresOnboarding,
+              !isLocked,
+              state.hasCompletedOnboarding,
+              state.hasAcceptedPrivacyPolicy,
+              state.hasAcceptedTermsOfUse else {
+            return
+        }
+        guard foregroundSyncTask == nil else {
+            return
+        }
+        foregroundSyncTask = Task { [weak self] in
+            guard let self else { return }
+            await self.fetchMessages()
+            await self.refreshInsecurePairingIfNeeded()
+            await self.refreshCoordinatorDirectoryIfNeeded()
+            await NoctyraSyncDashboardController.refreshWidgetFromStore()
+            self.foregroundSyncTask = nil
+        }
+    }
+
     private func refreshCoordinatorDirectoryIfNeeded(force: Bool = false) async {
         guard let selectedId = state.selectedRelayId,
               let relay = state.relayServers.first(where: { $0.id == selectedId }),
@@ -8557,6 +8584,8 @@ final class ClientViewModel: ObservableObject {
     private func stopAutoFetch() {
         autoFetchTask?.cancel()
         autoFetchTask = nil
+        foregroundSyncTask?.cancel()
+        foregroundSyncTask = nil
     }
 
     private func deleteAllLocalDocuments() {
