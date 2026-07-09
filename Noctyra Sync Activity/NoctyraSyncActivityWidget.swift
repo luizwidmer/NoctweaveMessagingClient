@@ -127,13 +127,15 @@ private struct NoctyraSyncWidgetView: View {
                     Text("Inbox")
                         .font(.headline.weight(.semibold))
                         .lineLimit(1)
-                    Text(snapshot.isFetching ? "Checking quietly" : "Noctyra is quiet")
+                    Text(snapshot.isFetching ? "Checking" : "Last sync")
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.white.opacity(0.56))
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                statusPill
+                if snapshot.isFetching {
+                    statusPill
+                }
             }
 
             Spacer(minLength: 0)
@@ -186,9 +188,9 @@ private struct NoctyraSyncWidgetView: View {
     }
 
     private var statusPill: some View {
-        Text(snapshot.isFetching ? "Checking" : "Quiet")
+        Text("Checking")
             .font(.caption2.weight(.semibold))
-            .foregroundStyle(snapshot.isFetching ? Color.cyan : Color.mint)
+            .foregroundStyle(Color.cyan)
             .lineLimit(1)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
