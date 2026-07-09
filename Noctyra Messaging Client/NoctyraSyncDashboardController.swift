@@ -3,10 +3,15 @@ import Combine
 
 #if os(iOS)
 import ActivityKit
+import WidgetKit
 #endif
 
 @MainActor
 final class NoctyraSyncDashboardController: ObservableObject {
+    private static let appGroupIdentifier = "group.com.noctyra.client"
+    private static let widgetSnapshotKey = "NoctyraSyncDashboardSnapshot"
+    private static let widgetKind = "NoctyraSyncDashboardWidget"
+
     @Published private(set) var isLiveActivityRunning = false
     @Published private(set) var isFetching = false
     @Published private(set) var lastAttemptAt: Date?
@@ -40,6 +45,7 @@ final class NoctyraSyncDashboardController: ObservableObject {
                 profileCount: profileCount,
                 isFetching: isFetching
             )
+            writeWidgetSnapshot()
             refreshLiveActivityState()
         } catch {
             liveActivityError = "Unable to read encrypted prefetch status."
@@ -101,6 +107,7 @@ final class NoctyraSyncDashboardController: ObservableObject {
         isFetching = true
         liveActivityError = nil
         lastAttemptAt = Date()
+        writeWidgetSnapshot()
         await updateLiveActivityIfRunning()
 
         let result = await CiphertextPrefetchRunner(store: store).run()
@@ -119,6 +126,7 @@ final class NoctyraSyncDashboardController: ObservableObject {
             if !result.failures.isEmpty {
                 liveActivityError = result.failures.joined(separator: "\n")
             }
+            writeWidgetSnapshot()
         } catch {
             liveActivityError = "Sync completed, but status could not be read."
         }
@@ -132,6 +140,7 @@ final class NoctyraSyncDashboardController: ObservableObject {
         for activity in Activity<NoctyraSyncActivityAttributes>.activities {
             await activity.update(ActivityContent(state: state, staleDate: Date().addingTimeInterval(15 * 60)))
         }
+        WidgetCenter.shared.reloadTimelines(ofKind: Self.widgetKind)
         refreshLiveActivityState()
         #endif
     }
@@ -155,6 +164,15 @@ final class NoctyraSyncDashboardController: ObservableObject {
         for activity in Activity<NoctyraSyncActivityAttributes>.activities {
             await activity.update(ActivityContent(state: state, staleDate: Date().addingTimeInterval(15 * 60)))
         }
+        writeWidgetSnapshot(
+            isFetching: false,
+            lastAttemptAt: status.lastAttemptAt,
+            lastSuccessAt: status.lastSuccessAt,
+            fetchedEnvelopeCount: fetchedEnvelopeCount ?? 0,
+            stagedEnvelopeCount: stagedCount,
+            profileCount: profileCount,
+            status: status.lastResult ?? "No sync yet"
+        )
         #endif
     }
 
@@ -172,6 +190,44 @@ final class NoctyraSyncDashboardController: ObservableObject {
         self.profileCount = profileCount
         self.statusText = status.lastResult ?? "No sync yet"
         self.isFetching = isFetching
+    }
+
+    private func writeWidgetSnapshot() {
+        Self.writeWidgetSnapshot(
+            isFetching: isFetching,
+            lastAttemptAt: lastAttemptAt,
+            lastSuccessAt: lastSuccessAt,
+            fetchedEnvelopeCount: fetchedEnvelopeCount,
+            stagedEnvelopeCount: stagedEnvelopeCount,
+            profileCount: profileCount,
+            status: statusText
+        )
+    }
+
+    private static func writeWidgetSnapshot(
+        isFetching: Bool,
+        lastAttemptAt: Date?,
+        lastSuccessAt: Date?,
+        fetchedEnvelopeCount: Int,
+        stagedEnvelopeCount: Int,
+        profileCount: Int,
+        status: String
+    ) {
+        #if os(iOS)
+        let snapshot = NoctyraSyncWidgetSnapshot(
+            updatedAt: Date(),
+            isFetching: isFetching,
+            lastAttemptAt: lastAttemptAt,
+            lastSuccessAt: lastSuccessAt,
+            fetchedEnvelopeCount: fetchedEnvelopeCount,
+            stagedEnvelopeCount: stagedEnvelopeCount,
+            profileCount: profileCount,
+            status: status
+        )
+        guard let payload = try? JSONEncoder().encode(snapshot) else { return }
+        UserDefaults(suiteName: appGroupIdentifier)?.set(payload, forKey: widgetSnapshotKey)
+        WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+        #endif
     }
 
     private func refreshLiveActivityState() {

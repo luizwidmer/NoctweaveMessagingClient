@@ -7959,7 +7959,7 @@ private struct SettingsView: View {
             case .appLock:
                 return "App Lock"
             case .sync:
-                return "Sync Dashboard"
+                return "Sync Activity"
             case .storage:
                 return "Storage"
             case .legal:
@@ -7978,7 +7978,7 @@ private struct SettingsView: View {
             case .appLock:
                 return "Biometrics, PIN, and timeout controls"
             case .sync:
-                return "Live Activity and ciphertext prefetch"
+                return "Live Activity, widget, and ciphertext fetch"
             case .storage:
                 return "Encryption and local data protection"
             case .legal:
@@ -8474,34 +8474,22 @@ private struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(syncDashboard.isFetching ? "Fetching encrypted envelopes" : "Ciphertext dashboard")
                         .font(.headline)
-                    Text(syncDashboard.statusText)
+                    Text("The dashboard is shown in the Noctyra Sync widget and Live Activity. This page only controls ciphertext fetching.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 10)], spacing: 10) {
-                syncMetric("Profiles", "\(syncDashboard.profileCount)")
-                syncMetric("Fetched", "\(syncDashboard.fetchedEnvelopeCount)")
-                syncMetric("Staged", "\(syncDashboard.stagedEnvelopeCount)")
-            }
-
-            if let lastAttempt = syncDashboard.lastAttemptAt {
-                Text("Last attempt: \(formatSyncDashboardDate(lastAttempt))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let lastSuccess = syncDashboard.lastSuccessAt {
-                Text("Last success: \(formatSyncDashboardDate(lastSuccess))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
             Text("This dashboard stages encrypted relay envelopes only. No message content is decrypted and no delivery acknowledgement is sent until Noctyra opens and processes the ciphertext.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Text("Current status: \(syncDashboard.statusText)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
 
             if let error = syncDashboard.liveActivityError {
                 Text(error)
@@ -8547,7 +8535,7 @@ private struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             #else
-            Text("Live Activities are iPhone-only. macOS can still run the same ciphertext prefetch from this screen.")
+            Text("Live Activities and widgets are iPhone-only. macOS can still run the same ciphertext prefetch from this screen.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -8556,20 +8544,6 @@ private struct SettingsView: View {
         .onAppear {
             syncDashboard.refreshFromStore()
         }
-    }
-
-    private func syncMetric(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(value)
-                .font(.title3.weight(.semibold))
-                .monospacedDigit()
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 
     private func formatSyncDashboardDate(_ date: Date) -> String {
