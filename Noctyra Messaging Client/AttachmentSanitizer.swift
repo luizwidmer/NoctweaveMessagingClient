@@ -401,11 +401,14 @@ private enum ZipPackage {
             output = Data(compressedData)
         case 8:
             var destination = [UInt8](repeating: 0, count: expectedSize)
-            let decodedCount = compressedData.withUnsafeBytes { sourceBuffer in
-                compression_decode_buffer(
+            let decodedCount: Int = compressedData.withUnsafeBytes { sourceBuffer in
+                guard let sourceAddress = sourceBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                    return -1
+                }
+                return compression_decode_buffer(
                     &destination,
                     destination.count,
-                    sourceBuffer.bindMemory(to: UInt8.self).baseAddress!,
+                    sourceAddress,
                     compressedData.count,
                     nil,
                     COMPRESSION_ZLIB

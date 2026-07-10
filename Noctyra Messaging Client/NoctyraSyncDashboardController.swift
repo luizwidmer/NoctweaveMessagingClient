@@ -74,6 +74,13 @@ final class NoctyraSyncDashboardController: ObservableObject {
         #endif
     }
 
+    static func clearWidgetSnapshot() {
+        #if os(iOS)
+        UserDefaults(suiteName: appGroupIdentifier)?.removeObject(forKey: widgetSnapshotKey)
+        WidgetCenter.shared.reloadTimelines(ofKind: widgetKind)
+        #endif
+    }
+
     static func refreshWidgetFromStore(fetchedEnvelopeCount: Int? = nil) async {
         #if os(iOS)
         let store = CiphertextPrefetchStore()

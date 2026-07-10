@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import Combine
+import NoctweaveCore
 
 struct VoiceRecorderSheetView: View {
     let onRecorded: (Data, String, String) -> Void
@@ -37,7 +38,7 @@ struct VoiceRecorderSheetView: View {
                     }
 
                     SheetSection(title: "Privacy", icon: "lock.shield.fill") {
-                        Text("Audio is recorded into the app’s temporary storage and sent through the encrypted attachment pipeline. The temporary file is overwritten before removal when the sheet closes or the recording is sent.")
+                        Text("Audio stays in the app’s temporary storage and enters the encrypted attachment pipeline directly. No Photos-library copy is created. Noctyra requests a best-effort overwrite before deletion, but flash storage and copy-on-write filesystems cannot guarantee physical erasure of remapped blocks.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
@@ -226,9 +227,21 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
         guard let url = recordingURL else {
             throw VoiceRecorderError.noRecording
         }
+        defer {
+            try? securelyRemoveRecordingFile(at: url)
+            recordingURL = nil
+        }
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values.isRegularFile == true,
+              let fileSize = values.fileSize,
+              fileSize > 0,
+              fileSize <= AttachmentDescriptor.maximumTransportBytes else {
+            throw VoiceRecorderError.recordingTooLarge
+        }
         let data = try Data(contentsOf: url)
-        try? securelyRemoveRecordingFile(at: url)
-        recordingURL = nil
+        guard data.count <= AttachmentDescriptor.maximumTransportBytes else {
+            throw VoiceRecorderError.recordingTooLarge
+        }
         return (data, "voice.m4a", "audio/m4a")
     }
 
@@ -280,7 +293,8 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
             let recorder = try AVAudioRecorder(url: url, settings: settings)
             recorder.isMeteringEnabled = false
             recorder.prepareToRecord()
-            guard recorder.record() else {
+            guard recorder.record(forDuration: maximumDuration) else {
+                try? securelyRemoveRecordingFile(at: url)
                 return
             }
             self.recorder = recorder
@@ -289,6 +303,7 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
             elapsed = 0
             startTicker()
         } catch {
+            try? securelyRemoveRecordingFile(at: url)
             return
         }
     }
@@ -357,6 +372,7 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
 
 private enum VoiceRecorderError: LocalizedError {
     case noRecording
+    case recordingTooLarge
 
     static func safeDescription(for error: Error) -> String {
         if let voiceError = error as? VoiceRecorderError {
@@ -382,6 +398,8 @@ private enum VoiceRecorderError: LocalizedError {
         switch self {
         case .noRecording:
             return "No voice recording available."
+        case .recordingTooLarge:
+            return "Voice recording exceeds the encrypted attachment limit."
         }
     }
 }

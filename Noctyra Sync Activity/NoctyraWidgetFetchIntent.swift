@@ -156,6 +156,9 @@ private struct NoctyraWidgetPrefetchStore {
     private func readPayload(from url: URL) throws -> Data? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            throw WidgetPrefetchStoreError.invalidBatch
+        }
         if let size = attributes[.size] as? NSNumber, size.intValue > Self.maxEncryptedFileBytes {
             throw WidgetPrefetchStoreError.encryptedFileTooLarge
         }
@@ -168,7 +171,12 @@ private struct NoctyraWidgetPrefetchStore {
     }
 
     private func write<T: Encodable>(_ value: T, to url: URL) throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         var payload = try NoctweaveCoder.encode(value, sortedKeys: true)
         defer { payload.secureWipe() }
         var data = try encrypt(payload)
@@ -177,8 +185,16 @@ private struct NoctyraWidgetPrefetchStore {
             throw WidgetPrefetchStoreError.encryptedFileTooLarge
         }
         try data.write(to: url, options: [.atomic])
-        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: url.path)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        do {
+            try FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: url.path
+            )
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
     }
 
     private func encrypt(_ payload: Data) throws -> Data {

@@ -129,6 +129,13 @@ struct ContentView: View {
             if shouldShowStartupPrivacyShield {
                 StartupPrivacyShield()
             }
+            if let startupFailure = model.startupFailure {
+                StartupFailureView(
+                    message: startupFailure,
+                    retry: { await model.retryStartupLoad() },
+                    reset: { await model.resetAfterStartupFailure() }
+                )
+            }
             if let status = model.storageProtectionStatus {
                 StorageStatusToast(message: status)
                     .transition(.move(edge: .top).combined(with: .opacity))
@@ -219,7 +226,10 @@ struct ContentView: View {
     }
 
     private var shouldShowStartupPrivacyShield: Bool {
-        !model.isReady && !model.requiresStorageChoice && !model.requiresOnboarding
+        !model.isReady
+            && model.startupFailure == nil
+            && !model.requiresStorageChoice
+            && !model.requiresOnboarding
     }
 
     @ViewBuilder
@@ -582,7 +592,7 @@ struct ContentView: View {
             if let contact = model.state.contacts.first(where: { $0.id == contactId }) {
                 ConversationView(model: model, contact: contact)
             } else {
-                PlaceholderView(title: "Select a contact")
+                conversationPlaceholder
             }
         case .group(let groupId):
             if let group = model.state.group(for: groupId) {
@@ -607,8 +617,16 @@ struct ContentView: View {
                 showingAddContact = true
             }
         case .none:
-            PlaceholderView(title: "Select a contact")
+            conversationPlaceholder
         }
+    }
+
+    private var conversationPlaceholder: some View {
+        PlaceholderView(
+            title: "Choose a conversation",
+            subtitle: "Select a contact or group from the sidebar.",
+            systemImage: "bubble.left.and.bubble.right"
+        )
     }
 
     private func unreadCount(for contact: Contact) -> Int {
@@ -646,6 +664,99 @@ private struct StartupPrivacyShield: View {
                 .tint(.white.opacity(0.72))
         }
         .transition(.opacity)
+    }
+}
+
+private struct StartupFailureView: View {
+    let message: String
+    let retry: () async -> Void
+    let reset: () async -> Void
+
+    @Environment(\.appTheme) private var theme
+    @State private var isWorking = false
+    @State private var isConfirmingReset = false
+
+    var body: some View {
+        ZStack {
+            Color.black
+                .ignoresSafeArea()
+            RadialGradient(
+                colors: [theme.accent.opacity(0.24), Color.clear],
+                center: .topLeading,
+                startRadius: 20,
+                endRadius: 520
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 22) {
+                Image("Rhombus")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 72, height: 72)
+                    .shadow(color: theme.accent.opacity(0.34), radius: 22)
+
+                VStack(spacing: 8) {
+                    Text("Local profile unavailable")
+                        .font(.system(size: 25, weight: .semibold, design: .rounded))
+                    Text(message)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(4)
+                }
+
+                VStack(spacing: 10) {
+                    Button {
+                        guard !isWorking else { return }
+                        isWorking = true
+                        Task {
+                            await retry()
+                            isWorking = false
+                        }
+                    } label: {
+                        Label(isWorking ? "Trying again…" : "Try Again", systemImage: "arrow.clockwise")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .glassButton(prominent: true)
+                    .disabled(isWorking)
+
+                    if isConfirmingReset {
+                        Text("This permanently removes local identities, chats, attachments, and prefetched ciphertext.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button(role: .destructive) {
+                            guard !isWorking else { return }
+                            isWorking = true
+                            Task {
+                                await reset()
+                                isWorking = false
+                            }
+                        } label: {
+                            Text("Permanently Reset This Installation")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .glassButton()
+                        .disabled(isWorking)
+                    } else {
+                        Button("Reset Local Installation") {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                isConfirmingReset = true
+                            }
+                        }
+                        .glassButton()
+                    }
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 430)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(Color.white.opacity(0.14), lineWidth: 0.8)
+            )
+            .padding(24)
+        }
     }
 }
 
@@ -1483,23 +1594,33 @@ private struct ContactBookTabView: View {
 private struct PlaceholderView: View {
     let title: String
     let subtitle: String?
+    let systemImage: String?
 
-    init(title: String, subtitle: String? = nil) {
+    init(title: String, subtitle: String? = nil, systemImage: String? = nil) {
         self.title = title
         self.subtitle = subtitle
+        self.systemImage = systemImage
     }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 12) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 54, height: 54)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
             Text(title)
                 .font(.headline)
-                .foregroundStyle(.secondary)
             if let subtitle, !subtitle.isEmpty {
                 Text(subtitle)
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
         }
+        .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         #if os(macOS)
         .navigationTitle("")
@@ -1635,6 +1756,7 @@ private struct ChatTopBar: View {
     private var titleSize: CGFloat { isPad ? 27 : (isRegularWidth ? 28 : 18) }
     private var statusSize: CGFloat { isPad ? 15 : (isRegularWidth ? 17 : 12) }
     private var horizontalPadding: CGFloat { isPad ? 22 : (isRegularWidth ? 24 : 12) }
+    private var windowControlClearance: CGFloat { IOSControlMetrics.windowControlLeadingClearance }
     private var verticalPadding: CGFloat { isPad ? 12 : (isRegularWidth ? 14 : 8) }
     private var barMinHeight: CGFloat { isPad ? 76 : (isRegularWidth ? 84 : 52) }
 
@@ -1681,6 +1803,7 @@ private struct ChatTopBar: View {
         }
         .frame(maxWidth: .infinity, minHeight: barMinHeight, alignment: .center)
         .padding(.horizontal, horizontalPadding)
+        .padding(.leading, windowControlClearance)
         .padding(.vertical, verticalPadding)
         .background {
             Rectangle()
@@ -4529,7 +4652,10 @@ private struct AttachmentGalleryItem: Identifiable {
     }
 
     var sourceLabel: String {
-        sourceTitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? sourceTitle! : "Chat"
+        sourceTitle
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+            ?? "Chat"
     }
 }
 
@@ -5854,7 +5980,7 @@ private final class SecureComposerKeyboard: UIInputView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+        return nil
     }
 
     private func setup() {
@@ -6536,6 +6662,11 @@ private struct MyCodeView: View {
     @State private var showingCode = false
     @State private var isPreparingCode = false
 
+    private var hasValidSharePassword: Bool {
+        (ContactShare.minimumPasswordBytes...ContactShare.maximumPasswordBytes)
+            .contains(sharePassword.utf8.count)
+    }
+
     var body: some View {
         Group {
             #if os(iOS)
@@ -6591,6 +6722,9 @@ private struct MyCodeView: View {
                         .foregroundStyle(.secondary)
                     SecureField("Password", text: $sharePassword)
                         .noctyraInputField()
+                    Text("Use at least \(ContactShare.minimumPasswordBytes) UTF-8 bytes. The file can be tested offline, so a long, unique passphrase is safer than a short PIN.")
+                        .font(.caption)
+                        .foregroundStyle(hasValidSharePassword || sharePassword.isEmpty ? Color.secondary : Color.orange)
                     #if os(iOS)
                     ViewThatFits(in: .horizontal) {
                         HStack(spacing: 10) {
@@ -6813,8 +6947,8 @@ private struct MyCodeView: View {
     }
 
     private func prepareAirDropShare() async {
-        guard !sharePassword.isEmpty else {
-            model.lastError = "Password required for AirDrop."
+        guard hasValidSharePassword else {
+            model.lastError = "Use at least \(ContactShare.minimumPasswordBytes) UTF-8 bytes for AirDrop protection."
             return
         }
         guard var data = await model.contactShareData(password: sharePassword) else {
@@ -6835,8 +6969,8 @@ private struct MyCodeView: View {
     private var exportFileButton: some View {
         Button("Export File") {
             Task {
-                guard !sharePassword.isEmpty else {
-                    model.lastError = "Password required for export."
+                guard hasValidSharePassword else {
+                    model.lastError = "Use at least \(ContactShare.minimumPasswordBytes) UTF-8 bytes for export protection."
                     return
                 }
                 if let data = await model.contactShareData(password: sharePassword) {
@@ -6846,7 +6980,7 @@ private struct MyCodeView: View {
             }
         }
         .glassButton(prominent: true)
-        .disabled(sharePassword.isEmpty)
+        .disabled(!hasValidSharePassword)
         .hoverLift()
     }
 
@@ -6857,7 +6991,7 @@ private struct MyCodeView: View {
             }
         }
         .glassButton()
-        .disabled(sharePassword.isEmpty)
+        .disabled(!hasValidSharePassword)
         .hoverLift()
     }
 
@@ -7395,6 +7529,9 @@ private struct AddContactView: View {
 
                 SecureField("File password", text: $sharePassword)
                     .noctyraInputField()
+                Text("Protected contact files require the sender’s passphrase of at least \(ContactShare.minimumPasswordBytes) UTF-8 bytes.")
+                    .font(.caption)
+                    .foregroundStyle(importPasswordIsValid || sharePassword.isEmpty ? Color.secondary : Color.orange)
 
                 Button {
                     importSelectedFile()
@@ -7402,7 +7539,7 @@ private struct AddContactView: View {
                     Label("Import Contact", systemImage: "square.and.arrow.down")
                 }
                 .glassButton(prominent: true)
-                .disabled(importedFileData == nil || sharePassword.isEmpty)
+                .disabled(importedFileData == nil || !importPasswordIsValid)
                 .hoverLift()
             }
         case .insecure:
@@ -7698,13 +7835,18 @@ private struct AddContactView: View {
                 model.lastError = "No file selected."
                 return
             }
-            guard !sharePassword.isEmpty else {
-                model.lastError = "Password required to import."
+            guard importPasswordIsValid else {
+                model.lastError = "The contact-file password must contain at least \(ContactShare.minimumPasswordBytes) UTF-8 bytes."
                 return
             }
             await model.addContact(shareData: data, password: sharePassword)
             dismiss()
         }
+    }
+
+    private var importPasswordIsValid: Bool {
+        (ContactShare.minimumPasswordBytes...ContactShare.maximumPasswordBytes)
+            .contains(sharePassword.utf8.count)
     }
 
     private func pairingStatusRow(_ title: String, _ value: String) -> some View {
@@ -10583,7 +10725,10 @@ private struct RelaysView: View {
     }
 
     private var relayTopBarSubtitle: String {
-        relayDestination == nil ? "Relay list and master sources" : relaySubtitle(for: relayDestination!)
+        guard let relayDestination else {
+            return "Relay list and master sources"
+        }
+        return relaySubtitle(for: relayDestination)
     }
 
     private func relaySubtitle(for destination: RelayDestination) -> String {
@@ -12424,6 +12569,7 @@ private struct HoverLiftModifier: ViewModifier {
             .overlay(
                 hoverShape
                     .stroke(Color.white.opacity(hovering ? 0.3 : 0), lineWidth: 0.8)
+                    .allowsHitTesting(false)
             )
             .animation(.easeOut(duration: 0.15), value: hovering)
             .onHover { hovering = $0 }

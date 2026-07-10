@@ -7,6 +7,9 @@ import Security
 
 @MainActor
 final class ThreadMessageStore {
+    private static let maximumPlaintextBytes = 48 * 1024 * 1024
+    private static let maximumStoredBytes = 64 * 1024 * 1024
+    private static let maximumMessagesPerThread = 100_000
     private let directory: URL
     private let useEncryption: Bool
 
@@ -66,20 +69,45 @@ final class ThreadMessageStore {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return []
         }
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values.isRegularFile == true,
+              let fileSize = values.fileSize,
+              fileSize >= 0,
+              fileSize <= Self.maximumStoredBytes else {
+            throw ThreadMessageStoreError.fileTooLarge
+        }
         var data = try Data(contentsOf: url)
         defer { data.secureWipe() }
+        guard data.count <= Self.maximumStoredBytes else {
+            throw ThreadMessageStoreError.fileTooLarge
+        }
         var payload = try decryptIfNeeded(data)
         defer { payload.secureWipe() }
+        guard payload.count <= Self.maximumPlaintextBytes else {
+            throw ThreadMessageStoreError.fileTooLarge
+        }
         let decoded = try NoctweaveCoder.decode(ThreadMessagePayload.self, from: payload)
+        guard decoded.messages.count <= Self.maximumMessagesPerThread else {
+            throw ThreadMessageStoreError.tooManyMessages
+        }
         return decoded.messages
     }
 
     private func saveMessages(_ messages: [Message], to url: URL) throws {
+        guard messages.count <= Self.maximumMessagesPerThread else {
+            throw ThreadMessageStoreError.tooManyMessages
+        }
         let payload = ThreadMessagePayload(messages: messages)
         var encoded = try NoctweaveCoder.encode(payload)
         defer { encoded.secureWipe() }
+        guard encoded.count <= Self.maximumPlaintextBytes else {
+            throw ThreadMessageStoreError.fileTooLarge
+        }
         var encrypted = try encryptIfNeeded(encoded)
         defer { encrypted.secureWipe() }
+        guard encrypted.count <= Self.maximumStoredBytes else {
+            throw ThreadMessageStoreError.fileTooLarge
+        }
         try writeData(encrypted, to: url)
     }
 
@@ -105,26 +133,32 @@ final class ThreadMessageStore {
     private func writeData(_ data: Data, to url: URL) throws {
         let folder = url.deletingLastPathComponent()
         if !FileManager.default.fileExists(atPath: folder.path) {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: folder,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
         }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
         #if os(iOS)
         try data.write(to: url, options: [.atomic, .completeFileProtection])
         #else
         try data.write(to: url, options: [.atomic])
         #endif
-        applyPrivacyAttributes(url: url)
+        do {
+            try applyPrivacyAttributes(url: url)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
     }
 
-    private func applyPrivacyAttributes(url: URL) {
-        do {
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
-            var mutableURL = url
-            try mutableURL.setResourceValues(values)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        } catch {
-            print("[client] Failed to apply thread message attributes")
-        }
+    private func applyPrivacyAttributes(url: URL) throws {
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableURL = url
+        try mutableURL.setResourceValues(values)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private func encryptIfNeeded(_ payload: Data) throws -> Data {
@@ -211,6 +245,8 @@ private extension Data {
 
 private enum ThreadMessageStoreError: Error {
     case encryptionFailed
+    case fileTooLarge
+    case tooManyMessages
     case unexpectedPlaintextInEncryptedMode
 }
 

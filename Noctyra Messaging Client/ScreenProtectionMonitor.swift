@@ -11,6 +11,7 @@ import CoreGraphics
 final class ScreenProtectionMonitor: ObservableObject {
     @Published private(set) var isCaptureActive = false
     @Published private(set) var isSensitiveHidden = false
+    private let isUITesting = ProcessInfo.processInfo.arguments.contains("UI_TESTING")
     #if os(macOS)
     @Published private(set) var isAppInFocus = true
     private var hideWhenUnfocusedEnabled = true
@@ -82,6 +83,11 @@ final class ScreenProtectionMonitor: ObservableObject {
     }
 
     private func updateCaptureStatus() {
+        guard !isUITesting else {
+            isCaptureActive = false
+            updateHiddenStatus()
+            return
+        }
         // Prefer scene-derived screens to avoid deprecated UIScreen globals.
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let screens = scenes.map(\.screen)
@@ -108,6 +114,11 @@ final class ScreenProtectionMonitor: ObservableObject {
     }
 
     private func updateMirroringStatus() {
+        guard !isUITesting else {
+            isCaptureActive = false
+            updateHiddenStatus()
+            return
+        }
         isCaptureActive = isAnyDisplayMirrored() || isExternalDisplayConnected()
         updateHiddenStatus()
     }
@@ -140,6 +151,10 @@ final class ScreenProtectionMonitor: ObservableObject {
     #endif
 
     private func updateHiddenStatus() {
+        guard !isUITesting else {
+            isSensitiveHidden = false
+            return
+        }
         #if os(macOS)
         isSensitiveHidden = isCaptureActive || (hideWhenUnfocusedEnabled && !isAppInFocus)
         #else

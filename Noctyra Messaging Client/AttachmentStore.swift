@@ -7,6 +7,7 @@ import Security
 
 @MainActor
 final class AttachmentStore {
+    private static let maximumStoredAttachmentBytes = 12 * 1024 * 1024
     private let directory: URL
     private let useEncryption: Bool
 
@@ -16,10 +17,19 @@ final class AttachmentStore {
     }
 
     func saveAttachment(_ data: Data, descriptor: AttachmentDescriptor) throws -> String {
+        guard descriptor.isStructurallyValid(),
+              data.count == descriptor.byteCount,
+              data.count <= AttachmentDescriptor.maximumTransportBytes,
+              AttachmentCrypto.sha256(data) == descriptor.sha256 else {
+            throw AttachmentStoreError.invalidPayload
+        }
         let fileName = "\(descriptor.id.uuidString).bin"
         let url = try attachmentURL(fileName: fileName)
         var payload = try encryptIfNeeded(data)
         defer { payload.secureWipe() }
+        guard payload.count <= Self.maximumStoredAttachmentBytes else {
+            throw AttachmentStoreError.fileTooLarge
+        }
         try writeData(payload, to: url)
         return fileName
     }
@@ -27,16 +37,34 @@ final class AttachmentStore {
     func loadAttachment(fileName: String) throws -> Data {
         var encrypted = try loadEncryptedAttachment(fileName: fileName)
         defer { encrypted.secureWipe() }
-        return try decryptAttachmentPayload(encrypted)
+        let decrypted = try decryptAttachmentPayload(encrypted)
+        guard decrypted.count <= AttachmentDescriptor.maximumTransportBytes else {
+            throw AttachmentStoreError.fileTooLarge
+        }
+        return decrypted
     }
 
     func loadEncryptedAttachment(fileName: String) throws -> Data {
         let url = try attachmentURL(fileName: fileName)
-        return try Data(contentsOf: url)
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard values.isRegularFile == true,
+              let fileSize = values.fileSize,
+              fileSize >= 0,
+              fileSize <= Self.maximumStoredAttachmentBytes else {
+            throw AttachmentStoreError.fileTooLarge
+        }
+        let data = try Data(contentsOf: url)
+        guard data.count <= Self.maximumStoredAttachmentBytes else {
+            throw AttachmentStoreError.fileTooLarge
+        }
+        return data
     }
 
     func decryptAttachmentPayload(_ data: Data) throws -> Data {
-        try decryptIfNeeded(data)
+        guard data.count <= Self.maximumStoredAttachmentBytes else {
+            throw AttachmentStoreError.fileTooLarge
+        }
+        return try decryptIfNeeded(data)
     }
 
     func deleteAttachment(fileName: String) throws {
@@ -84,14 +112,24 @@ final class AttachmentStore {
     private func writeData(_ data: Data, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
         if !FileManager.default.fileExists(atPath: directory.path) {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
         }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         #if os(iOS)
         try data.write(to: url, options: [.atomic, .completeFileProtection])
         #else
         try data.write(to: url, options: [.atomic])
         #endif
-        applyPrivacyAttributes(url: url)
+        do {
+            try applyPrivacyAttributes(url: url)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
     }
 
     private func attachmentURL(fileName: String) throws -> URL {
@@ -105,16 +143,12 @@ final class AttachmentStore {
         return directory.appendingPathComponent(trimmed, isDirectory: false)
     }
 
-    private func applyPrivacyAttributes(url: URL) {
-        do {
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
-            var mutableURL = url
-            try mutableURL.setResourceValues(values)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        } catch {
-            print("[client] Failed to apply attachment privacy attributes")
-        }
+    private func applyPrivacyAttributes(url: URL) throws {
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableURL = url
+        try mutableURL.setResourceValues(values)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private func securelyRemoveFile(at url: URL) throws {
@@ -156,6 +190,8 @@ private struct AttachmentEnvelope: Codable {
 private enum AttachmentStoreError: Error {
     case encryptionFailed
     case invalidFileName
+    case invalidPayload
+    case fileTooLarge
     case unexpectedPlaintextInEncryptedMode
 }
 

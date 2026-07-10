@@ -15,6 +15,7 @@ struct NoctyraTopBar: View {
     private var subtitleSize: CGFloat { IOSControlMetrics.isPad ? 15 : 12 }
     private var horizontalPadding: CGFloat { IOSControlMetrics.isPad ? 22 : 14 }
     private var verticalPadding: CGFloat { IOSControlMetrics.isPad ? 12 : 9 }
+    private var windowControlClearance: CGFloat { IOSControlMetrics.windowControlLeadingClearance }
     #endif
 
     var body: some View {
@@ -45,6 +46,7 @@ struct NoctyraTopBar: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         #if os(iOS)
         .padding(.horizontal, horizontalPadding)
+        .padding(.leading, windowControlClearance)
         .padding(.vertical, verticalPadding)
         #else
         .padding(.horizontal, 14)

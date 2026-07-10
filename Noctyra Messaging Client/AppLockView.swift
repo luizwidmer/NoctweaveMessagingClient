@@ -14,17 +14,7 @@ struct AppLockView: View {
     }
 
     private var effectiveMode: AppLockMode {
-        guard !model.biometricsAvailable else {
-            return mode
-        }
-        switch mode {
-        case .biometricsAndPin:
-            return model.state.appLock.isPinConfigured ? .pinOnly : .off
-        case .biometrics:
-            return model.state.appLock.isPinConfigured ? .pinOnly : .off
-        case .pinOnly, .off:
-            return mode
-        }
+        mode
     }
 
     private var customLockMessage: String? {
@@ -147,12 +137,23 @@ struct AppLockView: View {
                         .controlSize(.small)
                         .tint(.white.opacity(0.85))
                 }
-                Text(isBiometricUnlocking ? "Verifying biometrics..." : "Waiting for biometric verification...")
+                Text(
+                    isBiometricUnlocking
+                        ? "Verifying biometrics..."
+                        : (model.biometricsAvailable ? "Waiting for biometric verification..." : "Biometrics unavailable")
+                )
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.75))
             }
             if !isBiometricUnlocking, errorMessage != nil {
                 retryBiometricButton
+            }
+            if !model.biometricsAvailable {
+                Text("Biometrics are unavailable. No PIN or device-password fallback will be used.")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.62))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 320)
             }
         }
     }

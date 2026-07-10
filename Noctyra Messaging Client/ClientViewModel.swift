@@ -73,6 +73,7 @@ final class ClientViewModel: ObservableObject {
     @Published var state: ClientState
     @Published var isReady = false
     @Published var requiresOnboarding = false
+    @Published var startupFailure: String?
     @Published var lastError: String?
     @Published var lastInfo: String?
     @Published var isSyncing = false
@@ -108,6 +109,8 @@ final class ClientViewModel: ObservableObject {
     private var store: ClientStateStore
     private var attachmentStore: AttachmentStore
     private var threadMessageStore: ThreadMessageStore
+    private var unreadableDirectThreadKeys = Set<String>()
+    private var unreadableGroupThreadKeys = Set<String>()
     private let ciphertextPrefetchStore: CiphertextPrefetchStore
     private var isPersistingState = false
     private var pendingStatePersistRequested = false
@@ -294,6 +297,7 @@ final class ClientViewModel: ObservableObject {
             return
         }
         enforceCorruptionKillSwitchIfNeeded()
+        startupFailure = nil
         do {
             if let stored = try await store.load() {
                 state = stored
@@ -341,8 +345,26 @@ final class ClientViewModel: ObservableObject {
                 requestForegroundSyncIfEligible()
             }
         } catch {
-            lastError = "Failed to load state: \(safeStorageErrorDescription(error, fallback: "Local state could not be opened."))"
+            let message = safeStorageErrorDescription(
+                error,
+                fallback: "Local encrypted state could not be opened."
+            )
+            startupFailure = message
+            lastError = nil
+            isReady = false
         }
+    }
+
+    func retryStartupLoad() async {
+        guard startupFailure != nil else { return }
+        await load()
+    }
+
+    func resetAfterStartupFailure() async {
+        guard startupFailure != nil else { return }
+        startupFailure = nil
+        await performAppResetOperation()
+        isReady = true
     }
 
     func completeOnboarding(
@@ -374,17 +396,18 @@ final class ClientViewModel: ObservableObject {
             return
         }
 
-        let identity = Identity(displayName: trimmed)
-        let inboxAccessKey = SigningKeyPair()
+        let identity: Identity
+        let inboxAccessKey: SigningKeyPair
+        let prekeys: PrekeyState
+        do {
+            identity = try Identity.generate(displayName: trimmed)
+            inboxAccessKey = try SigningKeyPair.generate()
+            prekeys = try PrekeyState.generate(identity: identity, oneTimeCount: prekeyTargetCount)
+        } catch {
+            lastError = "Post-quantum identity generation failed. No identity was created."
+            return
+        }
         let inboxId = InboxAddress.derived(from: inboxAccessKey.publicKeyData)
-        let prekeys = (try? PrekeyState.generate(identity: identity, oneTimeCount: prekeyTargetCount)) ?? PrekeyState(
-            signedPrekeyId: UUID(),
-            signedPrekeyPublicKey: Data(),
-            signedPrekeyPrivateKey: Data(),
-            signedPrekeySignature: Data(),
-            signedPrekeyIssuedAt: Date(),
-            oneTimePrekeys: []
-        )
         let profile = IdentityProfile(
             identity: identity,
             inboxId: inboxId,
@@ -435,15 +458,25 @@ final class ClientViewModel: ObservableObject {
         }
         var didUpdate = false
         if !isSignedPrekeyValid(prekeys: profile.prekeys, identity: profile.identity) {
-            if let regenerated = try? PrekeyState.generate(identity: profile.identity, oneTimeCount: prekeyTargetCount) {
+            do {
+                let regenerated = try PrekeyState.generate(
+                    identity: profile.identity,
+                    oneTimeCount: prekeyTargetCount
+                )
                 profile.prekeys = regenerated
                 didUpdate = true
+            } catch {
+                lastError = "Post-quantum prekey generation failed. Existing invalid prekeys were not published."
+                return
             }
         } else if profile.prekeys.oneTimePrekeys.count < prekeyMinimumCount {
             let needed = max(0, prekeyTargetCount - profile.prekeys.oneTimePrekeys.count)
             if needed > 0 {
                 for _ in 0..<needed {
-                    let keyPair = AgreementKeyPair()
+                    guard let keyPair = try? AgreementKeyPair.generate() else {
+                        lastError = "Post-quantum prekey generation failed."
+                        break
+                    }
                     profile.prekeys.oneTimePrekeys.append(
                         PrekeyPrivateRecord(
                             id: UUID(),
@@ -466,6 +499,16 @@ final class ClientViewModel: ObservableObject {
 
     private func isSignedPrekeyValid(prekeys: PrekeyState, identity: Identity) -> Bool {
         guard !prekeys.signedPrekeyPublicKey.isEmpty, !prekeys.signedPrekeySignature.isEmpty else {
+            return false
+        }
+        let now = Date()
+        let oldestAllowed = now.addingTimeInterval(-7 * 86_400)
+        let newestAllowed = now.addingTimeInterval(PrekeyBundle.maximumFutureClockSkew)
+        guard (oldestAllowed...newestAllowed).contains(prekeys.signedPrekeyIssuedAt),
+              (try? AgreementKeyPair(
+                  privateKeyData: prekeys.signedPrekeyPrivateKey,
+                  publicKeyData: prekeys.signedPrekeyPublicKey
+              )) != nil else {
             return false
         }
         let signed = SignedPrekey(
@@ -808,7 +851,7 @@ final class ClientViewModel: ObservableObject {
                 try ContactShare.encode(offer, password: password)
             }.value
         } catch {
-            lastError = "Failed to create contact share file: \(safeStorageErrorDescription(error, fallback: "Contact share could not be prepared."))"
+            lastError = "Failed to create contact share file: \(safeContactShareErrorDescription(error, fallback: "Contact share could not be prepared."))"
             return nil
         }
     }
@@ -855,7 +898,7 @@ final class ClientViewModel: ObservableObject {
             try await persistState()
             lastInfo = wasKnown ? "Updated \(contact.displayName)." : "Added \(contact.displayName)."
         } catch {
-            lastError = "Failed to import contact: Contact share could not be verified."
+            lastError = "Failed to import contact: \(safeContactShareErrorDescription(error, fallback: "Contact share could not be verified."))"
         }
     }
 
@@ -885,7 +928,8 @@ final class ClientViewModel: ObservableObject {
         guard let bundle = await fetchPrekeyBundle(for: contact) else {
             return nil
         }
-        guard bundle.identityFingerprint == contact.fingerprint else {
+        guard bundle.identityFingerprint == contact.fingerprint,
+              bundle.isStructurallyValid() else {
             return nil
         }
         guard bundle.signedPrekey.verify(using: contact.signingPublicKey) else {
@@ -1271,7 +1315,7 @@ final class ClientViewModel: ObservableObject {
         do {
             var didUpdateMailbox = false
             if profile.inboxAccessKey == nil {
-                profile.inboxAccessKey = SigningKeyPair()
+                profile.inboxAccessKey = try SigningKeyPair.generate()
                 didUpdateMailbox = true
             }
             if let accessKey = profile.inboxAccessKey,
@@ -1540,11 +1584,11 @@ final class ClientViewModel: ObservableObject {
                     if let _ = appendedMessage {
                         if activeContactId != contact.id {
                             conversation.unreadCount += 1
-                            if case .text(let text) = body {
-                                notifier.notify(title: contact.displayName, body: text)
-                            } else if case .attachment(let descriptor) = body {
-                                let label = attachmentDisplayTitle(descriptor, fallback: "Attachment received")
-                                notifier.notify(title: contact.displayName, body: label)
+                            switch body {
+                            case .text, .attachment:
+                                notifier.notifyNewMessage()
+                            default:
+                                break
                             }
                         }
                         lastInfo = "Received message from \(contact.displayName)."
@@ -1847,7 +1891,7 @@ final class ClientViewModel: ObservableObject {
                         )
                         if activeGroupId != group.id {
                             group.unreadCount += 1
-                            notifier.notify(title: group.title, body: "\(sender.displayName ?? "Group member"): \(text)")
+                            notifier.notifyNewMessage()
                         }
                         lastInfo = "Received group message."
                         acknowledgedIds.insert(envelope.id)
@@ -1908,7 +1952,7 @@ final class ClientViewModel: ObservableObject {
                         )
                         if activeGroupId != group.id {
                             group.unreadCount += 1
-                            notifier.notify(title: group.title, body: "\(sender.displayName ?? "Group member"): \(title)")
+                            notifier.notifyNewMessage()
                         }
                         lastInfo = "Received group attachment."
                         acknowledgedIds.insert(envelope.id)
@@ -1942,7 +1986,7 @@ final class ClientViewModel: ObservableObject {
                                 )
                                 if activeGroupId != group.id {
                                     group.unreadCount += 1
-                                    notifier.notify(title: group.title, body: "\(sender.displayName ?? "Group member"): \(text)")
+                                    notifier.notifyNewMessage()
                                 }
                                 lastInfo = "Recovered group message."
                                 acknowledgedIds.insert(envelope.id)
@@ -2008,21 +2052,35 @@ final class ClientViewModel: ObservableObject {
 
     func rotateIdentity() async {
         do {
+            let stateBeforeRotation = state
             var previousIdentity = state.identity
-            let rotationContext = try state.identity.rotateKeys()
+            var rotatedIdentity = state.identity
+            let rotationContext = try rotatedIdentity.rotateKeys()
+            let regeneratedPrekeys = try PrekeyState.generate(
+                identity: rotatedIdentity,
+                oneTimeCount: prekeyTargetCount
+            )
             let oldSigningKey = rotationContext.oldSigningKey
             previousIdentity.signingKey = oldSigningKey
             previousIdentity.agreementKey = rotationContext.oldAgreementKey
             let oldFingerprint = rotationContext.oldFingerprint
+            state.identity = rotatedIdentity
+            state.prekeys = regeneratedPrekeys
             recordContinuityEvent(
                 kind: .identityRotated,
                 oldFingerprint: oldFingerprint,
                 newFingerprint: state.identity.fingerprint
             )
-            if let regenerated = try? PrekeyState.generate(identity: state.identity, oneTimeCount: prekeyTargetCount) {
-                state.prekeys = regenerated
-                await publishPrekeys(regenerated, identity: state.identity, relay: state.relay)
+            do {
+                // Commit the new identity and matching prekeys before any peer can
+                // observe the continuity event. A crash after delivery must not
+                // restart this client with the old identity.
+                try await persistState()
+            } catch {
+                state = stateBeforeRotation
+                throw error
             }
+            await publishPrekeys(regeneratedPrekeys, identity: state.identity, relay: state.relay)
 
             var rebuiltByContact: [UUID: Conversation] = [:]
             var failedContacts: [String] = []
@@ -2129,12 +2187,31 @@ final class ClientViewModel: ObservableObject {
         isBurningIdentity = true
         defer { isBurningIdentity = false }
 
+        let stateBeforeBurn = state
+        let activeProfileId = state.activeIdentityId
         let oldIdentity = state.identity
         let oldSigningKey = oldIdentity.signingKey
         let oldFingerprint = oldIdentity.fingerprint
+        let carriedContactIds = Set(state.contacts.filter(\.allowIdentityReset).map(\.id))
+        let discardedConversations = state.conversations.filter { !carriedContactIds.contains($0.contactId) }
+        let discardedGroups = state.groups
 
-        state.identity = Identity(displayName: oldIdentity.displayName)
-        let newInboxAccessKey = SigningKeyPair()
+        let replacementIdentity: Identity
+        let newInboxAccessKey: SigningKeyPair
+        let replacementPrekeys: PrekeyState
+        do {
+            replacementIdentity = try Identity.generate(displayName: oldIdentity.displayName)
+            newInboxAccessKey = try SigningKeyPair.generate()
+            replacementPrekeys = try PrekeyState.generate(
+                identity: replacementIdentity,
+                oneTimeCount: prekeyTargetCount
+            )
+        } catch {
+            lastError = "Identity burn was cancelled because new post-quantum keys could not be generated."
+            return
+        }
+
+        state.identity = replacementIdentity
         state.inboxAccessKey = newInboxAccessKey
         state.inboxId = InboxAddress.derived(from: newInboxAccessKey.publicKeyData)
         recordContinuityEvent(
@@ -2142,10 +2219,35 @@ final class ClientViewModel: ObservableObject {
             oldFingerprint: oldFingerprint,
             newFingerprint: state.identity.fingerprint
         )
-        if let regenerated = try? PrekeyState.generate(identity: state.identity, oneTimeCount: prekeyTargetCount) {
-            state.prekeys = regenerated
-            await publishPrekeys(regenerated, identity: state.identity, relay: state.relay)
+        state.prekeys = replacementPrekeys
+        state.contacts = state.contacts.filter { carriedContactIds.contains($0.id) }
+        state.conversations = state.conversations.filter { carriedContactIds.contains($0.contactId) }
+        state.groups = []
+        do {
+            // Persist the severed local identity before any contact can observe
+            // its successor. If persistence fails, restore the complete old state.
+            try await persistState()
+        } catch {
+            state = stateBeforeBurn
+            lastError = "Identity burn was cancelled because the new identity could not be saved safely."
+            return
         }
+
+        for conversation in discardedConversations {
+            let messages = conversation.messages.isEmpty
+                ? storedDirectMessages(profileId: activeProfileId, contactId: conversation.contactId)
+                : conversation.messages
+            removeAttachmentFiles(from: messages)
+            deleteStoredDirectMessages(profileId: activeProfileId, contactId: conversation.contactId)
+        }
+        for group in discardedGroups {
+            let messages = group.messages.isEmpty
+                ? storedGroupMessages(profileId: activeProfileId, groupId: group.id)
+                : group.messages
+            removeAttachmentFiles(from: messages)
+            deleteStoredGroupMessages(profileId: activeProfileId, groupId: group.id)
+        }
+        await publishPrekeys(replacementPrekeys, identity: state.identity, relay: state.relay)
 
         var rebuiltConversations: [Conversation] = []
         var updatedContacts: [Contact] = []
@@ -2189,6 +2291,14 @@ final class ClientViewModel: ObservableObject {
             }
         }
 
+        let notifiedContactIds = Set(updatedContacts.map(\.id))
+        for conversation in state.conversations where !notifiedContactIds.contains(conversation.contactId) {
+            let messages = conversation.messages.isEmpty
+                ? storedDirectMessages(profileId: activeProfileId, contactId: conversation.contactId)
+                : conversation.messages
+            removeAttachmentFiles(from: messages)
+            deleteStoredDirectMessages(profileId: activeProfileId, contactId: conversation.contactId)
+        }
         state.contacts = updatedContacts
         state.conversations = rebuiltConversations
         await save()
@@ -2209,22 +2319,23 @@ final class ClientViewModel: ObservableObject {
     func addIdentityProfile(displayName: String, relayId: UUID?) async {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedName = trimmed.isEmpty ? "New Identity" : trimmed
-        let identity = Identity(displayName: resolvedName)
-        let inboxAccessKey = SigningKeyPair()
+        let identity: Identity
+        let inboxAccessKey: SigningKeyPair
+        let prekeys: PrekeyState
+        do {
+            identity = try Identity.generate(displayName: resolvedName)
+            inboxAccessKey = try SigningKeyPair.generate()
+            prekeys = try PrekeyState.generate(identity: identity, oneTimeCount: prekeyTargetCount)
+        } catch {
+            lastError = "Post-quantum identity generation failed. No profile was added."
+            return
+        }
         let inboxId = InboxAddress.derived(from: inboxAccessKey.publicKeyData)
         let relaySelection = relayId.flatMap { id in
             state.relayServers.first(where: { $0.id == id })
         } ?? state.relayServers.first
         let relay = relaySelection?.endpoint ?? state.relay
         let selectedRelayId = relaySelection?.id
-        let prekeys = (try? PrekeyState.generate(identity: identity)) ?? PrekeyState(
-            signedPrekeyId: UUID(),
-            signedPrekeyPublicKey: Data(),
-            signedPrekeyPrivateKey: Data(),
-            signedPrekeySignature: Data(),
-            signedPrekeyIssuedAt: Date(),
-            oneTimePrekeys: []
-        )
         let profile = IdentityProfile(
             identity: identity,
             inboxId: inboxId,
@@ -2251,7 +2362,9 @@ final class ClientViewModel: ObservableObject {
             lastError = "Restore the identity before activating it."
             return
         }
-        try? persistAllThreadMessagesFromState(state)
+        guard persistThreadMessagesBeforeTransition() else {
+            return
+        }
         evictAllThreadMessagesFromRAM()
         state.activeIdentityId = profileId
         await ensureRelaySelection()
@@ -2283,6 +2396,10 @@ final class ClientViewModel: ObservableObject {
             return
         }
         guard !profile.isArchived else {
+            return
+        }
+        if profileId == state.activeIdentityId,
+           !persistThreadMessagesBeforeTransition() {
             return
         }
         profile.isArchived = true
@@ -2335,7 +2452,7 @@ final class ClientViewModel: ObservableObject {
                 : group.messages
             removeAttachmentFiles(from: messages)
         }
-        try? threadMessageStore.deleteAllMessages(profileId: profile.id)
+        deleteAllStoredMessages(profileId: profile.id)
         state.identityProfiles.removeAll { $0.id == profileId }
         if profileId == state.activeIdentityId {
             await switchToNextActiveIdentity(excluding: profileId)
@@ -2344,25 +2461,31 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func switchToNextActiveIdentity(excluding profileId: UUID) async {
-        try? persistAllThreadMessagesFromState(state)
         evictAllThreadMessagesFromRAM()
         if let next = state.identityProfiles.first(where: { !$0.isArchived && $0.id != profileId }) {
             state.activeIdentityId = next.id
         } else {
-            let identity = Identity(displayName: "New Identity")
-            let inboxAccessKey = SigningKeyPair()
+            let identity: Identity
+            let inboxAccessKey: SigningKeyPair
+            let prekeys: PrekeyState
+            do {
+                identity = try Identity.generate(displayName: "New Identity")
+                inboxAccessKey = try SigningKeyPair.generate()
+                prekeys = try PrekeyState.generate(identity: identity, oneTimeCount: prekeyTargetCount)
+            } catch {
+                if var previous = state.identityProfile(id: profileId) {
+                    previous.isArchived = false
+                    previous.archivedAt = nil
+                    state.updateIdentityProfile(previous)
+                    state.activeIdentityId = previous.id
+                }
+                lastError = "Could not create a replacement identity. The existing identity remains active."
+                return
+            }
             let inboxId = InboxAddress.derived(from: inboxAccessKey.publicKeyData)
             let relaySelection = state.relayServers.first
             let relay = relaySelection?.endpoint ?? state.relay
             let selectedRelayId = relaySelection?.id
-            let prekeys = (try? PrekeyState.generate(identity: identity)) ?? PrekeyState(
-                signedPrekeyId: UUID(),
-                signedPrekeyPublicKey: Data(),
-                signedPrekeyPrivateKey: Data(),
-                signedPrekeySignature: Data(),
-                signedPrekeyIssuedAt: Date(),
-                oneTimePrekeys: []
-            )
             let profile = IdentityProfile(
                 identity: identity,
                 inboxId: inboxId,
@@ -2660,10 +2783,11 @@ final class ClientViewModel: ObservableObject {
         }
         if phase == .background {
             lastInactiveAt = Date()
-            try? persistAllThreadMessagesFromState(state)
-            evictAllThreadMessagesFromRAM()
+            if persistThreadMessagesBeforeTransition() {
+                evictAllThreadMessagesFromRAM()
+                Task { await save() }
+            }
             purgeAllAttachmentDecryptionMemory()
-            Task { await save() }
         }
         guard state.appLock.mode != .off else {
             if phase == .active {
@@ -2781,7 +2905,13 @@ final class ClientViewModel: ObservableObject {
             lastError = "Selected members are missing relay fingerprints."
             return
         }
-        let scopedIdentity = GroupScopedIdentity(displayName: state.identity.displayName)
+        let scopedIdentity: GroupScopedIdentity
+        do {
+            scopedIdentity = try GroupScopedIdentity.generate(displayName: state.identity.displayName)
+        } catch {
+            lastError = "Post-quantum group identity generation failed."
+            return
+        }
         let relayGroup: RelayGroupDescriptor
         do {
             relayGroup = try await createRelayGroupRegistry(
@@ -2819,7 +2949,7 @@ final class ClientViewModel: ObservableObject {
         loadGroupMessagesIntoRAM(groupId: id)
         let messages = state.group(for: id)?.messages ?? []
         removeAttachmentFiles(from: messages)
-        try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: id)
+        deleteStoredGroupMessages(profileId: state.activeIdentityId, groupId: id)
         if group.relayInboxId != nil {
             markRelayGroupLocallyLeft(id, profileId: state.activeIdentityId)
         }
@@ -3002,7 +3132,7 @@ final class ClientViewModel: ObservableObject {
                     loadGroupMessagesIntoRAM(groupId: id)
                     let messages = state.group(for: id)?.messages ?? []
                     removeAttachmentFiles(from: messages)
-                    try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: id)
+                    deleteStoredGroupMessages(profileId: state.activeIdentityId, groupId: id)
                     state.groups.removeAll { $0.id == id }
                     if activeGroupId == id {
                         activeGroupId = nil
@@ -3045,7 +3175,7 @@ final class ClientViewModel: ObservableObject {
         loadGroupMessagesIntoRAM(groupId: id)
         let messages = state.group(for: id)?.messages ?? []
         removeAttachmentFiles(from: messages)
-        try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: id)
+        deleteStoredGroupMessages(profileId: state.activeIdentityId, groupId: id)
         state.groups.removeAll { $0.id == id }
         if activeGroupId == id {
             activeGroupId = nil
@@ -3152,8 +3282,9 @@ final class ClientViewModel: ObservableObject {
         guard var group = state.group(for: id), group.isPendingInvitation else {
             return
         }
-        let scopedIdentity = group.scopedIdentity ?? GroupScopedIdentity(displayName: state.identity.displayName)
         do {
+            let scopedIdentity = try group.scopedIdentity
+                ?? GroupScopedIdentity.generate(displayName: state.identity.displayName)
             let descriptor = try await acceptRelayGroupInvitation(
                 groupId: id,
                 scopedIdentity: scopedIdentity,
@@ -3218,8 +3349,10 @@ final class ClientViewModel: ObservableObject {
             return
         }
         let displayName = member.displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedDisplayName = displayName.flatMap { $0.isEmpty ? nil : $0 }
+            ?? "Group Member \(abbreviatedFingerprint(normalizedFingerprint))"
         let contact = Contact(
-            displayName: displayName?.isEmpty == false ? displayName! : "Group Member \(abbreviatedFingerprint(normalizedFingerprint))",
+            displayName: resolvedDisplayName,
             inboxId: inboxId,
             relay: reachableRelayEndpoint(relay, preferredRelay: state.relay),
             signingPublicKey: signingPublicKey,
@@ -3462,7 +3595,7 @@ final class ClientViewModel: ObservableObject {
     func removeContact(id: UUID) async {
         if let contact = state.contacts.first(where: { $0.id == id }) {
             purgeAttachmentDecryptionMemory(contactId: id)
-            try? threadMessageStore.deleteDirectMessages(profileId: state.activeIdentityId, contactId: id)
+            deleteStoredDirectMessages(profileId: state.activeIdentityId, contactId: id)
             recordContinuityEvent(
                 kind: .contactRemoved,
                 contact: contact,
@@ -3507,7 +3640,7 @@ final class ClientViewModel: ObservableObject {
         }
         conversation.messages.removeAll()
         conversation.unreadCount = 0
-        try? threadMessageStore.deleteDirectMessages(profileId: state.activeIdentityId, contactId: contactId)
+        deleteStoredDirectMessages(profileId: state.activeIdentityId, contactId: contactId)
         state.upsert(conversation: conversation)
         await save()
     }
@@ -3535,7 +3668,7 @@ final class ClientViewModel: ObservableObject {
         purgeAttachmentDecryptionMemory(groupId: groupId)
         group.messages.removeAll()
         group.unreadCount = 0
-        try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: groupId)
+        deleteStoredGroupMessages(profileId: state.activeIdentityId, groupId: groupId)
         state.upsert(group: group)
         await save()
     }
@@ -3557,7 +3690,7 @@ final class ClientViewModel: ObservableObject {
             }
             cleared.messages.removeAll()
             cleared.unreadCount = 0
-            try? threadMessageStore.deleteDirectMessages(
+            deleteStoredDirectMessages(
                 profileId: state.activeIdentityId,
                 contactId: cleared.contactId
             )
@@ -3574,7 +3707,7 @@ final class ClientViewModel: ObservableObject {
                     try? attachmentStore.deleteAttachment(fileName: fileName)
                 }
             }
-            try? threadMessageStore.deleteGroupMessages(profileId: state.activeIdentityId, groupId: groupId)
+            deleteStoredGroupMessages(profileId: state.activeIdentityId, groupId: groupId)
             state.groups[index].messages.removeAll()
             state.groups[index].unreadCount = 0
         }
@@ -4558,13 +4691,13 @@ final class ClientViewModel: ObservableObject {
             var request = URLRequest(url: url)
             request.timeoutInterval = 15
             request.cachePolicy = .reloadIgnoringLocalCacheData
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await BoundedHTTPResponseLoader.load(
+                request,
+                maximumBytes: 1_000_000
+            )
             guard let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode) else {
                 throw MasterSourceError.invalidHTTPResponse
-            }
-            guard data.count <= 1_000_000 else {
-                throw MasterSourceError.responseTooLarge
             }
             let records = try parseMasterServerData(data, sourceId: source.id)
             mergeMasterServers(records)
@@ -5025,6 +5158,20 @@ final class ClientViewModel: ObservableObject {
             return "Local encrypted storage is unreadable."
         }
         return fallback
+    }
+
+    private func safeContactShareErrorDescription(_ error: Error, fallback: String) -> String {
+        if let shareError = error as? ContactShareError {
+            switch shareError {
+            case .emptyPassword, .invalidPassword:
+                return "Use a password containing at least \(ContactShare.minimumPasswordBytes) UTF-8 bytes."
+            case .invalidKdfRounds, .unsupportedVersion, .invalidPackage:
+                return "The protected contact file is invalid or unsupported."
+            case .entropyUnavailable:
+                return "Secure randomness is unavailable on this device."
+            }
+        }
+        return safeStorageErrorDescription(error, fallback: fallback)
     }
 
     private func redactedRelayErrorDescriptionIfRelay(_ error: Error) -> String? {
@@ -6228,9 +6375,14 @@ final class ClientViewModel: ObservableObject {
         scopedIdentity: GroupScopedIdentity,
         existing: GroupRatchetState? = nil
     ) -> GroupRatchetState? {
-        var identity = Identity(displayName: scopedIdentity.displayName)
-        identity.signingKey = scopedIdentity.signingKey
-        identity.agreementKey = scopedIdentity.agreementKey
+        guard let identity = try? Identity(
+            displayName: scopedIdentity.displayName,
+            signingKey: scopedIdentity.signingKey,
+            agreementKey: scopedIdentity.agreementKey,
+            createdAt: scopedIdentity.createdAt
+        ) else {
+            return nil
+        }
         return groupRatchetState(from: descriptor, identity: identity, existing: existing)
     }
 
@@ -6723,7 +6875,8 @@ final class ClientViewModel: ObservableObject {
         for node in nodes {
             let endpoint = node.endpoint
             let defaultName = node.relayInfo.relayName?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let resolvedName = (defaultName?.isEmpty == false ? defaultName! : "\(endpoint.host):\(endpoint.port)")
+            let resolvedName = defaultName.flatMap { $0.isEmpty ? nil : $0 }
+                ?? "\(endpoint.host):\(endpoint.port)"
             if let index = state.relayServers.firstIndex(where: { $0.endpoint == endpoint }) {
                 // Preserve operator-entered names/notes for manual entries.
                 state.relayServers[index].advertisedInfo = node.relayInfo
@@ -7101,6 +7254,7 @@ final class ClientViewModel: ObservableObject {
 
     private func resendRecentMessages(contactId: UUID, count: Int, profile: inout IdentityProfile) async {
         guard count > 0 else { return }
+        let boundedCount = min(count, ResendRequest.maximumCount)
         guard let contact = profile.contacts.first(where: { $0.id == contactId }) else {
             return
         }
@@ -7126,10 +7280,10 @@ final class ClientViewModel: ObservableObject {
             }
 
         var toResend: [String] = []
-        toResend.reserveCapacity(count)
+        toResend.reserveCapacity(boundedCount)
         for candidate in sortedDirect {
             toResend.append(candidate.payload)
-            if toResend.count == count {
+            if toResend.count == boundedCount {
                 break
             }
         }
@@ -7589,16 +7743,6 @@ final class ClientViewModel: ObservableObject {
     private func sanitizeAppLock(_ settings: AppLockSettings) -> AppLockSettings {
         var updated = settings
         updated.lockScreenMessage = normalizedLockScreenMessage(updated.lockScreenMessage)
-        if !biometricsAvailable {
-            switch updated.mode {
-            case .biometricsAndPin:
-                updated.mode = updated.isPinConfigured ? .pinOnly : .off
-            case .biometrics:
-                updated.mode = updated.isPinConfigured ? .pinOnly : .off
-            case .pinOnly, .off:
-                break
-            }
-        }
         return updated
     }
 
@@ -7804,12 +7948,26 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func performAppResetOperation() async {
+        let profile: IdentityProfile
+        do {
+            profile = try makeIdentityProfile(
+                displayName: "Setup Required",
+                relay: Self.unconfiguredRelay,
+                relayId: nil
+            )
+        } catch {
+            startupFailure = "App reset was cancelled because replacement keys could not be generated."
+            return
+        }
         stopAutoFetch()
         removeAllAttachmentsFromDisk()
+        try? ciphertextPrefetchStore.clearAll()
+        NoctyraSyncDashboardController.clearWidgetSnapshot()
         try? securelyRemoveLocalFile(at: stateFileURL)
         try? securelyRemoveLocalFile(at: corruptionKillSwitchURL)
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: ClientViewModel.storageModeKey)
+        defaults.removeObject(forKey: ClientViewModel.keychainAuthPreflightKey)
         storageProtectionMode = .keychain
         requiresStorageChoice = false
         isLocked = false
@@ -7830,8 +7988,6 @@ final class ClientViewModel: ObservableObject {
         insecureSelfTestStep = nil
         pendingOutboundPairRequestFingerprints.removeAll()
 
-        let identity = Identity(displayName: "Setup Required")
-        let profile = makeIdentityProfile(displayName: identity.displayName, relay: Self.unconfiguredRelay, relayId: nil)
         state.identityProfiles = [profile]
         state.activeIdentityId = profile.id
         state.relayServers = []
@@ -7848,19 +8004,33 @@ final class ClientViewModel: ObservableObject {
         state.hasAcceptedPrivacyPolicy = false
         state.hasAcceptedTermsOfUse = false
         requiresOnboarding = true
+        startupFailure = nil
     }
 
     private func burnIdentityProfiles(_ ids: [UUID]) async {
         let targetIds = ids.isEmpty ? [state.activeIdentityId] : ids
         for id in targetIds {
-            burnIdentityProfileLocally(id)
+            do {
+                try burnIdentityProfileLocally(id)
+            } catch {
+                lastError = "Identity burn was cancelled because replacement keys could not be generated."
+                return
+            }
         }
     }
 
-    private func burnIdentityProfileLocally(_ profileId: UUID) {
+    private func burnIdentityProfileLocally(_ profileId: UUID) throws {
         guard var profile = state.identityProfile(id: profileId) else {
             return
         }
+        let oldFingerprint = profile.identity.fingerprint
+        let oldDisplayName = profile.identity.displayName
+        let replacement = try Identity.generate(displayName: oldDisplayName)
+        let replacementInboxAccessKey = try SigningKeyPair.generate()
+        let replacementPrekeys = try PrekeyState.generate(
+            identity: replacement,
+            oneTimeCount: prekeyTargetCount
+        )
         for conversation in profile.conversations {
             let messages = conversation.messages.isEmpty
                 ? storedDirectMessages(profileId: profileId, contactId: conversation.contactId)
@@ -7873,18 +8043,14 @@ final class ClientViewModel: ObservableObject {
                 : group.messages
             removeAttachmentFiles(from: messages)
         }
-        try? threadMessageStore.deleteAllMessages(profileId: profileId)
-        let oldFingerprint = profile.identity.fingerprint
-        let oldDisplayName = profile.identity.displayName
-        let replacement = Identity(displayName: oldDisplayName)
-        let replacementInboxAccessKey = SigningKeyPair()
+        deleteAllStoredMessages(profileId: profileId)
         profile.identity = replacement
         profile.inboxAccessKey = replacementInboxAccessKey
         profile.inboxId = InboxAddress.derived(from: replacementInboxAccessKey.publicKeyData)
         profile.contacts.removeAll()
         profile.conversations.removeAll()
         profile.groups.removeAll()
-        profile.prekeys = (try? PrekeyState.generate(identity: replacement, oneTimeCount: prekeyTargetCount)) ?? profile.prekeys
+        profile.prekeys = replacementPrekeys
         state.updateIdentityProfile(profile)
         recordContinuityEvent(
             kind: .identityBurned,
@@ -7907,7 +8073,7 @@ final class ClientViewModel: ObservableObject {
                     ? storedGroupMessages(profileId: profileId, groupId: group.id)
                     : group.messages
                 removeAttachmentFiles(from: messages)
-                try? threadMessageStore.deleteGroupMessages(profileId: profileId, groupId: group.id)
+                deleteStoredGroupMessages(profileId: profileId, groupId: group.id)
             }
             state.identityProfiles[profileIndex].groups.removeAll { ids.contains($0.id) }
         }
@@ -7919,6 +8085,23 @@ final class ClientViewModel: ObservableObject {
     private func deleteIdentityProfiles(_ profileIds: [UUID]) async {
         let ids = Set(profileIds)
         guard !ids.isEmpty else { return }
+        let remainingProfiles = state.identityProfiles.filter { !ids.contains($0.id) }
+        let replacement: IdentityProfile?
+        if remainingProfiles.isEmpty {
+            let relaySelection = state.relayServers.first
+            do {
+                replacement = try makeIdentityProfile(
+                    displayName: "Recovered Identity",
+                    relay: relaySelection?.endpoint ?? Self.unconfiguredRelay,
+                    relayId: relaySelection?.id
+                )
+            } catch {
+                lastError = "Identity deletion was cancelled because a replacement identity could not be generated."
+                return
+            }
+        } else {
+            replacement = nil
+        }
         for profile in state.identityProfiles where ids.contains(profile.id) {
             for conversation in profile.conversations {
                 let messages = conversation.messages.isEmpty
@@ -7932,21 +8115,38 @@ final class ClientViewModel: ObservableObject {
                     : group.messages
                 removeAttachmentFiles(from: messages)
             }
-            try? threadMessageStore.deleteAllMessages(profileId: profile.id)
+            deleteAllStoredMessages(profileId: profile.id)
         }
         state.identityProfiles.removeAll { ids.contains($0.id) }
+        if let replacement {
+            state.identityProfiles = [replacement]
+            state.activeIdentityId = replacement.id
+        }
         ensureValidActiveIdentityAfterDestructiveChanges()
     }
 
     private func performThrowAroundOperation() async {
-        removeAllAttachmentsFromDisk()
         let relaySelection = state.relayServers.first
         let relay = relaySelection?.endpoint ?? Self.unconfiguredRelay
         let relayId = relaySelection?.id
-        let profile = makeIdentityProfile(displayName: "Cover \(Int.random(in: 1000...9999))", relay: relay, relayId: relayId)
+        let profile: IdentityProfile
+        let fakeIdentities: [Identity]
+        do {
+            profile = try makeIdentityProfile(
+                displayName: "Cover \(Int.random(in: 1000...9999))",
+                relay: relay,
+                relayId: relayId
+            )
+            fakeIdentities = try (1...3).map { index in
+                try Identity.generate(displayName: "Node \(index)")
+            }
+        } catch {
+            lastError = "Throw Around was cancelled because cover identities could not be generated."
+            return
+        }
+        removeAllAttachmentsFromDisk()
         var mutated = profile
-        for index in 1...3 {
-            let fake = Identity(displayName: "Node \(index)")
+        for fake in fakeIdentities {
             let contact = Contact(
                 displayName: fake.displayName,
                 inboxId: InboxAddress.generate(),
@@ -8007,7 +8207,7 @@ final class ClientViewModel: ObservableObject {
                     removeAttachmentFiles(from: messages)
                     state.identityProfiles[profileIndex].conversations[conversationIndex].messages.removeAll()
                     state.identityProfiles[profileIndex].conversations[conversationIndex].unreadCount = 0
-                    try? threadMessageStore.deleteDirectMessages(profileId: profileId, contactId: contactId)
+                    deleteStoredDirectMessages(profileId: profileId, contactId: contactId)
                 }
             }
             for groupIndex in state.identityProfiles[profileIndex].groups.indices {
@@ -8019,7 +8219,7 @@ final class ClientViewModel: ObservableObject {
                     removeAttachmentFiles(from: messages)
                     state.identityProfiles[profileIndex].groups[groupIndex].messages.removeAll()
                     state.identityProfiles[profileIndex].groups[groupIndex].unreadCount = 0
-                    try? threadMessageStore.deleteGroupMessages(profileId: profileId, groupId: groupId)
+                    deleteStoredGroupMessages(profileId: profileId, groupId: groupId)
                 }
             }
         }
@@ -8038,7 +8238,7 @@ final class ClientViewModel: ObservableObject {
                     ? storedDirectMessages(profileId: profileId, contactId: conversation.contactId)
                     : conversation.messages
                 removeAttachmentFiles(from: messages)
-                try? threadMessageStore.deleteDirectMessages(profileId: profileId, contactId: conversation.contactId)
+                deleteStoredDirectMessages(profileId: profileId, contactId: conversation.contactId)
             }
             let removedGroupIds = state.identityProfiles[profileIndex].groups
                 .filter { group in
@@ -8055,7 +8255,7 @@ final class ClientViewModel: ObservableObject {
             for groupId in removedGroupIds {
                 let messages = storedGroupMessages(profileId: profileId, groupId: groupId)
                 removeAttachmentFiles(from: messages)
-                try? threadMessageStore.deleteGroupMessages(profileId: profileId, groupId: groupId)
+                deleteStoredGroupMessages(profileId: profileId, groupId: groupId)
             }
         }
     }
@@ -8092,7 +8292,7 @@ final class ClientViewModel: ObservableObject {
                     )
                 }
                 if inMemoryMessages.isEmpty {
-                    try? threadMessageStore.saveDirectMessages(updatedMessages, profileId: profileId, contactId: contactId)
+                    saveStoredDirectMessages(updatedMessages, profileId: profileId, contactId: contactId)
                 } else {
                     state.identityProfiles[profileIndex].conversations[conversationIndex].messages = updatedMessages
                 }
@@ -8126,7 +8326,7 @@ final class ClientViewModel: ObservableObject {
                     )
                 }
                 if inMemoryMessages.isEmpty {
-                    try? threadMessageStore.saveGroupMessages(updatedMessages, profileId: profileId, groupId: groupId)
+                    saveStoredGroupMessages(updatedMessages, profileId: profileId, groupId: groupId)
                 } else {
                     state.identityProfiles[profileIndex].groups[groupIndex].messages = updatedMessages
                 }
@@ -8244,18 +8444,7 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func ensureValidActiveIdentityAfterDestructiveChanges() {
-        if state.identityProfiles.isEmpty {
-            let relaySelection = state.relayServers.first
-            let relay = relaySelection?.endpoint ?? Self.unconfiguredRelay
-            let replacement = makeIdentityProfile(
-                displayName: "Recovered Identity",
-                relay: relay,
-                relayId: relaySelection?.id
-            )
-            state.identityProfiles = [replacement]
-            state.activeIdentityId = replacement.id
-            return
-        }
+        guard !state.identityProfiles.isEmpty else { return }
         if let active = state.identityProfiles.first(where: { $0.id == state.activeIdentityId }), !active.isArchived {
             return
         }
@@ -8266,18 +8455,15 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
-    private func makeIdentityProfile(displayName: String, relay: RelayEndpoint, relayId: UUID?) -> IdentityProfile {
-        let identity = Identity(displayName: displayName)
-        let inboxAccessKey = SigningKeyPair()
+    private func makeIdentityProfile(
+        displayName: String,
+        relay: RelayEndpoint,
+        relayId: UUID?
+    ) throws -> IdentityProfile {
+        let identity = try Identity.generate(displayName: displayName)
+        let inboxAccessKey = try SigningKeyPair.generate()
         let inboxId = InboxAddress.derived(from: inboxAccessKey.publicKeyData)
-        let prekeys = (try? PrekeyState.generate(identity: identity, oneTimeCount: prekeyTargetCount)) ?? PrekeyState(
-            signedPrekeyId: UUID(),
-            signedPrekeyPublicKey: Data(),
-            signedPrekeyPrivateKey: Data(),
-            signedPrekeySignature: Data(),
-            signedPrekeyIssuedAt: Date(),
-            oneTimePrekeys: []
-        )
+        let prekeys = try PrekeyState.generate(identity: identity, oneTimeCount: prekeyTargetCount)
         return IdentityProfile(
             identity: identity,
             inboxId: inboxId,
@@ -8296,7 +8482,7 @@ final class ClientViewModel: ObservableObject {
                 guard !conversation.messages.isEmpty else {
                     continue
                 }
-                try threadMessageStore.saveDirectMessages(
+                try writeStoredDirectMessages(
                     conversation.messages,
                     profileId: profile.id,
                     contactId: conversation.contactId
@@ -8307,12 +8493,22 @@ final class ClientViewModel: ObservableObject {
                 guard !group.messages.isEmpty else {
                     continue
                 }
-                try threadMessageStore.saveGroupMessages(
+                try writeStoredGroupMessages(
                     group.messages,
                     profileId: profile.id,
                     groupId: group.id
                 )
             }
+        }
+    }
+
+    private func persistThreadMessagesBeforeTransition() -> Bool {
+        do {
+            try persistAllThreadMessagesFromState(state)
+            return true
+        } catch {
+            lastError = "Messages could not be saved locally. The current conversation remains open to prevent history loss."
+            return false
         }
     }
 
@@ -8418,10 +8614,7 @@ final class ClientViewModel: ObservableObject {
         guard conversation.messages.isEmpty else {
             return
         }
-        let messages = (try? threadMessageStore.loadDirectMessages(
-            profileId: state.activeIdentityId,
-            contactId: contactId
-        )) ?? []
+        let messages = storedDirectMessages(profileId: state.activeIdentityId, contactId: contactId)
         if !messages.isEmpty {
             conversation.messages = messages
             state.upsert(conversation: conversation)
@@ -8435,10 +8628,7 @@ final class ClientViewModel: ObservableObject {
         guard group.messages.isEmpty else {
             return
         }
-        let messages = (try? threadMessageStore.loadGroupMessages(
-            profileId: state.activeIdentityId,
-            groupId: groupId
-        )) ?? []
+        let messages = storedGroupMessages(profileId: state.activeIdentityId, groupId: groupId)
         if !messages.isEmpty {
             group.messages = messages
             state.upsert(group: group)
@@ -8459,7 +8649,7 @@ final class ClientViewModel: ObservableObject {
                 }
                 guard updatedMessages != originalMessages else { continue }
                 if inMemoryMessages.isEmpty {
-                    try? threadMessageStore.saveDirectMessages(updatedMessages, profileId: profileId, contactId: contactId)
+                    saveStoredDirectMessages(updatedMessages, profileId: profileId, contactId: contactId)
                 } else {
                     state.identityProfiles[profileIndex].conversations[conversationIndex].messages = updatedMessages
                 }
@@ -8475,7 +8665,7 @@ final class ClientViewModel: ObservableObject {
                 }
                 guard updatedMessages != originalMessages else { continue }
                 if inMemoryMessages.isEmpty {
-                    try? threadMessageStore.saveGroupMessages(updatedMessages, profileId: profileId, groupId: groupId)
+                    saveStoredGroupMessages(updatedMessages, profileId: profileId, groupId: groupId)
                 } else {
                     state.identityProfiles[profileIndex].groups[groupIndex].messages = updatedMessages
                 }
@@ -8507,7 +8697,7 @@ final class ClientViewModel: ObservableObject {
         // Avoid clobbering persisted history when RAM was already evicted by a transient scene change.
         if !conversation.messages.isEmpty {
             do {
-                try threadMessageStore.saveDirectMessages(
+                try writeStoredDirectMessages(
                     conversation.messages,
                     profileId: state.activeIdentityId,
                     contactId: contactId
@@ -8528,7 +8718,7 @@ final class ClientViewModel: ObservableObject {
         // Same protection for group threads.
         if !group.messages.isEmpty {
             do {
-                try threadMessageStore.saveGroupMessages(
+                try writeStoredGroupMessages(
                     group.messages,
                     profileId: state.activeIdentityId,
                     groupId: groupId
@@ -8574,11 +8764,98 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func storedDirectMessages(profileId: UUID, contactId: UUID) -> [Message] {
-        (try? threadMessageStore.loadDirectMessages(profileId: profileId, contactId: contactId)) ?? []
+        let key = directThreadStorageKey(profileId: profileId, contactId: contactId)
+        do {
+            let messages = try threadMessageStore.loadDirectMessages(profileId: profileId, contactId: contactId)
+            unreadableDirectThreadKeys.remove(key)
+            return messages
+        } catch {
+            unreadableDirectThreadKeys.insert(key)
+            lastError = "Encrypted chat history could not be opened. The existing history file was not modified."
+            return []
+        }
     }
 
     private func storedGroupMessages(profileId: UUID, groupId: UUID) -> [Message] {
-        (try? threadMessageStore.loadGroupMessages(profileId: profileId, groupId: groupId)) ?? []
+        let key = groupThreadStorageKey(profileId: profileId, groupId: groupId)
+        do {
+            let messages = try threadMessageStore.loadGroupMessages(profileId: profileId, groupId: groupId)
+            unreadableGroupThreadKeys.remove(key)
+            return messages
+        } catch {
+            unreadableGroupThreadKeys.insert(key)
+            lastError = "Encrypted group history could not be opened. The existing history file was not modified."
+            return []
+        }
+    }
+
+    private func saveStoredDirectMessages(_ messages: [Message], profileId: UUID, contactId: UUID) {
+        do {
+            try writeStoredDirectMessages(messages, profileId: profileId, contactId: contactId)
+        } catch {
+            lastError = "Encrypted chat history could not be updated."
+        }
+    }
+
+    private func saveStoredGroupMessages(_ messages: [Message], profileId: UUID, groupId: UUID) {
+        do {
+            try writeStoredGroupMessages(messages, profileId: profileId, groupId: groupId)
+        } catch {
+            lastError = "Encrypted group history could not be updated."
+        }
+    }
+
+    private func writeStoredDirectMessages(_ messages: [Message], profileId: UUID, contactId: UUID) throws {
+        let key = directThreadStorageKey(profileId: profileId, contactId: contactId)
+        guard !unreadableDirectThreadKeys.contains(key) else {
+            throw ThreadHistoryGuardError.unreadableExistingHistory
+        }
+        try threadMessageStore.saveDirectMessages(messages, profileId: profileId, contactId: contactId)
+    }
+
+    private func writeStoredGroupMessages(_ messages: [Message], profileId: UUID, groupId: UUID) throws {
+        let key = groupThreadStorageKey(profileId: profileId, groupId: groupId)
+        guard !unreadableGroupThreadKeys.contains(key) else {
+            throw ThreadHistoryGuardError.unreadableExistingHistory
+        }
+        try threadMessageStore.saveGroupMessages(messages, profileId: profileId, groupId: groupId)
+    }
+
+    private func directThreadStorageKey(profileId: UUID, contactId: UUID) -> String {
+        "\(profileId.uuidString.lowercased())/\(contactId.uuidString.lowercased())"
+    }
+
+    private func groupThreadStorageKey(profileId: UUID, groupId: UUID) -> String {
+        "\(profileId.uuidString.lowercased())/\(groupId.uuidString.lowercased())"
+    }
+
+    private func deleteStoredDirectMessages(profileId: UUID, contactId: UUID) {
+        do {
+            try threadMessageStore.deleteDirectMessages(profileId: profileId, contactId: contactId)
+            unreadableDirectThreadKeys.remove(directThreadStorageKey(profileId: profileId, contactId: contactId))
+        } catch {
+            lastError = "Encrypted chat history could not be deleted."
+        }
+    }
+
+    private func deleteStoredGroupMessages(profileId: UUID, groupId: UUID) {
+        do {
+            try threadMessageStore.deleteGroupMessages(profileId: profileId, groupId: groupId)
+            unreadableGroupThreadKeys.remove(groupThreadStorageKey(profileId: profileId, groupId: groupId))
+        } catch {
+            lastError = "Encrypted group history could not be deleted."
+        }
+    }
+
+    private func deleteAllStoredMessages(profileId: UUID) {
+        do {
+            try threadMessageStore.deleteAllMessages(profileId: profileId)
+            let prefix = "\(profileId.uuidString.lowercased())/"
+            unreadableDirectThreadKeys = Set(unreadableDirectThreadKeys.filter { !$0.hasPrefix(prefix) })
+            unreadableGroupThreadKeys = Set(unreadableGroupThreadKeys.filter { !$0.hasPrefix(prefix) })
+        } catch {
+            lastError = "Encrypted message history could not be deleted."
+        }
     }
 
     private func stopAutoFetch() {
@@ -8666,6 +8943,8 @@ final class ClientViewModel: ObservableObject {
         store = ClientStateStore(fileURL: stateFileURL, useEncryption: mode.usesKeychain)
         attachmentStore = AttachmentStore(directory: attachmentDirectory, useEncryption: mode.usesKeychain)
         threadMessageStore = ThreadMessageStore(directory: threadMessageDirectory, useEncryption: mode.usesKeychain)
+        unreadableDirectThreadKeys.removeAll()
+        unreadableGroupThreadKeys.removeAll()
     }
 
     private func migrateThreadMessages(from oldStore: ThreadMessageStore, to newStore: ThreadMessageStore) throws {
@@ -8785,6 +9064,10 @@ final class ClientViewModel: ObservableObject {
         }
         return difference == 0
     }
+}
+
+private enum ThreadHistoryGuardError: Error {
+    case unreadableExistingHistory
 }
 
 private extension Data {

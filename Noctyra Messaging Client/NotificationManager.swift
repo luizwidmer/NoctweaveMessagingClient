@@ -18,12 +18,13 @@ final class NotificationManager {
         }
     }
 
-    func notify(title: String, body: String) {
+    func notifyNewMessage() {
         guard isAuthorized else { return }
         let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
+        content.title = "Noctyra"
+        content.body = "A new encrypted message is ready."
         content.sound = .default
+        content.threadIdentifier = "noctyra-encrypted-message"
         let request = UNNotificationRequest(
             identifier: UUID().uuidString,
             content: content,

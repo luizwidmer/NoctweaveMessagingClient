@@ -71,9 +71,11 @@ final class CiphertextPrefetchStore {
 
     nonisolated static func defaultDirectory() -> URL {
         let fileManager = FileManager.default
+        #if os(iOS)
         if let appGroupURL = fileManager.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) {
             return appGroupURL.appendingPathComponent("CiphertextPrefetch", isDirectory: true)
         }
+        #endif
         return fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("NoctyraClient", isDirectory: true)
             .appendingPathComponent("CiphertextPrefetch", isDirectory: true)
@@ -196,6 +198,16 @@ final class CiphertextPrefetchStore {
         try loadPrefetchRecords().count
     }
 
+    func clearAll() throws {
+        for url in [configURL, statusURL, batchURL] where FileManager.default.fileExists(atPath: url.path) {
+            try securelyRemoveFile(at: url)
+        }
+        if FileManager.default.fileExists(atPath: directory.path),
+           (try? FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty) == true {
+            try? FileManager.default.removeItem(at: directory)
+        }
+    }
+
     func removeDirectEnvelopeIds(_ ids: Set<UUID>, profileId: UUID) throws {
         guard !ids.isEmpty else { return }
         let profileInboxId = try loadConfig()?.profiles.first(where: { $0.id == profileId })?.inboxId
@@ -275,6 +287,9 @@ final class CiphertextPrefetchStore {
     private func readPayload(from url: URL) throws -> Data? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            throw CiphertextPrefetchStoreError.fileTooLarge
+        }
         if let size = attributes[.size] as? NSNumber,
            size.intValue > Self.maxEncryptedFileBytes {
             throw CiphertextPrefetchStoreError.fileTooLarge
@@ -332,7 +347,12 @@ final class CiphertextPrefetchStore {
         to url: URL,
         protection: FileProtectionType
     ) throws {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         var payload = try NoctweaveCoder.encode(value, sortedKeys: true)
         defer { payload.secureWipe() }
         var data = try encrypt(payload)
@@ -344,7 +364,12 @@ final class CiphertextPrefetchStore {
         #if os(iOS)
         try FileManager.default.setAttributes([.protectionKey: protection], ofItemAtPath: url.path)
         #endif
-        applyPrivacyAttributes(url: url)
+        do {
+            try applyPrivacyAttributes(url: url)
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
     }
 
     private func encrypt(_ payload: Data) throws -> Data {
@@ -370,16 +395,12 @@ final class CiphertextPrefetchStore {
         return opened
     }
 
-    private func applyPrivacyAttributes(url: URL) {
-        do {
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
-            var mutableURL = url
-            try mutableURL.setResourceValues(values)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        } catch {
-            print("[client] Failed to apply prefetch privacy attributes")
-        }
+    private func applyPrivacyAttributes(url: URL) throws {
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableURL = url
+        try mutableURL.setResourceValues(values)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     private func securelyRemoveFile(at url: URL) throws {

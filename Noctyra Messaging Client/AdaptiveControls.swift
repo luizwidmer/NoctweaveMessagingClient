@@ -12,6 +12,22 @@ enum IOSControlMetrics {
         UIDevice.current.userInterfaceIdiom == .pad
     }
 
+    /// iPadOS 26 places window controls over the leading edge of an app when it runs in a
+    /// resizable window. Unlike a normal safe-area inset, that occupied area is not always
+    /// reported to SwiftUI, so top bars must reserve it explicitly.
+    static var windowControlLeadingClearance: CGFloat {
+        guard isPad,
+              let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState != .unattached }) else {
+            return 0
+        }
+        let windowSize = scene.effectiveGeometry.coordinateSpace.bounds.size
+        let screenSize = scene.screen.bounds.size
+        let isWindowed = windowSize.width + 8 < screenSize.width || windowSize.height + 8 < screenSize.height
+        return isWindowed ? 62 : 0
+    }
+
     static func prefersSideRail(for size: CGSize) -> Bool {
         isPad && size.width >= 900 && size.width > size.height
     }
