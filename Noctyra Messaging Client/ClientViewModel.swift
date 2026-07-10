@@ -748,6 +748,7 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func publishCiphertextPrefetchConfig(from snapshot: ClientState? = nil) {
+        #if os(iOS)
         let source = snapshot ?? state
         let profiles = source.identityProfiles.compactMap { profile -> NoctyraPrefetchProfile? in
             guard !profile.isArchived, let inboxAccessKey = profile.inboxAccessKey else {
@@ -767,9 +768,11 @@ final class ClientViewModel: ObservableObject {
         } catch {
             lastError = "Failed to publish prefetch config: \(safeStorageErrorDescription(error, fallback: "Ciphertext prefetch storage failed."))"
         }
+        #endif
     }
 
     func prefetchCiphertextNow() async {
+        #if os(iOS)
         publishCiphertextPrefetchConfig()
         let result = await CiphertextPrefetchRunner(store: ciphertextPrefetchStore).run()
         if result.failures.isEmpty {
@@ -777,6 +780,9 @@ final class ClientViewModel: ObservableObject {
         } else {
             lastError = result.failures.joined(separator: "\n")
         }
+        #else
+        lastInfo = "Background ciphertext prefetch is available on iOS through the sync widget."
+        #endif
     }
 
     private func recordContinuityEvent(
@@ -6731,37 +6737,49 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func prefetchedDirectEnvelopeRecords(for profileId: UUID) -> [PrefetchedDirectEnvelopeRecord] {
+        #if os(iOS)
         do {
             return try ciphertextPrefetchStore.directEnvelopeRecords(profileId: profileId)
         } catch {
             lastError = "Failed to load prefetched ciphertext: \(safeStorageErrorDescription(error, fallback: "Ciphertext prefetch storage failed."))"
             return []
         }
+        #else
+        return []
+        #endif
     }
 
     private func removePrefetchedDirectEnvelopeIds(_ ids: Set<UUID>, profileId: UUID) {
+        #if os(iOS)
         do {
             try ciphertextPrefetchStore.removeDirectEnvelopeIds(ids, profileId: profileId)
         } catch {
             lastError = "Failed to clear prefetched ciphertext: \(safeStorageErrorDescription(error, fallback: "Ciphertext prefetch storage failed."))"
         }
+        #endif
     }
 
     private func prefetchedGroupEnvelopeRecords(profileId: UUID, groupId: UUID) -> [PrefetchedGroupEnvelopeRecord] {
+        #if os(iOS)
         do {
             return try ciphertextPrefetchStore.groupEnvelopeRecords(profileId: profileId, groupId: groupId)
         } catch {
             lastError = "Failed to load prefetched group ciphertext: \(safeStorageErrorDescription(error, fallback: "Ciphertext prefetch storage failed."))"
             return []
         }
+        #else
+        return []
+        #endif
     }
 
     private func removePrefetchedGroupEnvelopeIds(_ ids: Set<UUID>, profileId: UUID, groupId: UUID) {
+        #if os(iOS)
         do {
             try ciphertextPrefetchStore.removeGroupEnvelopeIds(ids, profileId: profileId, groupId: groupId)
         } catch {
             lastError = "Failed to clear prefetched group ciphertext: \(safeStorageErrorDescription(error, fallback: "Ciphertext prefetch storage failed."))"
         }
+        #endif
     }
 
     private func mergedEnvelopeBatch(live: [Envelope], prefetched: [Envelope]) -> [Envelope] {

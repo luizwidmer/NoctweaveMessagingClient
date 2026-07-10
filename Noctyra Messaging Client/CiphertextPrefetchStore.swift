@@ -1,9 +1,6 @@
 import Foundation
 import NoctweaveCore
 import CryptoKit
-#if canImport(Security)
-import Security
-#endif
 
 struct NoctyraPrefetchStatus: Codable, Equatable {
     var lastAttemptAt: Date?
@@ -373,7 +370,7 @@ final class CiphertextPrefetchStore {
     }
 
     private func encrypt(_ payload: Data) throws -> Data {
-        let key = try CiphertextPrefetchKeychain.loadOrCreateKey()
+        let key = try prefetchStorageKey()
         let sealed = try AES.GCM.seal(payload, using: key)
         guard var combined = sealed.combined else {
             throw CiphertextPrefetchStoreError.encryptionFailed
@@ -388,7 +385,7 @@ final class CiphertextPrefetchStore {
             throw CiphertextPrefetchStoreError.encryptionFailed
         }
         let sealed = try AES.GCM.SealedBox(combined: envelope.sealed)
-        let key = try CiphertextPrefetchKeychain.loadOrCreateKey()
+        let key = try prefetchStorageKey()
         guard let opened = try? AES.GCM.open(sealed, using: key) else {
             throw CiphertextPrefetchStoreError.encryptionFailed
         }
@@ -401,6 +398,20 @@ final class CiphertextPrefetchStore {
         var mutableURL = url
         try mutableURL.setResourceValues(values)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func prefetchStorageKey() throws -> SymmetricKey {
+        #if os(iOS)
+        let accessGroup: String? = "9MY7SXN56X.com.noctyra.prefetch"
+        #else
+        let accessGroup: String? = nil
+        #endif
+        return try SecureStorageKeyProvider.shared.loadOrCreateKey(
+            service: "com.noctyra.ciphertext-prefetch",
+            account: "prefetch-store-key-v1",
+            accessGroup: accessGroup,
+            accessibility: .afterFirstUnlockDeviceOnly
+        )
     }
 
     private func securelyRemoveFile(at url: URL) throws {
@@ -456,73 +467,3 @@ private enum CiphertextPrefetchStoreError: Error {
     case fileTooLarge
     case invalidBatch
 }
-
-#if canImport(Security)
-private enum CiphertextPrefetchKeychain {
-    private static let service = "com.noctyra.ciphertext-prefetch"
-    private static let account = "prefetch-store-key-v1"
-    #if os(iOS)
-    private static let accessGroup = "9MY7SXN56X.com.noctyra.prefetch"
-    #endif
-
-    static func loadOrCreateKey() throws -> SymmetricKey {
-        if let existing = try loadKey() {
-            return existing
-        }
-        let key = SymmetricKey(size: .bits256)
-        try saveKey(key)
-        return key
-    }
-
-    private static func loadKey() throws -> SymmetricKey? {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: true,
-            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
-        ]
-        #if os(iOS)
-        query[kSecAttrAccessGroup as String] = accessGroup
-        #endif
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecItemNotFound {
-            return nil
-        }
-        guard status == errSecSuccess, var data = item as? Data else {
-            throw CiphertextPrefetchKeychainError.unavailable(status: status)
-        }
-        defer { data.secureWipe() }
-        return SymmetricKey(data: data)
-    }
-
-    private static func saveKey(_ key: SymmetricKey) throws {
-        var data = key.withUnsafeBytes { Data($0) }
-        defer { data.secureWipe() }
-        var attributes: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-            kSecAttrSynchronizable as String: kCFBooleanFalse as Any
-        ]
-        #if os(iOS)
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        attributes[kSecAttrAccessGroup as String] = accessGroup
-        #endif
-        let status = SecItemAdd(attributes as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            return
-        }
-        guard status == errSecSuccess else {
-            throw CiphertextPrefetchKeychainError.unavailable(status: status)
-        }
-    }
-}
-
-private enum CiphertextPrefetchKeychainError: Error {
-    case unavailable(status: OSStatus)
-}
-#endif
