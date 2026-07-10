@@ -10815,7 +10815,11 @@ private struct RelaysView: View {
                 }
             }
             .sheet(item: $relayEditorMode) { mode in
-                RelayEditorView(title: mode.title, initial: mode.record) { name, endpoint, note, relayPassword, pinOrigin in
+                RelayEditorView(
+                    title: mode.title,
+                    initial: mode.record,
+                    requiresReachableRelay: mode.requiresReachableRelay
+                ) { name, endpoint, note, relayPassword, pinOrigin in
                     Task {
                         switch mode {
                         case .add:
@@ -12469,6 +12473,15 @@ private enum RelayEditorMode: Identifiable {
             return nil
         case .edit(let record):
             return record
+        }
+    }
+
+    var requiresReachableRelay: Bool {
+        switch self {
+        case .add:
+            return true
+        case .edit:
+            return false
         }
     }
 }

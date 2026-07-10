@@ -298,7 +298,7 @@ struct RelayEditorView: View {
 
                         editorSection(
                             title: "Connection",
-                            subtitle: "A friendly name is optional. The address may be a URL, hostname, or IP.",
+                            subtitle: "A friendly name is optional. Saving a new relay verifies that a compatible Noctweave service responds.",
                             symbol: "network"
                         ) {
                             styledField("Relay name (optional)", text: $name)
@@ -329,11 +329,14 @@ struct RelayEditorView: View {
                                     .font(.subheadline.weight(.semibold))
                                 SecureField("Relay password (optional)", text: $relayPassword)
                                     .noctyraInputField()
-                                styledField("Private note (optional)", text: $note)
+                                styledField("Local note (optional)", text: $note)
+                                Text("A private label for your own reference, such as “Home relay.” It stays on this device and is never sent to the relay.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
 
                                 Divider().opacity(0.25)
 
-                                Label("Certificate Pin", systemImage: "checkmark.shield.fill")
+                                Label("Certificate Pin (Optional)", systemImage: "checkmark.shield.fill")
                                     .font(.subheadline.weight(.semibold))
                                 #if os(iOS)
                                 styledField("SHA-256 pin (base64 or hex)", text: $certificatePin)
@@ -342,7 +345,7 @@ struct RelayEditorView: View {
                                 #else
                                 styledField("SHA-256 pin (base64 or hex)", text: $certificatePin)
                                 #endif
-                                Text("Leave empty to pin the system-trusted leaf certificate automatically on first connection. Enter a value to override it manually. A changed certificate is rejected until you review and replace the pin.")
+                                Text("Most users should leave this empty. Noctyra reads and pins the relay’s system-trusted TLS certificate during the successful connection check. Manual SHA-256 values are for operators who publish a verified certificate fingerprint through a separate trusted channel.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 if let observedReplacementPin {

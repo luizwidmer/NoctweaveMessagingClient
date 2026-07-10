@@ -81,6 +81,26 @@ final class NoctyraUITests_iOS: XCTestCase {
         XCTAssertTrue(app.textFields["SHA-256 pin (base64 or hex)"].waitForExistence(timeout: 2))
     }
 
+    func testFirstRunDoesNotSaveUnreachableRelay() {
+        _ = openFirstRunRelayStep()
+
+        app.buttons["Add Relay"].tap()
+        let address = app.textFields["URL or IP address"]
+        XCTAssertTrue(address.waitForExistence(timeout: 3))
+        address.tap()
+        address.typeText("http://127.0.0.1:1")
+
+        let save = app.buttons["Save"]
+        XCTAssertTrue(save.isEnabled)
+        save.tap()
+
+        XCTAssertTrue(
+            app.staticTexts["No compatible Noctweave relay responded at this address. Check the address, access password, TLS, and proxy configuration."]
+                .waitForExistence(timeout: 6)
+        )
+        XCTAssertTrue(app.staticTexts["Add Relay"].exists)
+    }
+
     private func openSettings() {
         let tab = app.buttons["tab-settings"]
         if tab.waitForExistence(timeout: 2) {
