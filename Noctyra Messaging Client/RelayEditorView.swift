@@ -4,7 +4,8 @@ import NoctweaveCore
 struct RelayEditorView: View {
     let title: String
     let initial: RelayServerRecord?
-    let onSave: (String, RelayEndpoint, String?, String?) -> Void
+    let requiresReachableRelay: Bool
+    let onSave: (String, RelayEndpoint, String?, String?, RelayCertificatePinOrigin?) -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var name: String
@@ -12,12 +13,20 @@ struct RelayEditorView: View {
     @State private var note: String
     @State private var relayPassword: String
     @State private var certificatePin: String
+    @State private var showAdvancedOptions = false
     @State private var isResolvingAddress = false
     @State private var addressError: String?
+    @State private var observedReplacementPin: String?
 
-    init(title: String, initial: RelayServerRecord?, onSave: @escaping (String, RelayEndpoint, String?, String?) -> Void) {
+    init(
+        title: String,
+        initial: RelayServerRecord?,
+        requiresReachableRelay: Bool = false,
+        onSave: @escaping (String, RelayEndpoint, String?, String?, RelayCertificatePinOrigin?) -> Void
+    ) {
         self.title = title
         self.initial = initial
+        self.requiresReachableRelay = requiresReachableRelay
         self.onSave = onSave
         _name = State(initialValue: initial?.name ?? "")
         _relayAddress = State(initialValue: initial.map { Self.endpointAddress($0.endpoint) } ?? "")
@@ -65,73 +74,32 @@ struct RelayEditorView: View {
         case hostPort(host: String, port: UInt16?)
     }
 
+    private struct RelayProbeResult {
+        let reachable: Bool
+        let observedLeafCertificateSHA256: Data?
+    }
+
     private var parsedAddress: ParsedRelayAddress? {
         parseRelayAddress(relayAddress)
     }
 
     private func parseRelayAddress(_ value: String) -> ParsedRelayAddress? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        if let components = URLComponents(string: trimmed), let scheme = components.scheme, !scheme.isEmpty {
-            guard let host = components.host else { return nil }
-            let lowerScheme = scheme.lowercased()
-            let defaultPort: Int
-            let useTLS: Bool
-            let transport: RelayEndpointTransport
-            switch lowerScheme {
-            case "https":
-                defaultPort = 443
-                useTLS = true
-                transport = .http
-            case "http":
-                defaultPort = 80
-                useTLS = false
-                transport = .http
-            case "wss":
-                defaultPort = 443
-                useTLS = true
-                transport = .websocket
-            case "ws":
-                defaultPort = 80
-                useTLS = false
-                transport = .websocket
-            case "tls":
-                defaultPort = 9339
-                useTLS = true
-                transport = .tcp
-            case "tcp":
-                defaultPort = 9339
-                useTLS = false
-                transport = .tcp
-            default:
-                return nil
-            }
-            guard let port = UInt16(exactly: components.port ?? defaultPort) else { return nil }
-            return .explicit(RelayEndpoint(host: host, port: port, useTLS: useTLS, transport: transport))
+        guard let endpoint = try? RelayEndpointParser.parse(trimmed) else { return nil }
+        if trimmed.contains("://") {
+            return .explicit(endpoint)
         }
-
+        let explicitPort: UInt16?
         if trimmed.hasPrefix("["), let close = trimmed.firstIndex(of: "]") {
-            let host = String(trimmed[trimmed.index(after: trimmed.startIndex)..<close])
-            let remainder = trimmed[trimmed.index(after: close)...].trimmingCharacters(in: .whitespacesAndNewlines)
-            if remainder.isEmpty {
-                return .hostPort(host: host, port: nil)
-            }
-            guard remainder.hasPrefix(":") else { return nil }
-            let portString = String(remainder.dropFirst())
-            guard let port = UInt16(portString) else { return nil }
-            return .hostPort(host: host, port: port)
+            let remainder = trimmed[trimmed.index(after: close)...]
+            explicitPort = remainder.hasPrefix(":") ? UInt16(remainder.dropFirst()) : nil
+        } else if trimmed.filter({ $0 == ":" }).count == 1,
+                  let separator = trimmed.lastIndex(of: ":") {
+            explicitPort = UInt16(trimmed[trimmed.index(after: separator)...])
+        } else {
+            explicitPort = nil
         }
-
-        if let separator = trimmed.lastIndex(of: ":") {
-            let hostPart = String(trimmed[..<separator]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let portPart = String(trimmed[trimmed.index(after: separator)...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            if !hostPart.isEmpty, let port = UInt16(portPart) {
-                return .hostPort(host: hostPart, port: port)
-            }
-        }
-
-        return .hostPort(host: trimmed, port: nil)
+        return .hostPort(host: endpoint.host, port: explicitPort)
     }
 
     private func candidates(for host: String, port: UInt16?) -> [RelayEndpoint] {
@@ -167,41 +135,58 @@ struct RelayEditorView: View {
         }
     }
 
-    private func canReachRelay(_ endpoint: RelayEndpoint) async -> Bool {
-        let client = RelayClient(endpoint: endpoint)
+    private func probeRelay(_ endpoint: RelayEndpoint, authToken: String?) async -> RelayProbeResult {
+        let client = RelayClient(endpoint: endpoint, authToken: authToken)
         do {
-            let response = try await client.send(.health(), timeout: 1.1)
-            return response.type == .ok
+            let observation = try await client.sendObservingTLS(.info(), timeout: 1.5)
+            return RelayProbeResult(
+                reachable: observation.response.type == .info
+                    && observation.response.relayInfo != nil
+                    && observation.response.relayInfo?.kind != .coordinator,
+                observedLeafCertificateSHA256: observation.leafCertificateSHA256
+            )
         } catch {
-            return false
+            return RelayProbeResult(reachable: false, observedLeafCertificateSHA256: nil)
         }
     }
 
-    private func resolveEndpoint(from parsed: ParsedRelayAddress) async -> RelayEndpoint {
+    private func resolveEndpoint(
+        from parsed: ParsedRelayAddress,
+        authToken: String?
+    ) async -> (endpoint: RelayEndpoint, probe: RelayProbeResult) {
         switch parsed {
         case .explicit(let endpoint):
-            return endpoint
+            return (endpoint, await probeRelay(endpoint, authToken: authToken))
         case .hostPort(let host, let port):
             for candidate in candidates(for: host, port: port) {
-                if await canReachRelay(candidate) {
-                    return candidate
+                let probe = await probeRelay(candidate, authToken: authToken)
+                if probe.reachable {
+                    return (candidate, probe)
                 }
             }
             // Default to the raw relay endpoint when transport probing cannot determine transport.
-            return RelayEndpoint(host: host, port: port ?? 9339, useTLS: false, transport: .tcp)
+            return (
+                RelayEndpoint(host: host, port: port ?? 9339, useTLS: false, transport: .tcp),
+                RelayProbeResult(reachable: false, observedLeafCertificateSHA256: nil)
+            )
         }
     }
 
     @MainActor
     private func saveRelay() async {
         addressError = nil
+        observedReplacementPin = nil
         guard let parsedAddress else {
-            addressError = "Enter a valid relay URL or IP."
+            addressError = "Enter a complete URL, IP address, localhost, or qualified hostname such as relay.example.org."
             return
         }
         isResolvingAddress = true
-        var endpoint = await resolveEndpoint(from: parsedAddress)
-        isResolvingAddress = false
+        defer { isResolvingAddress = false }
+        let trimmedPassword = relayPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        let authToken = trimmedPassword.isEmpty ? nil : trimmedPassword
+        let resolution = await resolveEndpoint(from: parsedAddress, authToken: authToken)
+        var endpoint = resolution.endpoint
+        var certificatePinOrigin: RelayCertificatePinOrigin?
         let trimmedPin = certificatePin.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedPin.isEmpty {
             guard endpoint.useTLS else {
@@ -212,7 +197,16 @@ struct RelayEditorView: View {
                 addressError = "Certificate pin must be a 32-byte SHA-256 value in base64 or hexadecimal."
                 return
             }
+            if resolution.probe.reachable,
+               let observed = resolution.probe.observedLeafCertificateSHA256,
+               observed != pin {
+                observedReplacementPin = observed.base64EncodedString()
+                showAdvancedOptions = true
+                addressError = "The saved pin does not match the relay's current system-trusted certificate. Review the change before replacing it."
+                return
+            }
             endpoint.tlsCertificateFingerprintSHA256 = pin
+            certificatePinOrigin = .manual
         } else if let initial,
                   initial.endpoint.host == endpoint.host,
                   initial.endpoint.port == endpoint.port,
@@ -220,11 +214,36 @@ struct RelayEditorView: View {
                   initial.endpoint.transport == endpoint.transport {
             endpoint.tlsCertificateFingerprintSHA256 = initial.endpoint.tlsCertificateFingerprintSHA256
         }
+        if endpoint.useTLS,
+           endpoint.tlsCertificateFingerprintSHA256 == nil,
+           let observed = resolution.probe.observedLeafCertificateSHA256,
+           observed.count == 32 {
+            endpoint.tlsCertificateFingerprintSHA256 = observed
+            certificatePinOrigin = .automaticFirstUse
+        }
+        if requiresReachableRelay {
+            let finalEndpointReachable: Bool
+            if resolution.probe.reachable,
+               endpoint.tlsCertificateFingerprintSHA256 == resolution.probe.observedLeafCertificateSHA256 {
+                finalEndpointReachable = true
+            } else {
+                finalEndpointReachable = (await probeRelay(endpoint, authToken: authToken)).reachable
+            }
+            guard finalEndpointReachable else {
+                addressError = "No compatible Noctweave relay responded at this address. Check the address, access password, TLS, and proxy configuration."
+                return
+            }
+        }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmedName.isEmpty ? Self.endpointAddress(endpoint) : trimmedName
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedPassword = relayPassword.trimmingCharacters(in: .whitespacesAndNewlines)
-        onSave(finalName, endpoint, trimmedNote.isEmpty ? nil : trimmedNote, trimmedPassword.isEmpty ? nil : trimmedPassword)
+        onSave(
+            finalName,
+            endpoint,
+            trimmedNote.isEmpty ? nil : trimmedNote,
+            authToken,
+            certificatePinOrigin
+        )
         dismiss()
     }
 
@@ -291,9 +310,9 @@ struct RelayEditorView: View {
                             styledField("URL or IP address", text: $relayAddress)
                             #endif
                             HStack(spacing: 8) {
-                                Image(systemName: parsedAddress == nil ? "circle.dashed" : "checkmark.circle.fill")
-                                    .foregroundStyle(parsedAddress == nil ? Color.secondary : Color.green)
-                                Text(parsedAddress == nil ? "Waiting for a valid address" : "Address format recognized")
+                                Image(systemName: parsedAddress == nil ? "exclamationmark.circle" : "checkmark.circle.fill")
+                                    .foregroundStyle(parsedAddress == nil ? Color.orange : Color.green)
+                                Text(parsedAddress == nil ? "Enter a complete relay address" : "Address format is valid")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -304,32 +323,50 @@ struct RelayEditorView: View {
                             }
                         }
 
-                        editorSection(
-                            title: "Access",
-                            subtitle: "Optional credentials and a private note stored with this relay.",
-                            symbol: "key.fill"
-                        ) {
-                            SecureField("Relay password (optional)", text: $relayPassword)
-                                .noctyraInputField()
-                            styledField("Private note (optional)", text: $note)
-                        }
+                        DisclosureGroup(isExpanded: $showAdvancedOptions) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Label("Access", systemImage: "key.fill")
+                                    .font(.subheadline.weight(.semibold))
+                                SecureField("Relay password (optional)", text: $relayPassword)
+                                    .noctyraInputField()
+                                styledField("Private note (optional)", text: $note)
 
-                        editorSection(
-                            title: "Certificate Pin",
-                            subtitle: "Optional advanced protection against unexpected TLS certificate changes.",
-                            symbol: "checkmark.shield.fill"
-                        ) {
-                            #if os(iOS)
-                            styledField("SHA-256 pin (base64 or hex)", text: $certificatePin)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                            #else
-                            styledField("SHA-256 pin (base64 or hex)", text: $certificatePin)
-                            #endif
-                            Text("Leave empty to use system trust. A pinned relay is rejected if its leaf certificate changes.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                                Divider().opacity(0.25)
+
+                                Label("Certificate Pin", systemImage: "checkmark.shield.fill")
+                                    .font(.subheadline.weight(.semibold))
+                                #if os(iOS)
+                                styledField("SHA-256 pin (base64 or hex)", text: $certificatePin)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                                #else
+                                styledField("SHA-256 pin (base64 or hex)", text: $certificatePin)
+                                #endif
+                                Text("Leave empty to pin the system-trusted leaf certificate automatically on first connection. Enter a value to override it manually. A changed certificate is rejected until you review and replace the pin.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                if let observedReplacementPin {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("A different system-trusted certificate was observed. Only accept it after confirming the relay operator intentionally renewed or replaced the certificate.")
+                                            .font(.caption)
+                                            .foregroundStyle(.orange)
+                                        Button("Use Current Trusted Certificate") {
+                                            certificatePin = observedReplacementPin
+                                            self.observedReplacementPin = nil
+                                            addressError = nil
+                                        }
+                                        .glassButton(compact: true)
+                                    }
+                                    .padding(10)
+                                    .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                }
+                            }
+                            .padding(.top, 12)
+                        } label: {
+                            Label("Advanced Relay Options", systemImage: "slider.horizontal.3")
+                                .font(.headline)
                         }
+                        .uniformGlassCard(cornerRadius: 16, padding: 14)
 
                         if isResolvingAddress {
                             HStack(spacing: 12) {
@@ -352,6 +389,10 @@ struct RelayEditorView: View {
             }
             .noctyraSheetBackground()
             .hideSheetNavigationBar()
+        }
+        .onChange(of: relayAddress) { _, _ in
+            addressError = nil
+            observedReplacementPin = nil
         }
     }
 

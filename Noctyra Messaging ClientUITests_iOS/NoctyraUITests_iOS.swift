@@ -39,6 +39,48 @@ final class NoctyraUITests_iOS: XCTestCase {
         XCTAssertTrue(app.staticTexts["Hidden message"].waitForExistence(timeout: 2))
     }
 
+    func testFirstRunStorageProtectionCanEnableKeychain() {
+        let continueButton = openFirstRunRelayStep()
+        continueButton.tap()
+
+        let deviceOnly = app.buttons["onboarding-storage-deviceOnly"]
+        XCTAssertTrue(deviceOnly.waitForExistence(timeout: 3))
+        deviceOnly.tap()
+        waitForStorageUpdateToFinish()
+
+        let keychain = app.buttons["onboarding-storage-keychain"]
+        XCTAssertTrue(keychain.waitForExistence(timeout: 2))
+        keychain.tap()
+        waitForStorageUpdateToFinish()
+
+        XCTAssertFalse(app.descendants(matching: .any)["onboarding-error"].exists)
+        XCTAssertTrue(app.staticTexts["Privacy & Unlock"].exists)
+    }
+
+    func testFirstRunRelayValidationAndAdvancedOptions() {
+        _ = openFirstRunRelayStep()
+
+        let addRelay = app.buttons["Add Relay"]
+        XCTAssertTrue(addRelay.waitForExistence(timeout: 2))
+        addRelay.tap()
+
+        let address = app.textFields["URL or IP address"]
+        XCTAssertTrue(address.waitForExistence(timeout: 3))
+        address.tap()
+        address.typeText("anything")
+
+        XCTAssertTrue(app.staticTexts["Enter a complete relay address"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.buttons["Save"].isEnabled)
+        XCTAssertFalse(app.secureTextFields["Relay password (optional)"].exists)
+        XCTAssertFalse(app.textFields["SHA-256 pin (base64 or hex)"].exists)
+
+        let advanced = app.buttons["Advanced Relay Options"]
+        XCTAssertTrue(advanced.waitForExistence(timeout: 2))
+        advanced.tap()
+        XCTAssertTrue(app.secureTextFields["Relay password (optional)"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.textFields["SHA-256 pin (base64 or hex)"].waitForExistence(timeout: 2))
+    }
+
     private func openSettings() {
         let tab = app.buttons["tab-settings"]
         if tab.waitForExistence(timeout: 2) {
@@ -145,5 +187,39 @@ final class NoctyraUITests_iOS: XCTestCase {
         } else {
             app.swipeUp()
         }
+    }
+
+    @discardableResult
+    private func openFirstRunRelayStep() -> XCUIElement {
+        app.terminate()
+        app.launchArguments = ["UI_TESTING", "UI_TEST_ONBOARDING"]
+        app.launch()
+
+        let displayName = app.textFields["Display name"]
+        XCTAssertTrue(displayName.waitForExistence(timeout: 3))
+        displayName.tap()
+        displayName.typeText("Storage Test")
+        let returnKey = app.keyboards.buttons["Return"]
+        if returnKey.exists {
+            returnKey.tap()
+        } else {
+            app.swipeDown()
+        }
+
+        let continueButton = app.buttons["onboarding-continue"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 2))
+        continueButton.tap()
+        XCTAssertTrue(app.staticTexts["Choose Relay"].waitForExistence(timeout: 2))
+        return continueButton
+    }
+
+    private func waitForStorageUpdateToFinish() {
+        let updating = app.staticTexts["Updating storage protection..."]
+        if updating.waitForExistence(timeout: 1) {
+            let disappeared = NSPredicate(format: "exists == false")
+            expectation(for: disappeared, evaluatedWith: updating)
+            waitForExpectations(timeout: 8)
+        }
+        XCTAssertFalse(app.staticTexts["Storage protection update failed."].exists)
     }
 }

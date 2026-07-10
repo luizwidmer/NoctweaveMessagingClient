@@ -10815,7 +10815,7 @@ private struct RelaysView: View {
                 }
             }
             .sheet(item: $relayEditorMode) { mode in
-                RelayEditorView(title: mode.title, initial: mode.record) { name, endpoint, note, relayPassword in
+                RelayEditorView(title: mode.title, initial: mode.record) { name, endpoint, note, relayPassword, pinOrigin in
                     Task {
                         switch mode {
                         case .add:
@@ -10823,7 +10823,8 @@ private struct RelaysView: View {
                                 name: name,
                                 endpoint: endpoint,
                                 note: note,
-                                relayPassword: relayPassword
+                                relayPassword: relayPassword,
+                                certificatePinOrigin: pinOrigin
                             )
                         case .edit(let record):
                             await model.updateRelayServer(
@@ -10831,7 +10832,8 @@ private struct RelaysView: View {
                                 name: name,
                                 endpoint: endpoint,
                                 note: note,
-                                relayPassword: relayPassword
+                                relayPassword: relayPassword,
+                                certificatePinOrigin: pinOrigin
                             )
                         }
                     }
@@ -11896,6 +11898,7 @@ private struct RelayServerRow: View {
                 }
                 #if os(macOS)
                 transportBadge
+                certificatePinBadge
                 relayHealthBadge
                 #endif
                 Spacer()
@@ -11923,6 +11926,7 @@ private struct RelayServerRow: View {
             #if os(iOS)
             HStack(spacing: 6) {
                 transportBadge
+                certificatePinBadge
                 relayHealthBadge
                 Spacer(minLength: 0)
             }
@@ -11981,6 +11985,23 @@ private struct RelayServerRow: View {
             let view = StableCapsuleBadge(text: badge.text, icon: badge.icon, color: badge.color)
             #if os(macOS)
             view.help(badge.help)
+            #else
+            view
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private var certificatePinBadge: some View {
+        if server.endpoint.useTLS,
+           server.endpoint.tlsCertificateFingerprintSHA256?.count == 32 {
+            let view = StableCapsuleBadge(
+                text: "Pinned",
+                icon: "checkmark.shield.fill",
+                color: .purple
+            )
+            #if os(macOS)
+            view.help("Noctyra enforces a saved SHA-256 TLS leaf-certificate pin for this relay.")
             #else
             view
             #endif

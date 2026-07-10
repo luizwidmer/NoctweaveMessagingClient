@@ -109,6 +109,9 @@ final class ClientViewModel: ObservableObject {
     private var store: ClientStateStore
     private var attachmentStore: AttachmentStore
     private var threadMessageStore: ThreadMessageStore
+    /// The mode backing the currently installed store instances. This is intentionally
+    /// separate from `storageProtectionMode`, which is also used as the first-run UI choice.
+    private var configuredStorageProtectionMode: StorageProtectionMode
     private var unreadableDirectThreadKeys = Set<String>()
     private var unreadableGroupThreadKeys = Set<String>()
     private let ciphertextPrefetchStore: CiphertextPrefetchStore
@@ -246,9 +249,12 @@ final class ClientViewModel: ObservableObject {
         let attachmentDirectory = directory.appendingPathComponent("attachments", isDirectory: true)
         let threadMessageDirectory = directory.appendingPathComponent("threads", isDirectory: true)
         let corruptionKillSwitchURL = directory.appendingPathComponent(".corruption-kill-switch")
-        let isUITest = ProcessInfo.processInfo.arguments.contains("UI_TESTING")
-        let resolvedMode = ClientViewModel.loadStorageProtectionMode()
-        let useEncryption = resolvedMode?.usesKeychain ?? false
+        let arguments = ProcessInfo.processInfo.arguments
+        let isUITest = arguments.contains("UI_TESTING")
+        let isOnboardingUITest = isUITest && arguments.contains("UI_TEST_ONBOARDING")
+        let resolvedMode = isOnboardingUITest ? nil : ClientViewModel.loadStorageProtectionMode()
+        let configuredMode = resolvedMode ?? .deviceOnly
+        let useEncryption = configuredMode.usesKeychain
 
         self.stateFileURL = fileURL
         self.attachmentDirectory = attachmentDirectory
@@ -261,15 +267,24 @@ final class ClientViewModel: ObservableObject {
         self.store = ClientStateStore(fileURL: fileURL, useEncryption: useEncryption)
         self.attachmentStore = AttachmentStore(directory: attachmentDirectory, useEncryption: useEncryption)
         self.threadMessageStore = ThreadMessageStore(directory: threadMessageDirectory, useEncryption: useEncryption)
+        self.configuredStorageProtectionMode = configuredMode
         self.ciphertextPrefetchStore = CiphertextPrefetchStore()
         self.storageProtectionMode = resolvedMode ?? .keychain
         self.requiresStorageChoice = false
         self.biometricsAvailable = ClientViewModel.detectBiometricAvailability()
         if isUITest {
-            self.state = ClientViewModel.makeUITestState()
+            if isOnboardingUITest {
+                var onboardingState = ClientViewModel.makeUITestState()
+                onboardingState.hasCompletedOnboarding = false
+                onboardingState.hasAcceptedPrivacyPolicy = false
+                onboardingState.hasAcceptedTermsOfUse = false
+                self.state = onboardingState
+            } else {
+                self.state = ClientViewModel.makeUITestState()
+            }
             self.isReady = true
             self.requiresStorageChoice = false
-            self.requiresOnboarding = false
+            self.requiresOnboarding = isOnboardingUITest
         } else {
             // Placeholder identity: first-run setup will replace this before any relay publish happens.
             let defaultIdentity = Identity(displayName: "Setup Required")
@@ -367,6 +382,7 @@ final class ClientViewModel: ObservableObject {
         isReady = true
     }
 
+    @discardableResult
     func completeOnboarding(
         displayName: String,
         relayId: UUID?,
@@ -374,26 +390,26 @@ final class ClientViewModel: ObservableObject {
         appLock: AppLockSettings,
         acceptedPrivacyPolicy: Bool,
         acceptedTermsOfUse: Bool
-    ) async {
+    ) async -> Bool {
         guard acceptedPrivacyPolicy && acceptedTermsOfUse else {
             lastError = "Accept the Privacy Policy and Terms of Use to continue."
-            return
+            return false
         }
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             lastError = "Choose a display name."
-            return
+            return false
         }
         let relaySelection = relayId.flatMap { id in
             state.relayServers.first(where: { $0.id == id })
         } ?? state.relayServers.first
         guard let relaySelection else {
             lastError = "Add a relay server first."
-            return
+            return false
         }
         if requiresPin(mode: appLock.mode) && !appLock.isPinConfigured {
             lastError = "Set a 6-digit PIN for the selected app lock mode."
-            return
+            return false
         }
 
         let identity: Identity
@@ -405,8 +421,10 @@ final class ClientViewModel: ObservableObject {
             prekeys = try PrekeyState.generate(identity: identity, oneTimeCount: prekeyTargetCount)
         } catch {
             lastError = "Post-quantum identity generation failed. No identity was created."
-            return
+            return false
         }
+        let previousState = state
+        let previousRequiresOnboarding = requiresOnboarding
         let inboxId = InboxAddress.derived(from: inboxAccessKey.publicKeyData)
         let profile = IdentityProfile(
             identity: identity,
@@ -431,7 +449,14 @@ final class ClientViewModel: ObservableObject {
         state.hasAcceptedPrivacyPolicy = acceptedPrivacyPolicy
         state.hasAcceptedTermsOfUse = acceptedTermsOfUse
         requiresOnboarding = false
-        await save()
+        do {
+            try await persistState()
+        } catch {
+            state = previousState
+            requiresOnboarding = previousRequiresOnboarding
+            lastError = "Setup could not be saved: \(safeStorageErrorDescription(error, fallback: "Local encrypted state could not be written."))"
+            return false
+        }
 
         await ensureRelaySelection()
         await ensurePrekeysForActiveProfiles()
@@ -439,6 +464,7 @@ final class ClientViewModel: ObservableObject {
         await notifier.requestAuthorization()
         startAutoFetch()
         lastInfo = "Setup complete."
+        return true
     }
 
     private func ensurePrekeys() async {
@@ -552,15 +578,9 @@ final class ClientViewModel: ObservableObject {
 
     func selectStorageProtection(_ mode: StorageProtectionMode) {
         Task { @MainActor in
-            do {
-                if mode.usesKeychain {
-                    storageProtectionStatus = "Verifying Keychain access..."
-                    try await warmUpKeychainAccess()
-                }
-                storageProtectionMode = mode
+            let updated = await updateStorageProtectionMode(mode)
+            if updated {
                 requiresStorageChoice = false
-                persistStorageProtectionMode(mode)
-                configureStores(for: mode)
                 storageProtectionStatus = "Storage protection set to \(mode.displayName)."
                 Task {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -569,28 +589,28 @@ final class ClientViewModel: ObservableObject {
                     }
                 }
                 await load()
-            } catch {
+            } else {
                 // Keep chooser visible so user can pick device-only mode if keychain access fails.
                 requiresStorageChoice = true
-                storageProtectionStatus = nil
-                lastError = "Unable to access Keychain: \(safeStorageErrorDescription(error, fallback: "Secure key storage is unavailable."))"
             }
         }
     }
 
     @discardableResult
     func updateStorageProtectionMode(_ mode: StorageProtectionMode) async -> Bool {
+        lastError = nil
         let persistedMode = ClientViewModel.loadStorageProtectionMode()
-        guard storageProtectionMode != mode || persistedMode != mode else {
+        guard configuredStorageProtectionMode != mode || persistedMode != mode else {
+            storageProtectionMode = mode
             return true
         }
         let previousStore = store
         let previousAttachmentStore = attachmentStore
         let previousThreadMessageStore = threadMessageStore
-        let previousMode = storageProtectionMode
+        let previousConfiguredMode = configuredStorageProtectionMode
+        let previousPersistedMode = persistedMode
 
         storageProtectionMode = mode
-        persistStorageProtectionMode(mode)
         configureStores(for: mode)
         storageProtectionStatus = "Updating storage protection..."
 
@@ -601,6 +621,7 @@ final class ClientViewModel: ObservableObject {
             try migrateThreadMessages(from: previousThreadMessageStore, to: threadMessageStore)
             try migrateAttachments(from: previousAttachmentStore, to: attachmentStore)
             try await store.save(strippedStateForPersistence(state))
+            persistStorageProtectionMode(mode)
             evictInactiveThreadMessagesFromRAM()
             storageProtectionStatus = "Storage protection updated."
             Task {
@@ -614,8 +635,9 @@ final class ClientViewModel: ObservableObject {
             store = previousStore
             attachmentStore = previousAttachmentStore
             threadMessageStore = previousThreadMessageStore
-            storageProtectionMode = previousMode
-            persistStorageProtectionMode(previousMode)
+            configuredStorageProtectionMode = previousConfiguredMode
+            storageProtectionMode = previousPersistedMode ?? previousConfiguredMode
+            restorePersistedStorageProtectionMode(previousPersistedMode)
             lastError = "Failed to update storage protection: \(safeStorageErrorDescription(error, fallback: "Storage protection could not be updated."))"
             storageProtectionStatus = "Storage protection update failed."
             return false
@@ -735,7 +757,7 @@ final class ClientViewModel: ObservableObject {
                 id: profile.id,
                 inboxId: profile.inboxId,
                 inboxAccessKey: inboxAccessKey,
-                relay: profile.relay,
+                relay: effectiveRelayEndpoint(for: profile.relay, in: source),
                 relayAuthToken: relayAuthToken(for: profile.relay)
             )
         }
@@ -4490,10 +4512,17 @@ final class ClientViewModel: ObservableObject {
         endpoint: RelayEndpoint,
         note: String? = nil,
         relayPassword: String? = nil,
+        certificatePinOrigin: RelayCertificatePinOrigin? = nil,
         origin: RelayServerOrigin = .manual,
         sourceId: UUID? = nil
     ) async {
-        if let index = state.relayServers.firstIndex(where: { $0.endpoint == endpoint }) {
+        if endpoint.tlsCertificateFingerprintSHA256 != nil {
+            _ = upsertRelayCertificatePin(
+                for: endpoint,
+                origin: certificatePinOrigin ?? .manual
+            )
+        }
+        if let index = state.relayServers.firstIndex(where: { relayConnectionMatches($0.endpoint, endpoint) }) {
             state.relayServers[index].name = name
             state.relayServers[index].note = note
             state.relayServers[index].relayPassword = relayPassword
@@ -4523,15 +4552,22 @@ final class ClientViewModel: ObservableObject {
         name: String,
         endpoint: RelayEndpoint,
         note: String?,
-        relayPassword: String?
+        relayPassword: String?,
+        certificatePinOrigin: RelayCertificatePinOrigin? = nil
     ) async {
-        if state.relayServers.contains(where: { $0.id != id && $0.endpoint == endpoint }) {
+        if state.relayServers.contains(where: { $0.id != id && relayConnectionMatches($0.endpoint, endpoint) }) {
             lastError = "That relay already exists."
             return
         }
         guard let index = state.relayServers.firstIndex(where: { $0.id == id }) else {
             lastError = "Relay server not found."
             return
+        }
+        if endpoint.tlsCertificateFingerprintSHA256 != nil {
+            _ = upsertRelayCertificatePin(
+                for: endpoint,
+                origin: certificatePinOrigin ?? .manual
+            )
         }
         let oldEndpoint = state.relayServers[index].endpoint
         state.relayServers[index].name = name
@@ -4985,7 +5021,9 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func relayAuthToken(for endpoint: RelayEndpoint) -> String? {
-        guard let value = state.relayServers.first(where: { $0.endpoint == endpoint })?.relayPassword?
+        guard let value = state.relayServers.first(where: {
+            relayConnectionMatches($0.endpoint, endpoint)
+        })?.relayPassword?
             .trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty else {
             return nil
@@ -4994,14 +5032,18 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func relayClient(for endpoint: RelayEndpoint) -> RelayClient {
-        RelayClient(endpoint: endpoint, authToken: relayAuthToken(for: endpoint))
+        RelayClient(
+            endpoint: effectiveRelayEndpoint(for: endpoint),
+            authToken: relayAuthToken(for: endpoint)
+        )
     }
 
     private func loadRelayInfo(endpoint: RelayEndpoint) async throws -> RelayInfo {
         let startedAt = DispatchTime.now()
         let client = relayClient(for: endpoint)
         do {
-            let response = try await client.send(.info())
+            let observation = try await client.sendObservingTLS(.info())
+            let response = observation.response
             let latencyMs = elapsedMilliseconds(since: startedAt)
             guard response.type == .info, let info = response.relayInfo else {
                 recordRelayHealth(
@@ -5011,6 +5053,12 @@ final class ClientViewModel: ObservableObject {
                     failureReason: RelayInfoError.missing.localizedDescription
                 )
                 throw RelayInfoError.missing
+            }
+            if let observedFingerprint = observation.leafCertificateSHA256 {
+                try await persistObservedRelayCertificatePinIfNeeded(
+                    endpoint: client.endpoint,
+                    fingerprint: observedFingerprint
+                )
             }
             recordRelayHealth(endpoint: endpoint, latencyMs: latencyMs, isReachable: true, failureReason: nil)
             return info
@@ -5024,6 +5072,108 @@ final class ClientViewModel: ObservableObject {
                 isReachable: false,
                 failureReason: redactedRelayErrorDescription(error)
             )
+            throw error
+        }
+    }
+
+    private func relayConnectionMatches(_ lhs: RelayEndpoint, _ rhs: RelayEndpoint) -> Bool {
+        lhs.host.caseInsensitiveCompare(rhs.host) == .orderedSame
+            && lhs.port == rhs.port
+            && lhs.useTLS == rhs.useTLS
+            && lhs.transport == rhs.transport
+    }
+
+    private func effectiveRelayEndpoint(
+        for endpoint: RelayEndpoint,
+        in snapshot: ClientState? = nil
+    ) -> RelayEndpoint {
+        guard endpoint.useTLS, endpoint.tlsCertificateFingerprintSHA256 == nil else {
+            return endpoint
+        }
+        let source = snapshot ?? state
+        var effective = endpoint
+        if let configured = source.relayServers.first(where: {
+            relayConnectionMatches($0.endpoint, endpoint)
+                && $0.endpoint.tlsCertificateFingerprintSHA256?.count == 32
+        })?.endpoint.tlsCertificateFingerprintSHA256 {
+            effective.tlsCertificateFingerprintSHA256 = configured
+            return effective
+        }
+        if let stored = source.relayCertificatePins.first(where: {
+            $0.host.caseInsensitiveCompare(endpoint.host) == .orderedSame
+                && $0.port == endpoint.port
+                && $0.useTLS == endpoint.useTLS
+                && $0.transport == endpoint.transport
+                && $0.fingerprintSHA256.count == 32
+        })?.fingerprintSHA256 {
+            effective.tlsCertificateFingerprintSHA256 = stored
+        }
+        return effective
+    }
+
+    @discardableResult
+    private func upsertRelayCertificatePin(
+        for endpoint: RelayEndpoint,
+        origin: RelayCertificatePinOrigin
+    ) -> Bool {
+        guard endpoint.useTLS,
+              let fingerprint = endpoint.tlsCertificateFingerprintSHA256,
+              fingerprint.count == 32 else {
+            return false
+        }
+        let record = RelayCertificatePinRecord(
+            host: endpoint.host,
+            port: endpoint.port,
+            useTLS: endpoint.useTLS,
+            transport: endpoint.transport,
+            fingerprintSHA256: fingerprint,
+            origin: origin
+        )
+        if let index = state.relayCertificatePins.firstIndex(where: { $0.id == record.id }) {
+            let existing = state.relayCertificatePins[index]
+            if existing.fingerprintSHA256 == fingerprint {
+                return false
+            }
+            // First-use observations never rotate an established pin. A manual value can.
+            guard origin == .manual else {
+                return false
+            }
+            state.relayCertificatePins[index] = record
+        } else {
+            state.relayCertificatePins.append(record)
+        }
+        if state.relayCertificatePins.count > 256 {
+            state.relayCertificatePins = Array(
+                state.relayCertificatePins.sorted { $0.pinnedAt > $1.pinnedAt }.prefix(256)
+            )
+        }
+        return true
+    }
+
+    private func persistObservedRelayCertificatePinIfNeeded(
+        endpoint: RelayEndpoint,
+        fingerprint: Data
+    ) async throws {
+        guard endpoint.useTLS, fingerprint.count == 32 else { return }
+        var pinnedEndpoint = endpoint
+        pinnedEndpoint.tlsCertificateFingerprintSHA256 = fingerprint
+        let previousState = state
+        let inserted = upsertRelayCertificatePin(
+            for: pinnedEndpoint,
+            origin: .automaticFirstUse
+        )
+        var updatedRecord = false
+        for index in state.relayServers.indices where
+            relayConnectionMatches(state.relayServers[index].endpoint, endpoint)
+                && state.relayServers[index].endpoint.tlsCertificateFingerprintSHA256 == nil {
+            state.relayServers[index].endpoint.tlsCertificateFingerprintSHA256 = fingerprint
+            updatedRecord = true
+        }
+        guard inserted || updatedRecord else { return }
+        do {
+            try await persistState()
+        } catch {
+            state = previousState
             throw error
         }
     }
@@ -7991,6 +8141,7 @@ final class ClientViewModel: ObservableObject {
         state.identityProfiles = [profile]
         state.activeIdentityId = profile.id
         state.relayServers = []
+        state.relayCertificatePins = []
         state.selectedRelayId = nil
         state.relay = Self.unconfiguredRelay
         state.contacts = []
@@ -8939,10 +9090,19 @@ final class ClientViewModel: ObservableObject {
         UserDefaults.standard.set(mode.rawValue, forKey: ClientViewModel.storageModeKey)
     }
 
+    private func restorePersistedStorageProtectionMode(_ mode: StorageProtectionMode?) {
+        if let mode {
+            persistStorageProtectionMode(mode)
+        } else {
+            UserDefaults.standard.removeObject(forKey: ClientViewModel.storageModeKey)
+        }
+    }
+
     private func configureStores(for mode: StorageProtectionMode) {
         store = ClientStateStore(fileURL: stateFileURL, useEncryption: mode.usesKeychain)
         attachmentStore = AttachmentStore(directory: attachmentDirectory, useEncryption: mode.usesKeychain)
         threadMessageStore = ThreadMessageStore(directory: threadMessageDirectory, useEncryption: mode.usesKeychain)
+        configuredStorageProtectionMode = mode
         unreadableDirectThreadKeys.removeAll()
         unreadableGroupThreadKeys.removeAll()
     }

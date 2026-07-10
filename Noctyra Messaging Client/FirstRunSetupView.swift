@@ -97,6 +97,22 @@ struct FirstRunSetupView: View {
                                 reviewStep
                             }
                         }
+
+                        if let error = model.lastError {
+                            Label(error, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .accessibilityIdentifier("onboarding-error")
+                        } else if let status = model.storageProtectionStatus {
+                            Label(status, systemImage: "lock.shield")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("onboarding-storage-status")
+                        }
                     }
                     .padding(20)
                     .background(
@@ -151,13 +167,18 @@ struct FirstRunSetupView: View {
             storageMode = model.storageProtectionMode
         }
         .sheet(isPresented: $showingRelayEditor) {
-            RelayEditorView(title: "Add Relay", initial: nil) { name, endpoint, note, relayPassword in
+            RelayEditorView(
+                title: "Add Relay",
+                initial: nil,
+                requiresReachableRelay: true
+            ) { name, endpoint, note, relayPassword, pinOrigin in
                 Task {
                     await model.addRelayServer(
                         name: name,
                         endpoint: endpoint,
                         note: note,
-                        relayPassword: relayPassword
+                        relayPassword: relayPassword,
+                        certificatePinOrigin: pinOrigin
                     )
                     selectedRelayId = model.state.relayServers.first(where: {
                         $0.endpoint == endpoint
@@ -304,6 +325,7 @@ struct FirstRunSetupView: View {
             }
             .glassButton(prominent: true)
             .disabled(!canContinue || isFinishing)
+            .accessibilityIdentifier("onboarding-continue")
         }
         .padding(.bottom, 2)
     }
@@ -420,6 +442,7 @@ struct FirstRunSetupView: View {
                             )
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("onboarding-storage-\(mode.rawValue)")
                     }
                 }
                 if isUpdatingStorageMode {
