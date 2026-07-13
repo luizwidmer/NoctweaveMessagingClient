@@ -515,9 +515,13 @@
 				"EXCLUDED_ARCHS[sdk=macosx*]" = x86_64;
 				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Noctyra-App-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Noctyra;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				"INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace[sdk=iphoneos*]" = NO;
+				"INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace[sdk=iphonesimulator*]" = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Noctyra needs camera access to scan QR contact codes or to send taken pictures.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Noctyra uses Face ID to re-authenticate before changing app security settings and to unlock protected content.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Noctyra needs microphone access to record encrypted voice messages.";
@@ -531,7 +535,6 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
-				INFOPLIST_KEY_UTExportedTypeDeclarations = "{\n    UTTypeConformsTo =     (\n        \"public.data\"\n    );\n    UTTypeDescription = \"Noctweave Contact Share\";\n    UTTypeIdentifier = \"org.noctweave.contactshare\";\n    UTTypeTagSpecification =     {\n        \"public.filename-extension\" =         (\n            noctweave\n        );\n    };\n}";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
@@ -573,9 +576,13 @@
 				"EXCLUDED_ARCHS[sdk=macosx*]" = x86_64;
 				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Noctyra-App-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Noctyra;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.social-networking";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				"INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace[sdk=iphoneos*]" = NO;
+				"INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace[sdk=iphonesimulator*]" = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Noctyra needs camera access to scan QR contact codes or to send taken pictures.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Noctyra uses Face ID to re-authenticate before changing app security settings and to unlock protected content.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Noctyra needs microphone access to record encrypted voice messages.";
@@ -589,7 +596,6 @@
 				"INFOPLIST_KEY_UIStatusBarStyle[sdk=iphonesimulator*]" = UIStatusBarStyleDefault;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
-				INFOPLIST_KEY_UTExportedTypeDeclarations = "{\n    UTTypeConformsTo =     (\n        \"public.data\"\n    );\n    UTTypeDescription = \"Noctweave Contact Share\";\n    UTTypeIdentifier = \"org.noctweave.contactshare\";\n    UTTypeTagSpecification =     {\n        \"public.filename-extension\" =         (\n            noctweave\n        );\n    };\n}";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
@@ -696,7 +702,6 @@
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 9MY7SXN56X;
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_KEY_CFBundleDisplayName = "Noctyra Sync";
 				INFOPLIST_FILE = "Noctyra Sync Activity/Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
@@ -725,7 +730,6 @@
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = 9MY7SXN56X;
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_KEY_CFBundleDisplayName = "Noctyra Sync";
 				INFOPLIST_FILE = "Noctyra Sync Activity/Info.plist";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
