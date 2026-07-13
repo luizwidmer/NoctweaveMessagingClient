@@ -62,6 +62,14 @@ struct RelayHealthSnapshot: Equatable {
     var failureReason: String?
 }
 
+private enum DirectDeliveryQueueError: LocalizedError {
+    case full
+
+    var errorDescription: String? {
+        "The encrypted delivery queue is full. Connect to the relay before sending more messages."
+    }
+}
+
 @MainActor
 final class ClientViewModel: ObservableObject {
     private struct RelayGroupActorCredential {
@@ -118,6 +126,7 @@ final class ClientViewModel: ObservableObject {
     private var isPersistingState = false
     private var pendingStatePersistRequested = false
     private var statePersistenceWaiters: [CheckedContinuation<Void, Error>] = []
+    private var profileMutationGates: [UUID: AsyncOperationGate] = [:]
     private let notifier = NotificationManager()
     private var autoFetchTask: Task<Void, Never>?
     private var foregroundSyncTask: Task<Void, Never>?
@@ -138,6 +147,7 @@ final class ClientViewModel: ObservableObject {
     private let prekeyMinimumCount = 4
     private let prekeyTargetCount = 8
     private let rootRatchetInterval: UInt64 = 50
+    private let maxPendingDirectDeliveries = 512
     private let isUITest: Bool
     private var lastInsecureRefresh: Date?
     private let insecureRefreshInterval: TimeInterval = 20
@@ -716,6 +726,15 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
+    private func profileMutationGate(for profileId: UUID) -> AsyncOperationGate {
+        if let existing = profileMutationGates[profileId] {
+            return existing
+        }
+        let gate = AsyncOperationGate()
+        profileMutationGates[profileId] = gate
+        return gate
+    }
+
     private func persistState() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             statePersistenceWaiters.append(continuation)
@@ -1058,12 +1077,24 @@ final class ClientViewModel: ObservableObject {
     }
 
     func sendMessage(text: String, to contactId: UUID) async {
+        let profileId = state.activeIdentityId
+        let gate = profileMutationGate(for: profileId)
+        await gate.acquire()
+        defer { gate.release() }
+        guard state.activeIdentityId == profileId else { return }
+        await sendMessageUnlocked(text: text, to: contactId, profileId: profileId)
+    }
+
+    private func sendMessageUnlocked(text: String, to contactId: UUID, profileId: UUID) async {
         guard let contactIndex = state.contacts.firstIndex(where: { $0.id == contactId }) else {
             lastError = "Contact not found."
             return
         }
         loadConversationMessagesIntoRAM(contactId: contactId)
         do {
+            guard state.pendingDirectDeliveries.count < maxPendingDirectDeliveries else {
+                throw DirectDeliveryQueueError.full
+            }
             let contact = normalizedContact(state.contacts[contactIndex], preferredRelay: state.relay)
             let metadataBucketSeconds = metadataBucketSeconds(for: contact.relay, preferredRelay: state.relay)
             let session = try await prepareOutboundSession(for: contact)
@@ -1089,15 +1120,45 @@ final class ClientViewModel: ObservableObject {
             conversation.markMessageProcessed()
             applyRootRatchetIfNeeded(rootRatchet, contact: contact, conversation: &conversation)
             state.mergeUpsert(conversation: conversation)
+            state.pendingDirectDeliveries.append(
+                pendingDirectDelivery(
+                    envelope: envelope,
+                    contact: contact,
+                    preferredRelay: state.relay
+                )
+            )
             try await persistState()
-            try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
-            lastInfo = "Sent message to \(contact.displayName)."
+            let delivered = await flushPendingDirectDeliveries(for: profileId, contactId: contact.id)
+            lastInfo = delivered
+                ? "Sent message to \(contact.displayName)."
+                : "Message queued for automatic delivery."
         } catch {
             lastError = "Failed to send message: \(safeActionErrorDescription(error, fallback: "Message could not be prepared locally."))"
         }
     }
 
     func sendAttachment(data: Data, fileName: String?, mimeType: String, to contactId: UUID) async {
+        let profileId = state.activeIdentityId
+        let gate = profileMutationGate(for: profileId)
+        await gate.acquire()
+        defer { gate.release() }
+        guard state.activeIdentityId == profileId else { return }
+        await sendAttachmentUnlocked(
+            data: data,
+            fileName: fileName,
+            mimeType: mimeType,
+            to: contactId,
+            profileId: profileId
+        )
+    }
+
+    private func sendAttachmentUnlocked(
+        data: Data,
+        fileName: String?,
+        mimeType: String,
+        to contactId: UUID,
+        profileId: UUID
+    ) async {
         guard let contactIndex = state.contacts.firstIndex(where: { $0.id == contactId }) else {
             lastError = "Contact not found."
             return
@@ -1108,6 +1169,9 @@ final class ClientViewModel: ObservableObject {
             return
         }
         do {
+            guard state.pendingDirectDeliveries.count < maxPendingDirectDeliveries else {
+                throw DirectDeliveryQueueError.full
+            }
             var preparedPayload = try prepareAttachmentPayload(data: data, fileName: fileName, mimeType: mimeType)
             defer { preparedPayload.data.secureWipe() }
             guard preparedPayload.data.count <= maxAttachmentBytes else {
@@ -1201,21 +1265,44 @@ final class ClientViewModel: ObservableObject {
             conversation.markMessageProcessed()
             applyRootRatchetIfNeeded(rootRatchet, contact: contact, conversation: &conversation)
             state.mergeUpsert(conversation: conversation)
+            state.pendingDirectDeliveries.append(
+                pendingDirectDelivery(
+                    envelope: envelope,
+                    contact: contact,
+                    preferredRelay: state.relay
+                )
+            )
             try await persistState()
-            try await deliverEnvelope(envelope, to: contact, preferredRelay: state.relay)
+            let delivered = await flushPendingDirectDeliveries(for: profileId, contactId: contact.id)
             recordAttachmentQuotaUsage(
                 bytes: preparedPayloadByteCount,
                 contactId: contact.id,
                 relay: contact.relay,
                 direction: .outbound
             )
-            lastInfo = "Sent attachment to \(contact.displayName)."
+            lastInfo = delivered
+                ? "Sent attachment to \(contact.displayName)."
+                : "Attachment queued for automatic delivery."
         } catch {
             lastError = "Failed to send attachment: \(safeActionErrorDescription(error, fallback: "Attachment could not be prepared locally."))"
         }
     }
 
     func sendGroupAttachment(data: Data, fileName: String?, mimeType: String, to groupId: UUID) async {
+        let profileId = state.activeIdentityId
+        let gate = profileMutationGate(for: profileId)
+        await gate.acquire()
+        defer { gate.release() }
+        guard state.activeIdentityId == profileId else { return }
+        await sendGroupAttachmentUnlocked(data: data, fileName: fileName, mimeType: mimeType, to: groupId)
+    }
+
+    private func sendGroupAttachmentUnlocked(
+        data: Data,
+        fileName: String?,
+        mimeType: String,
+        to groupId: UUID
+    ) async {
         guard var group = state.group(for: groupId) else {
             lastError = "Group not found."
             return
@@ -1357,6 +1444,11 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func fetchMessages(for profileId: UUID) async {
+        let outboundGate = profileMutationGate(for: profileId)
+        await outboundGate.acquire()
+        _ = await flushPendingDirectDeliveries(for: profileId)
+        outboundGate.release()
+
         guard var profile = state.identityProfile(id: profileId) else {
             return
         }
@@ -1452,6 +1544,16 @@ final class ClientViewModel: ObservableObject {
                 }
                 return
             }
+            let mutationGate = profileMutationGate(for: profileId)
+            await mutationGate.acquire()
+            defer { mutationGate.release() }
+            guard let currentProfile = state.identityProfile(id: profileId),
+                  currentProfile.identity.fingerprint == profile.identity.fingerprint,
+                  currentProfile.inboxId == profile.inboxId,
+                  currentProfile.inboxAccessKey?.publicKeyData == inboxAccessKey.publicKeyData else {
+                return
+            }
+            profile = currentProfile
             let prefetchedRecords = prefetchedDirectEnvelopeRecords(for: profile.id)
             let envelopes = mergedEnvelopeBatch(
                 live: response.messages ?? [],
@@ -2100,6 +2202,19 @@ final class ClientViewModel: ObservableObject {
     }
 
     func rotateIdentity() async {
+        let profileId = state.activeIdentityId
+        let gate = profileMutationGate(for: profileId)
+        await gate.acquire()
+        defer { gate.release() }
+        guard state.activeIdentityId == profileId else { return }
+        guard await flushPendingDirectDeliveries(for: profileId) else {
+            lastError = "Key rotation is waiting for queued messages to reach the relay."
+            return
+        }
+        await rotateIdentityUnlocked()
+    }
+
+    private func rotateIdentityUnlocked() async {
         do {
             let stateBeforeRotation = state
             var previousIdentity = state.identity
@@ -2230,6 +2345,15 @@ final class ClientViewModel: ObservableObject {
     }
 
     func burnIdentity() async {
+        let profileId = state.activeIdentityId
+        let gate = profileMutationGate(for: profileId)
+        await gate.acquire()
+        defer { gate.release() }
+        guard state.activeIdentityId == profileId else { return }
+        await burnIdentityUnlocked()
+    }
+
+    private func burnIdentityUnlocked() async {
         guard !isBurningIdentity else {
             return
         }
@@ -2272,6 +2396,7 @@ final class ClientViewModel: ObservableObject {
         state.contacts = state.contacts.filter { carriedContactIds.contains($0.id) }
         state.conversations = state.conversations.filter { carriedContactIds.contains($0.contactId) }
         state.groups = []
+        state.pendingDirectDeliveries = []
         do {
             // Persist the severed local identity before any contact can observe
             // its successor. If persistence fails, restore the complete old state.
@@ -3532,6 +3657,15 @@ final class ClientViewModel: ObservableObject {
     }
 
     func sendGroupMessage(text: String, to groupId: UUID) async {
+        let profileId = state.activeIdentityId
+        let gate = profileMutationGate(for: profileId)
+        await gate.acquire()
+        defer { gate.release() }
+        guard state.activeIdentityId == profileId else { return }
+        await sendGroupMessageUnlocked(text: text, to: groupId)
+    }
+
+    private func sendGroupMessageUnlocked(text: String, to groupId: UUID) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return
@@ -7497,6 +7631,70 @@ final class ClientViewModel: ObservableObject {
             }
         }
         upsertConversation(conversation, in: &profile)
+    }
+
+    private func pendingDirectDelivery(
+        envelope: Envelope,
+        contact: Contact,
+        preferredRelay: RelayEndpoint
+    ) -> PendingDirectDelivery {
+        PendingDirectDelivery(
+            contactId: contact.id,
+            inboxId: contact.inboxId,
+            preferredRelay: preferredRelay,
+            destinationRelay: reachableRelayEndpoint(contact.relay, preferredRelay: preferredRelay),
+            envelope: envelope
+        )
+    }
+
+    @discardableResult
+    private func flushPendingDirectDeliveries(
+        for profileId: UUID,
+        contactId: UUID? = nil
+    ) async -> Bool {
+        guard let profile = state.identityProfile(id: profileId) else {
+            return true
+        }
+        let pending = profile.pendingDirectDeliveries
+            .filter { contactId == nil || $0.contactId == contactId }
+            .sorted { lhs, rhs in
+                if lhs.queuedAt != rhs.queuedAt {
+                    return lhs.queuedAt < rhs.queuedAt
+                }
+                return lhs.id.uuidString < rhs.id.uuidString
+            }
+
+        for delivery in pending {
+            do {
+                try await SessionRecovery.deliver(
+                    envelope: delivery.envelope,
+                    inboxId: delivery.inboxId,
+                    preferredRelay: delivery.preferredRelay,
+                    destinationRelay: delivery.destinationRelay,
+                    preferredRelayAuthToken: relayAuthToken(for: delivery.preferredRelay),
+                    destinationRelayAuthToken: relayAuthToken(for: delivery.destinationRelay)
+                )
+                guard var current = state.identityProfile(id: profileId) else {
+                    return false
+                }
+                current.pendingDirectDeliveries.removeAll { $0.id == delivery.id }
+                state.updateIdentityProfile(current)
+                try await persistState()
+            } catch {
+                if var current = state.identityProfile(id: profileId),
+                   let index = current.pendingDirectDeliveries.firstIndex(where: { $0.id == delivery.id }) {
+                    current.pendingDirectDeliveries[index].attemptCount = min(
+                        current.pendingDirectDeliveries[index].attemptCount,
+                        Int.max - 1
+                    ) + 1
+                    current.pendingDirectDeliveries[index].lastAttemptAt = Date()
+                    state.updateIdentityProfile(current)
+                    try? await persistState()
+                }
+                return false
+            }
+        }
+        return true
     }
 
     private func deliverEnvelope(_ envelope: Envelope, to contact: Contact, preferredRelay: RelayEndpoint) async throws {
