@@ -387,9 +387,15 @@ struct FirstRunSetupView: View {
                                     Text(server.displayName)
                                         .font(.headline)
                                         .lineLimit(1)
-                                    Text("\(server.endpoint.host):\(server.endpoint.port)")
+                                    Text(relayAddressLabel(server.endpoint))
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                    if let note = server.note, !note.isEmpty {
+                                        Text(note)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
                                 }
                                 Spacer()
                             }
@@ -646,6 +652,26 @@ struct FirstRunSetupView: View {
         return model.state.relayServers.first?.displayName ?? "Not set"
     }
 
+    private func relayAddressLabel(_ endpoint: RelayEndpoint) -> String {
+        let scheme: String
+        let defaultPort: UInt16
+        switch endpoint.transport {
+        case .http:
+            scheme = endpoint.useTLS ? "https" : "http"
+            defaultPort = endpoint.useTLS ? 443 : 80
+        case .websocket:
+            scheme = endpoint.useTLS ? "wss" : "ws"
+            defaultPort = endpoint.useTLS ? 443 : 80
+        case .tcp:
+            scheme = endpoint.useTLS ? "tls" : "tcp"
+            defaultPort = 9339
+        }
+        if endpoint.port == defaultPort {
+            return "\(scheme)://\(endpoint.host)"
+        }
+        return "\(scheme)://\(endpoint.host):\(endpoint.port)"
+    }
+
     private func back() {
         guard let current = Step(rawValue: step.rawValue), current != .identity else { return }
         step = Step(rawValue: max(0, current.rawValue - 1)) ?? .identity
@@ -714,7 +740,7 @@ struct FirstRunSetupView: View {
 
     private var termsOfUseText: String {
         """
-        By continuing, you agree this software is provided \"as is\" and \"as available\" without warranties or guarantees of any kind, express or implied, including merchantability, fitness for a particular purpose, availability, non-infringement, or security outcomes. There are no developer-hosted relays, managed infrastructure, moderation services, abuse handling services, recovery guarantees, legal compliance guarantees, or promised uptime. You are solely responsible for lawful use, key management, relay operation choices, compliance obligations, and operational security. To the maximum extent permitted by law, the software provider is not liable for any use or misuse of the software, including unlawful activity, data loss, compromise, metadata exposure, service interruption, account or identity loss, or any direct, indirect, incidental, consequential, special, exemplary, or punitive damages. You agree to indemnify and hold harmless the software provider from claims, liabilities, losses, and expenses arising from your use, deployment, or operation of the software.
+        By continuing, you agree this software is provided \"as is\" and \"as available\" without warranties or guarantees of any kind, express or implied, including merchantability, fitness for a particular purpose, availability, non-infringement, or security outcomes. Any relay bundled with a prerelease build is an optional temporary test endpoint, not a managed or production service; it may change or disappear without notice and has no promised uptime, retention, moderation, recovery, or security outcome. There are no developer-hosted production relays, managed infrastructure, moderation services, abuse handling services, recovery guarantees, legal compliance guarantees, or promised uptime. You are solely responsible for lawful use, key management, relay operation choices, compliance obligations, and operational security. To the maximum extent permitted by law, the software provider is not liable for any use or misuse of the software, including unlawful activity, data loss, compromise, metadata exposure, service interruption, account or identity loss, or any direct, indirect, incidental, consequential, special, exemplary, or punitive damages. You agree to indemnify and hold harmless the software provider from claims, liabilities, losses, and expenses arising from your use, deployment, or operation of the software.
         """
     }
 

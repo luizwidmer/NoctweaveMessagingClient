@@ -172,6 +172,19 @@ final class ClientViewModel: ObservableObject {
     private static let storageModeKey = "lattice.storageProtection.mode.v1"
     private static let keychainAuthPreflightKey = "noctyra.keychainAuthPreflight.v1"
     private static let unconfiguredRelay = RelayEndpoint(host: "relay.not-configured.invalid", port: 0)
+    private static func makeBundledTestRelay() -> RelayServerRecord {
+        RelayServerRecord(
+            name: "Noctyra Test Relay",
+            endpoint: RelayEndpoint(
+                host: "noctyratest.luizwidmer.com",
+                port: 443,
+                useTLS: true,
+                transport: .http
+            ),
+            note: "Bundled for TestFlight evaluation. Optional, removable, and provided without an uptime guarantee.",
+            website: "https://noctyratest.luizwidmer.com"
+        )
+    }
     private enum AttachmentCacheScope: Hashable {
         case contact(UUID)
         case group(UUID)
@@ -289,12 +302,13 @@ final class ClientViewModel: ObservableObject {
             // Placeholder identity: first-run setup will replace this before any relay publish happens.
             let defaultIdentity = Identity(displayName: "Setup Required")
             let defaultInbox = InboxAddress.generate()
+            let bundledRelay = Self.makeBundledTestRelay()
             self.state = ClientState(
                 identity: defaultIdentity,
-                relay: Self.unconfiguredRelay,
+                relay: bundledRelay.endpoint,
                 inboxId: defaultInbox,
-                relayServers: [],
-                selectedRelayId: nil,
+                relayServers: [bundledRelay],
+                selectedRelayId: bundledRelay.id,
                 hasCompletedOnboarding: false,
                 hasAcceptedPrivacyPolicy: false,
                 hasAcceptedTermsOfUse: false
@@ -320,6 +334,13 @@ final class ClientViewModel: ObservableObject {
                     state.hasCompletedOnboarding = false
                     state.hasAcceptedPrivacyPolicy = false
                     state.hasAcceptedTermsOfUse = false
+                    try await persistState()
+                }
+                if !state.hasCompletedOnboarding, state.relayServers.isEmpty {
+                    let bundledRelay = Self.makeBundledTestRelay()
+                    state.relayServers = [bundledRelay]
+                    state.selectedRelayId = bundledRelay.id
+                    state.relay = bundledRelay.endpoint
                     try await persistState()
                 }
             } else {
@@ -8116,12 +8137,13 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func performAppResetOperation() async {
+        let bundledRelay = Self.makeBundledTestRelay()
         let profile: IdentityProfile
         do {
             profile = try makeIdentityProfile(
                 displayName: "Setup Required",
-                relay: Self.unconfiguredRelay,
-                relayId: nil
+                relay: bundledRelay.endpoint,
+                relayId: bundledRelay.id
             )
         } catch {
             startupFailure = "App reset was cancelled because replacement keys could not be generated."
@@ -8158,10 +8180,10 @@ final class ClientViewModel: ObservableObject {
 
         state.identityProfiles = [profile]
         state.activeIdentityId = profile.id
-        state.relayServers = []
+        state.relayServers = [bundledRelay]
         state.relayCertificatePins = []
-        state.selectedRelayId = nil
-        state.relay = Self.unconfiguredRelay
+        state.selectedRelayId = bundledRelay.id
+        state.relay = bundledRelay.endpoint
         state.contacts = []
         state.conversations = []
         state.groups = []
