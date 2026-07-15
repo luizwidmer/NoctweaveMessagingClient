@@ -2010,16 +2010,17 @@ private struct ConversationView: View {
     @State private var revealMessages = false
     @State private var showingClearChatConfirm = false
     @State private var showingVoiceRecorder = false
+    @State private var showingAttachmentImporter = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     #if os(iOS)
     @State private var selectedPhoto: PhotosPickerItem?
+    @State private var showingPhotoPicker = false
+    @State private var showingAttachmentOptions = false
     @State private var showingSecureCamera = false
     @State private var showingInsecureCamera = false
     @State private var showCameraChoiceAlert = false
     @AppStorage("lattice.secureCameraPromptShown.v1") private var secureCameraPromptShown = false
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    #else
-    @State private var showingAttachmentImporter = false
     #endif
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
@@ -2185,11 +2186,13 @@ private struct ConversationView: View {
                 .accessibilityHint("Enable in Settings > Privacy to capture within Noctyra.")
                 .glassCircleButton(diameter: IOSControlMetrics.circleButtonDiameter)
                 .hoverLift()
-                PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                Button {
+                    showingAttachmentOptions = true
+                } label: {
                     Image(systemName: "paperclip")
                         .font(.system(size: IOSControlMetrics.circleIconSize, weight: .semibold))
                 }
-                .accessibilityLabel("Attach Image")
+                .accessibilityLabel("Attach Photo or Document")
                 .glassCircleButton(diameter: IOSControlMetrics.circleButtonDiameter)
                 .hoverLift()
                 Button {
@@ -2326,6 +2329,11 @@ private struct ConversationView: View {
             guard let newItem else { return }
             Task { await handlePickedPhoto(newItem) }
         }
+        .photosPicker(
+            isPresented: $showingPhotoPicker,
+            selection: $selectedPhoto,
+            matching: .images
+        )
         .sheet(isPresented: $showingSecureCamera) {
             SecureCameraCaptureView(
                 onCapture: { data in
@@ -2382,7 +2390,16 @@ private struct ConversationView: View {
         } message: {
             Text("In-app capture keeps images out of Photos. The system camera may save to Photos and is more exposed to OS-level access.")
         }
-        #else
+        .confirmationDialog("Add Attachment", isPresented: $showingAttachmentOptions) {
+            Button("Choose Photo") {
+                showingPhotoPicker = true
+            }
+            Button("Choose File") {
+                showingAttachmentImporter = true
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        #endif
         .fileImporter(
             isPresented: $showingAttachmentImporter,
             allowedContentTypes: supportedAttachmentContentTypes,
@@ -2397,7 +2414,6 @@ private struct ConversationView: View {
                 model.lastError = "Failed to import attachment: \(safeFileImportErrorDescription(error, fallback: "Attachment import failed."))"
             }
         }
-        #endif
         .confirmationDialog("Clear chat?", isPresented: $showingClearChatConfirm) {
             Button("Clear Chat", role: .destructive) {
                 Task { await model.clearConversation(contactId: contact.id) }
@@ -2530,7 +2546,8 @@ private struct ConversationView: View {
             selectedPhoto = nil
         }
     }
-    #else
+    #endif
+
     private func handleAttachmentURL(_ url: URL) async {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
@@ -2541,7 +2558,7 @@ private struct ConversationView: View {
         do {
             let data = try readBoundedFile(url, maxBytes: 32 * 1024 * 1024)
             let fileName = url.lastPathComponent
-            let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "image/jpeg"
+            let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
             await model.sendAttachment(data: data, fileName: fileName, mimeType: mimeType, to: contact.id)
         } catch {
             await MainActor.run {
@@ -2549,7 +2566,6 @@ private struct ConversationView: View {
             }
         }
     }
-    #endif
 
     private func scrollToBottom(_ messages: [NoctweaveCore.Message], proxy: ScrollViewProxy, animated: Bool) {
         guard let last = messages.last else { return }
@@ -2587,6 +2603,7 @@ private struct GroupConversationView: View {
     @State private var showingClearChatConfirm = false
     @State private var showingGroupDetails = false
     @State private var showingVoiceRecorder = false
+    @State private var showingAttachmentImporter = false
     @EnvironmentObject private var screenProtection: ScreenProtectionMonitor
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appTheme) private var theme
@@ -2594,13 +2611,13 @@ private struct GroupConversationView: View {
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @State private var selectedPhoto: PhotosPickerItem?
+    @State private var showingPhotoPicker = false
+    @State private var showingAttachmentOptions = false
     @State private var showingSecureCamera = false
     @State private var showingInsecureCamera = false
     @State private var showCameraChoiceAlert = false
     @AppStorage("lattice.secureCameraPromptShown.v1") private var secureCameraPromptShown = false
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    #else
-    @State private var showingAttachmentImporter = false
     #endif
     #if os(macOS)
     @FocusState private var isComposerFocused: Bool
@@ -2846,11 +2863,13 @@ private struct GroupConversationView: View {
                 .accessibilityLabel("Capture Group Photo")
                 .glassCircleButton(diameter: IOSControlMetrics.circleButtonDiameter)
                 .hoverLift()
-                PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                Button {
+                    showingAttachmentOptions = true
+                } label: {
                     Image(systemName: "paperclip")
                         .font(.system(size: IOSControlMetrics.circleIconSize, weight: .semibold))
                 }
-                .accessibilityLabel("Attach Group Image")
+                .accessibilityLabel("Attach Group Photo or Document")
                 .glassCircleButton(diameter: IOSControlMetrics.circleButtonDiameter)
                 .hoverLift()
                 Button {
@@ -2991,6 +3010,11 @@ private struct GroupConversationView: View {
             guard let newItem else { return }
             Task { await handlePickedPhoto(newItem) }
         }
+        .photosPicker(
+            isPresented: $showingPhotoPicker,
+            selection: $selectedPhoto,
+            matching: .images
+        )
         .sheet(isPresented: $showingSecureCamera) {
             SecureCameraCaptureView(
                 onCapture: { data in
@@ -3047,7 +3071,16 @@ private struct GroupConversationView: View {
         } message: {
             Text("In-app capture keeps images out of Photos. The system camera may save to Photos and is more exposed to OS-level access.")
         }
-        #else
+        .confirmationDialog("Add Attachment", isPresented: $showingAttachmentOptions) {
+            Button("Choose Photo") {
+                showingPhotoPicker = true
+            }
+            Button("Choose File") {
+                showingAttachmentImporter = true
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        #endif
         .fileImporter(
             isPresented: $showingAttachmentImporter,
             allowedContentTypes: supportedAttachmentContentTypes,
@@ -3062,7 +3095,6 @@ private struct GroupConversationView: View {
                 model.lastError = "Failed to import attachment: \(safeFileImportErrorDescription(error, fallback: "Attachment import failed."))"
             }
         }
-        #endif
         .confirmationDialog("Clear group chat?", isPresented: $showingClearChatConfirm) {
             Button("Clear Chat", role: .destructive) {
                 Task { await model.clearGroupConversation(groupId: group.id) }
@@ -3188,7 +3220,8 @@ private struct GroupConversationView: View {
             selectedPhoto = nil
         }
     }
-    #else
+    #endif
+
     private func handleAttachmentURL(_ url: URL) async {
         let didAccess = url.startAccessingSecurityScopedResource()
         defer {
@@ -3199,7 +3232,7 @@ private struct GroupConversationView: View {
         do {
             let data = try readBoundedFile(url, maxBytes: 32 * 1024 * 1024)
             let fileName = url.lastPathComponent
-            let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "image/jpeg"
+            let mimeType = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
             await model.sendGroupAttachment(data: data, fileName: fileName, mimeType: mimeType, to: group.id)
         } catch {
             await MainActor.run {
@@ -3207,7 +3240,6 @@ private struct GroupConversationView: View {
             }
         }
     }
-    #endif
 
     private func scrollToBottom(_ messages: [NoctweaveCore.Message], proxy: ScrollViewProxy, animated: Bool) {
         guard let last = messages.last else { return }
@@ -4770,7 +4802,7 @@ private struct AttachmentGalleryView: View {
                             manuallyRevealed.toggle()
                             FeedbackGenerator.light()
                         } label: {
-                            Image(systemName: effectiveIsRevealed ? "eye.slash" : "eye")
+                            Image(systemName: effectiveIsRevealed ? "eye" : "eye.slash")
                                 .font(.system(size: 13, weight: .bold))
                         }
                         .accessibilityLabel(effectiveIsRevealed ? "Hide Files" : "Reveal Files")
@@ -8069,6 +8101,7 @@ private struct SettingsView: View {
     @State private var pinSetupKind: PinSetupKind?
     @State private var showingLegalDocuments = false
     @State private var showingAppSecuritySetup = false
+    @State private var unlockMethodBiometricAuthorization = false
     @State private var actionPlanEditorRequest: ActionPlanEditorRequest?
     @State private var pendingActionPlanConfig: ActionPlanCommitConfig?
     @State private var securityReauthRequest: SecurityReauthRequest?
@@ -8444,12 +8477,17 @@ private struct SettingsView: View {
             .sheet(isPresented: $showingAppSecuritySetup) {
                 AppSecurityUnlockSetupSheet(
                     model: model,
-                    currentSettings: appLockSettings
+                    currentSettings: appLockSettings,
+                    biometricAuthorizationGranted: unlockMethodBiometricAuthorization
                 ) { updated in
                     appLockSettings = updated
+                    unlockMethodBiometricAuthorization = false
                     Task { await model.updateAppLock(updated, lockAfterUpdate: false) }
                 }
                 .noctyraSheetPresentation()
+                .onDisappear {
+                    unlockMethodBiometricAuthorization = false
+                }
             }
             .platformPinPresentation(item: $pinSetupKind) { kind in
                 PinSetupView(
@@ -8796,6 +8834,7 @@ private struct SettingsView: View {
             appLockSettings.sessionTimeoutMinutes = minutes
             Task { await model.updateAppLock(appLockSettings, lockAfterUpdate: false) }
         case .lockMethod:
+            unlockMethodBiometricAuthorization = appLockSettings.mode == .biometrics || appLockSettings.mode == .biometricsAndPin
             showingAppSecuritySetup = true
         case .pinUpdate(let kind):
             pinSetupKind = kind
@@ -9262,6 +9301,7 @@ private struct SecurityReauthView: View {
 private struct AppSecurityUnlockSetupSheet: View {
     @ObservedObject var model: ClientViewModel
     let currentSettings: AppLockSettings
+    let biometricAuthorizationGranted: Bool
     let onApply: (AppLockSettings) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -9275,10 +9315,12 @@ private struct AppSecurityUnlockSetupSheet: View {
     init(
         model: ClientViewModel,
         currentSettings: AppLockSettings,
+        biometricAuthorizationGranted: Bool,
         onApply: @escaping (AppLockSettings) -> Void
     ) {
         self.model = model
         self.currentSettings = currentSettings
+        self.biometricAuthorizationGranted = biometricAuthorizationGranted
         self.onApply = onApply
         let defaultMode: AppLockMode = model.biometricsAvailable ? .biometrics : .pinOnly
         var initialMode: AppLockMode = currentSettings.mode == .off ? defaultMode : currentSettings.mode
@@ -9288,9 +9330,8 @@ private struct AppSecurityUnlockSetupSheet: View {
         if !model.biometricsAvailable, initialMode == .biometricsAndPin {
             initialMode = currentSettings.isPinConfigured ? .pinOnly : .off
         }
-        let wasBiometricModeAlreadyConfigured = (currentSettings.mode == .biometrics || currentSettings.mode == .biometricsAndPin)
         _selectedMode = State(initialValue: initialMode)
-        _biometricVerified = State(initialValue: wasBiometricModeAlreadyConfigured && currentSettings.mode == initialMode)
+        _biometricVerified = State(initialValue: biometricAuthorizationGranted)
     }
 
     var body: some View {
@@ -9469,6 +9510,7 @@ private struct AppSecurityUnlockSetupSheet: View {
     }
 
     private func verifyBiometrics() {
+        guard !isVerifyingBiometrics else { return }
         isVerifyingBiometrics = true
         verificationError = nil
         Task {
@@ -12923,13 +12965,18 @@ private enum FeedbackGenerator {
 private let supportedAttachmentContentTypes: [UTType] = {
     var types: [UTType] = [
         .image,
+        .audio,
         .pdf,
         .plainText,
         .text,
         .utf8PlainText,
         .commaSeparatedText
     ]
-    let extensionTypes = ["txt", "md", "csv", "tsv", "json", "xml", "log", "docx", "xlsx", "pptx"]
+    let extensionTypes = [
+        "txt", "md", "csv", "tsv", "json", "xml", "log",
+        "pdf", "docx", "xlsx", "pptx",
+        "m4a", "aac", "wav", "caf", "mp3"
+    ]
         .compactMap { UTType(filenameExtension: $0) }
     types.append(contentsOf: extensionTypes)
     var seen = Set<String>()

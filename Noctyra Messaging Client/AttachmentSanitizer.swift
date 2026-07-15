@@ -36,7 +36,9 @@ enum AttachmentSanitizer {
         let fileExtension = fileName.flatMap { URL(fileURLWithPath: $0).pathExtension.lowercased() }
 
         if isPlainText(mimeType: normalizedMime, fileExtension: fileExtension) {
-            return SanitizedAttachmentPayload(data: try sanitizeText(data), mimeType: "text/plain; charset=utf-8")
+            // Wire MIME values deliberately exclude parameters; attachment
+            // descriptors reject semicolons to keep parsing canonical.
+            return SanitizedAttachmentPayload(data: try sanitizeText(data), mimeType: "text/plain")
         }
         if normalizedMime == "application/pdf" || fileExtension == "pdf" {
             return SanitizedAttachmentPayload(data: try sanitizePDF(data), mimeType: "application/pdf")

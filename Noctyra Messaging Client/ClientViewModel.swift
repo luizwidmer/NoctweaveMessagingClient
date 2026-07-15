@@ -1111,6 +1111,7 @@ final class ClientViewModel: ObservableObject {
                 metadataBucketSeconds: metadataBucketSeconds
             )
             _ = MessageEngine.appendMessage(
+                id: envelope.id,
                 body: .text(text),
                 direction: .sent,
                 counter: envelope.messageCounter,
@@ -1255,6 +1256,7 @@ final class ClientViewModel: ObservableObject {
             let localFileName = try attachmentStore.saveAttachment(preparedPayload.data, descriptor: descriptor)
             let title = attachmentDisplayTitle(descriptor, fallback: "Attachment")
             let message = Message(
+                id: envelope.id,
                 direction: .sent,
                 body: title,
                 timestamp: envelope.sentAt,
@@ -1605,6 +1607,16 @@ final class ClientViewModel: ObservableObject {
                         continue
                     }
                     recoveryConversation = existingConversation ?? baseConversation
+                    if baseConversation.messages.contains(where: { message in
+                        message.id == envelope.id || (
+                            message.direction == .received &&
+                            message.counter == envelope.messageCounter &&
+                            abs(message.timestamp.timeIntervalSince(envelope.sentAt)) < 0.001
+                        )
+                    }) {
+                        acknowledgedEnvelopeIds.insert(envelope.id)
+                        continue
+                    }
                     if isSessionMismatch(envelope: envelope, conversation: baseConversation) {
                         if envelope.kemCiphertext != nil {
                             let inbound = try createInboundSession(
@@ -1671,7 +1683,10 @@ final class ClientViewModel: ObservableObject {
                     if case .attachment(let descriptor) = body {
                         let sessionId = envelope.sessionId ?? conversation.sessionId
                         let localFileName: String?
-                        let attachmentRelay = reachableRelayEndpoint(contact.relay, preferredRelay: profile.relay)
+                        // Direct attachments are uploaded beside the recipient's
+                        // mailbox. On receipt that is this profile's relay, not
+                        // the sender contact's home relay.
+                        let attachmentRelay = reachableRelayEndpoint(profile.relay, preferredRelay: profile.relay)
                         let cryptoContext = AttachmentCryptoContext(
                             conversationId: conversation.id,
                             sessionId: sessionId,
@@ -1709,6 +1724,7 @@ final class ClientViewModel: ObservableObject {
                         }
                         let title = attachmentDisplayTitle(descriptor, fallback: "Attachment received")
                         let message = Message(
+                            id: envelope.id,
                             direction: .received,
                             body: title,
                             timestamp: envelope.sentAt,
@@ -1725,6 +1741,7 @@ final class ClientViewModel: ObservableObject {
                         appendedMessage = message
                     } else {
                         appendedMessage = MessageEngine.appendMessage(
+                            id: envelope.id,
                             body: body,
                             direction: .received,
                             counter: envelope.messageCounter,
@@ -4583,7 +4600,7 @@ final class ClientViewModel: ObservableObject {
         }
         var sanitized = try sanitizeDownloadedAttachmentPayload(data, descriptor: descriptor)
         defer { sanitized.secureWipe() }
-        return try attachmentStore.saveAttachment(sanitized, descriptor: descriptor)
+        return try attachmentStore.saveSanitizedAttachment(sanitized, attachmentId: descriptor.id)
     }
 
     private func downloadGroupAttachment(
@@ -4642,7 +4659,7 @@ final class ClientViewModel: ObservableObject {
         }
         var sanitized = try sanitizeDownloadedAttachmentPayload(data, descriptor: descriptor)
         defer { sanitized.secureWipe() }
-        return try attachmentStore.saveAttachment(sanitized, descriptor: descriptor)
+        return try attachmentStore.saveSanitizedAttachment(sanitized, attachmentId: descriptor.id)
     }
 
     private func groupAttachmentAuthenticatedData(
@@ -8158,14 +8175,14 @@ final class ClientViewModel: ObservableObject {
 
     private func shouldLockForTimeout() -> Bool {
         let minutes = state.appLock.sessionTimeoutMinutes
-        if minutes <= 0 {
-            return true
-        }
         if requiresPin(mode: state.appLock.mode) && !state.appLock.isPinConfigured {
             return false
         }
         guard let lastInactiveAt else {
             return false
+        }
+        if minutes <= 0 {
+            return true
         }
         let elapsed = Date().timeIntervalSince(lastInactiveAt)
         return elapsed >= Double(minutes * 60)

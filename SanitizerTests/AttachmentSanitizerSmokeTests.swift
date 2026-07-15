@@ -27,7 +27,7 @@ struct AttachmentSanitizerSmokeTests {
             fileName: "note.txt",
             mimeType: "text/plain"
         )
-        try assert(sanitized.mimeType == "text/plain; charset=utf-8", "text MIME should be canonical")
+        try assert(sanitized.mimeType == "text/plain", "text MIME should be canonical and descriptor-safe")
         try assert(String(data: sanitized.data, encoding: .utf8) == "hello\nworld\n", "text should normalize line endings and strip NUL")
     }
 

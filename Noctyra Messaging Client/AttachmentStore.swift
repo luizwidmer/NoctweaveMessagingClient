@@ -31,6 +31,25 @@ final class AttachmentStore {
         return fileName
     }
 
+    /// Stores bytes that have already passed transport integrity checks and
+    /// local sanitization. Sanitization can legitimately change the byte count
+    /// and digest, so the original wire descriptor must not be re-applied.
+    func saveSanitizedAttachment(_ data: Data, attachmentId: UUID) throws -> String {
+        guard !data.isEmpty,
+              data.count <= AttachmentDescriptor.maximumTransportBytes else {
+            throw AttachmentStoreError.invalidPayload
+        }
+        let fileName = "\(attachmentId.uuidString).bin"
+        let url = try attachmentURL(fileName: fileName)
+        var payload = try encryptIfNeeded(data)
+        defer { payload.secureWipe() }
+        guard payload.count <= Self.maximumStoredAttachmentBytes else {
+            throw AttachmentStoreError.fileTooLarge
+        }
+        try writeData(payload, to: url)
+        return fileName
+    }
+
     func loadAttachment(fileName: String) throws -> Data {
         var encrypted = try loadEncryptedAttachment(fileName: fileName)
         defer { encrypted.secureWipe() }
