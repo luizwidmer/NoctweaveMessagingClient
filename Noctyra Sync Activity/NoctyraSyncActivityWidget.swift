@@ -28,7 +28,7 @@ struct NoctyraSyncDashboardWidget: Widget {
                 )
         }
         .configurationDisplayName("Noctyra Sync")
-        .description("Shows encrypted relay fetch status without message content.")
+        .description("Shows sealed opaque-route packet status without message content.")
         .supportedFamilies([.systemSmall, .systemMedium])
     }
 }
@@ -82,7 +82,7 @@ private struct NoctyraSyncWidgetView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 icon(size: 26, symbolSize: 13)
-                Text("Inbox")
+                Text("Routes")
                     .font(.headline.weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 4)
@@ -92,13 +92,13 @@ private struct NoctyraSyncWidgetView: View {
             Spacer(minLength: 0)
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("\(snapshot.stagedEnvelopeCount)")
+                Text("\(snapshot.stagedPacketCount)")
                     .font(.system(size: 36, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.70)
                     .contentTransition(.numericText())
-                Text(snapshot.stagedEnvelopeCount == 1 ? "note waiting" : "waiting for you")
+                Text(snapshot.stagedPacketCount == 1 ? "sealed packet" : "sealed packets")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.62))
                     .lineLimit(1)
@@ -124,7 +124,7 @@ private struct NoctyraSyncWidgetView: View {
             HStack(spacing: 10) {
                 icon(size: 30, symbolSize: 15)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Inbox")
+                    Text("Routes")
                         .font(.headline.weight(.semibold))
                         .lineLimit(1)
                     Text(snapshot.isFetching ? "Checking" : "Last sync")
@@ -142,12 +142,12 @@ private struct NoctyraSyncWidgetView: View {
 
             HStack(alignment: .bottom, spacing: 18) {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("\(snapshot.stagedEnvelopeCount)")
+                    Text("\(snapshot.stagedPacketCount)")
                         .font(.system(size: 42, weight: .semibold, design: .rounded))
                         .monospacedDigit()
                         .lineLimit(1)
                         .minimumScaleFactor(0.70)
-                    Text(snapshot.stagedEnvelopeCount == 1 ? "note waiting" : "waiting for you")
+                    Text(snapshot.stagedPacketCount == 1 ? "sealed packet" : "sealed packets")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.white.opacity(0.62))
                         .lineLimit(1)
@@ -223,7 +223,7 @@ private struct NoctyraSyncWidgetView: View {
     }
 
     private var compactFooterText: String {
-        if snapshot.profileCount == 0 {
+        if snapshot.routeCount == 0 {
             return "Nothing set up yet"
         }
         return shortStatusText

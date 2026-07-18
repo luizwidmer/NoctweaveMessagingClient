@@ -7,8 +7,7 @@ final class NoctyraUITests: XCTestCase {
         super.setUp()
         continueAfterFailure = false
         app = XCUIApplication()
-        app.terminate()
-        app.launchArguments.append("UI_TESTING")
+        app.launchArguments = ["UI_TESTING"]
         app.launch()
     }
 
@@ -17,88 +16,22 @@ final class NoctyraUITests: XCTestCase {
         super.tearDown()
     }
 
-    func testSecureTypingEnabledByDefault() {
-        openSettings()
-        openPrivacySettings()
-        let toggle = app.switches["secure-typing-toggle"]
-        if toggle.waitForExistence(timeout: 2) {
-            assertToggleOn(toggle)
-            return
-        }
-        let checkbox = app.checkBoxes["secure-typing-toggle"]
-        XCTAssertTrue(checkbox.waitForExistence(timeout: 2))
-        assertToggleOn(checkbox)
+    func testCleanV1ShellUsesLocalPersonaBoundary() {
+        XCTAssertTrue(app.staticTexts["Local Persona"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Local organization only"].exists)
+        XCTAssertTrue(app.buttons["New Relationship"].exists)
+        XCTAssertFalse(app.staticTexts["Inbox"].exists)
     }
 
-    func testRevealToggleShowsMessage() {
-        openContact()
-        XCTAssertTrue(app.staticTexts["Hidden message"].waitForExistence(timeout: 2))
-        let revealButton = app.buttons["reveal-toggle"]
-        XCTAssertTrue(revealButton.waitForExistence(timeout: 2))
-        revealButton.tap()
-        XCTAssertTrue(app.staticTexts["Secret message"].waitForExistence(timeout: 2))
-    }
+    func testPairingSheetExplainsFreshRelationshipScope() {
+        let button = app.buttons["New Relationship"]
+        XCTAssertTrue(button.waitForExistence(timeout: 5))
+        button.tap()
 
-    func testRevealResetsWhenLeavingConversation() {
-        openContact()
-        let revealButton = app.buttons["reveal-toggle"]
-        XCTAssertTrue(revealButton.waitForExistence(timeout: 2))
-        revealButton.tap()
-        XCTAssertTrue(app.staticTexts["Secret message"].waitForExistence(timeout: 2))
-        openSettings()
-        openContact()
-        XCTAssertTrue(app.staticTexts["Hidden message"].waitForExistence(timeout: 2))
-    }
-
-    private func openSettings() {
-        let settingsButton = app.buttons["sidebar-settings"]
-        if settingsButton.waitForExistence(timeout: 1) {
-            settingsButton.tap()
-            return
-        }
-        let fallback = app.staticTexts["Settings"]
-        XCTAssertTrue(fallback.waitForExistence(timeout: 1))
-        fallback.tap()
-    }
-
-    private func openContact() {
-        if app.buttons["reveal-toggle"].exists || app.staticTexts["Hidden message"].exists {
-            return
-        }
-        let contactButton = app.buttons["contact-00000000-0000-0000-0000-000000000001"]
-        if contactButton.waitForExistence(timeout: 1) {
-            contactButton.tap()
-            return
-        }
-        let fallback = app.staticTexts["UITest Contact"]
-        XCTAssertTrue(fallback.waitForExistence(timeout: 1))
-        fallback.tap()
-    }
-
-    private func openPrivacySettings() {
-        let identified = app.buttons["settings-destination-privacy"]
-        if identified.waitForExistence(timeout: 2) {
-            identified.tap()
-            return
-        }
-        let button = app.buttons["Privacy"]
-        if button.waitForExistence(timeout: 2) {
-            button.tap()
-            return
-        }
-        let text = app.staticTexts["Privacy"]
-        XCTAssertTrue(text.waitForExistence(timeout: 2))
-        text.tap()
-    }
-
-    private func assertToggleOn(_ element: XCUIElement) {
-        let value = element.value as? String
-        if value == "1" || value == "true" {
-            return
-        }
-        if let numeric = element.value as? Int, numeric == 1 {
-            return
-        }
-        XCTAssertTrue(element.isSelected)
+        XCTAssertTrue(app.staticTexts["Relationship-local presentation"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["Create Invitation"].exists)
+        XCTAssertTrue(app.buttons["Accept Invitation"].exists)
+        XCTAssertTrue(app.buttons["Create One-Use Invitation"].exists)
+        XCTAssertFalse(app.staticTexts["Linked Devices"].exists)
     }
 }

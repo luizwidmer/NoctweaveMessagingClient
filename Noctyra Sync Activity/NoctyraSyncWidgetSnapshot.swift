@@ -5,9 +5,9 @@ struct NoctyraSyncWidgetSnapshot: Codable, Hashable {
     var isFetching: Bool
     var lastAttemptAt: Date?
     var lastSuccessAt: Date?
-    var fetchedEnvelopeCount: Int
-    var stagedEnvelopeCount: Int
-    var profileCount: Int
+    var fetchedPacketCount: Int
+    var stagedPacketCount: Int
+    var routeCount: Int
     var status: String
 
     static let empty = NoctyraSyncWidgetSnapshot(
@@ -15,9 +15,9 @@ struct NoctyraSyncWidgetSnapshot: Codable, Hashable {
         isFetching: false,
         lastAttemptAt: nil,
         lastSuccessAt: nil,
-        fetchedEnvelopeCount: 0,
-        stagedEnvelopeCount: 0,
-        profileCount: 0,
+        fetchedPacketCount: 0,
+        stagedPacketCount: 0,
+        routeCount: 0,
         status: "No sync yet"
     )
 }

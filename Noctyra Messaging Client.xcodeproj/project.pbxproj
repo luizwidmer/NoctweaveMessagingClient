@@ -58,6 +58,47 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A9F000000000000000000001 /* Clean architecture app target exclusions */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				ActionPinPlanEditorView.swift,
+				AdaptiveControls.swift,
+				AppLockView.swift,
+				AttachmentSanitizer.swift,
+				AttachmentStore.swift,
+				CiphertextPrefetchIntent.swift,
+				CiphertextPrefetchRunner.swift,
+				CiphertextPrefetchStore.swift,
+				ClientLegalDocumentsView.swift,
+				ContactShareDocument.swift,
+				FirstRunSetupView.swift,
+				GlassStyles.swift,
+				IdentityBurnView.swift,
+				NoctyraAppDelegate.swift,
+				NoctyraIOSAppDelegate.swift,
+				NoctyraSyncDashboardController.swift,
+				NoctyraSyncWidgetSnapshot.swift,
+				NoctyraTopBar.swift,
+				NoctyraTrafficLights.swift,
+				NotificationManager.swift,
+				PinEntryComponents.swift,
+				PinSetupView.swift,
+				PlatformModalPresentation.swift,
+				QRCodeScannerView.swift,
+				QRCodeView.swift,
+				RelayEditorView.swift,
+				ScreenProtectionMonitor.swift,
+				SecureCameraCaptureView.swift,
+				SecureContainer.swift,
+				ShareSheet.swift,
+				StorageChoiceView.swift,
+				SystemCameraPickerView.swift,
+				ThemeSupport.swift,
+				ThreadMessageStore.swift,
+				VoiceRecorderSheetView.swift,
+			);
+			target = 2566835C2F00A4F0006D96F3 /* Noctyra */;
+		};
 		D1A00000000000000000000E /* Exceptions for "Noctyra Sync Activity" folder in "Noctyra Sync Activity" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -70,6 +111,9 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		2566835F2F00A4F0006D96F3 /* Noctyra Messaging Client */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A9F000000000000000000001 /* Clean architecture app target exclusions */,
+			);
 			path = "Noctyra Messaging Client";
 			sourceTree = "<group>";
 		};
