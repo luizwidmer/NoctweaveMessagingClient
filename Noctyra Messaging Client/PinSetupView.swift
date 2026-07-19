@@ -1,41 +1,6 @@
 #if os(iOS) || os(macOS)
 import SwiftUI
 
-enum PinSetupKind: String, Identifiable {
-    case unlock
-    case burnIdentity
-    case clearChats
-    case actionPlan
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .unlock:
-            return "Set App PIN"
-        case .burnIdentity:
-            return "Set Burn Identity PIN"
-        case .clearChats:
-            return "Set Clear Chats PIN"
-        case .actionPlan:
-            return "Set Action Plan PIN"
-        }
-    }
-
-    var subtitle: String {
-        switch self {
-        case .unlock:
-            return "Enter a 6-digit PIN to unlock the app."
-        case .burnIdentity:
-            return "This PIN burns your identity immediately from the lock screen."
-        case .clearChats:
-            return "This PIN clears all chats immediately from the lock screen."
-        case .actionPlan:
-            return "This PIN runs your selected action bundle, then becomes your unlock PIN."
-        }
-    }
-}
-
 struct PinSetupView: View {
     let title: String
     let subtitle: String
