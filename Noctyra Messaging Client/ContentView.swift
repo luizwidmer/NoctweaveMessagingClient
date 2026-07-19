@@ -38,7 +38,25 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { model.lockForBackgroundIfConfigured() }
+            if phase == .active {
+                model.syncAll()
+            } else {
+                model.lockForBackgroundIfConfigured()
+            }
+        }
+        .onChange(of: model.isLocked) { _, locked in
+            if !locked { model.syncAll() }
+        }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(5 * 60))
+                } catch {
+                    return
+                }
+                model.syncAll()
+            }
         }
         .sheet(isPresented: $showingPairing) {
             PairingView(model: model)

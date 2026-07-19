@@ -205,6 +205,7 @@ final class ClientViewModel: ObservableObject {
             isLocked = appLockMode != .off
             statusMessage = "Encrypted local state is ready."
             bootState = .ready
+            if !isLocked { syncAll() }
         } catch {
             let message = describe(error)
             lastError = message
@@ -278,6 +279,7 @@ final class ClientViewModel: ObservableObject {
     }
 
     func syncAll() {
+        guard bootState == .ready, !isLocked else { return }
         runOperation(label: "Maintaining routes and synchronizing…") { client in
             var errors: [Error] = []
             do {
