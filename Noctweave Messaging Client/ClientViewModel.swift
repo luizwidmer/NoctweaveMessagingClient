@@ -125,6 +125,7 @@ final class ClientViewModel: ObservableObject {
             stateStore = ClientStateStore(
                 fileURL: stateURL,
                 protection: .encrypted,
+                encryptionKey: SymmetricKey(data: Data(repeating: 0x4E, count: 32)),
                 rollbackAnchorStore: VolatileClientStateRollbackAnchorStore()
             )
         } else {

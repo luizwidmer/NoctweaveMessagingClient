@@ -10,10 +10,27 @@ import UIKit
 struct ContentView: View {
     @ObservedObject var model: ClientViewModel
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.appTheme) private var theme
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
     @State private var showingPairing = false
     @State private var showingNewGroup = false
     @State private var showingGroupExchange = false
     @State private var showingBurnConfirmation = false
+    @State private var compactRoute: CompactRoute?
+
+    private enum CompactRoute: Hashable, Identifiable {
+        case relationship(UUID)
+        case group(UUID)
+
+        var id: String {
+            switch self {
+            case .relationship(let id): "relationship-\(id.uuidString)"
+            case .group(let id): "group-\(id.uuidString)"
+            }
+        }
+    }
 
     var body: some View {
         Group {
@@ -22,15 +39,29 @@ struct ContentView: View {
             } else {
                 switch model.bootState {
                 case .loading:
-                    ProgressView("Opening encrypted local state…")
-                        .controlSize(.large)
+                    launchSurface {
+                        ProgressView()
+                            .controlSize(.large)
+                        Text("Opening encrypted state")
+                            .font(.headline)
+                        Text("Verifying the local store before revealing conversations.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
                 case .failed(let message):
-                    ContentUnavailableView {
-                        Label("State unavailable", systemImage: "lock.trianglebadge.exclamationmark")
-                    } description: {
-                        Text(message)
-                    } actions: {
+                    launchSurface {
+                        Image(systemName: "lock.trianglebadge.exclamationmark")
+                            .font(.system(size: 38, weight: .semibold))
+                            .foregroundStyle(.orange)
+                        Text("State unavailable")
+                            .font(.title2.weight(.bold))
+                        Text(readableStorageError(message))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
                         Button("Try Again") { Task { await model.open() } }
+                            .glassButton(prominent: true)
                     }
                 case .ready:
                     clientShell
@@ -81,96 +112,288 @@ struct ContentView: View {
         }
     }
 
+    private func launchSurface<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ZStack {
+            GlassBackground()
+            VStack(spacing: 14, content: content)
+                .padding(28)
+                .frame(maxWidth: 430)
+                .uniformGlassCard(cornerRadius: 24, padding: 22)
+                .padding(24)
+        }
+        .ignoresSafeArea()
+    }
+
+    private func readableStorageError(_ message: String) -> String {
+        if message.contains("-34018") {
+            return "Secure storage is unavailable in this build. Reinstall a normally signed app build and try again."
+        }
+        return message
+    }
+
+    @ViewBuilder
     private var clientShell: some View {
+        ZStack {
+            GlassBackground()
+            #if os(iOS)
+            if horizontalSizeClass == .compact {
+                compactShell
+            } else {
+                splitShell
+            }
+            #else
+            splitShell
+            #endif
+        }
+        .tint(theme.accent)
+    }
+
+    private var splitShell: some View {
         NavigationSplitView {
             sidebar
-                .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 380)
+                .navigationSplitViewColumnWidth(min: 260, ideal: 310, max: 380)
         } detail: {
-            if let group = model.selectedGroup {
-                GroupConversationView(model: model, group: group)
-            } else if let relationship = model.selectedRelationship {
-                ConversationView(model: model, relationship: relationship)
-            } else {
-                ContentUnavailableView {
-                    Label("No relationship selected", systemImage: "point.3.connected.trianglepath.dotted")
-                } description: {
-                    Text("Create a one-use encrypted rendezvous to establish a fresh relationship-scoped authority.")
-                } actions: {
-                    Button("New Relationship") { showingPairing = true }
-                }
-            }
+            selectedDetail
+                .padding(12)
         }
+        .navigationSplitViewStyle(.balanced)
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button {
-                    model.syncAll()
-                } label: {
-                    Label("Sync", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .disabled(model.isWorking)
-
-                Button {
-                    showingPairing = true
-                } label: {
-                    Label("New Relationship", systemImage: "person.crop.circle.badge.plus")
-                }
-                .disabled(model.isPairing)
-
-                Button {
-                    showingNewGroup = true
-                } label: {
-                    Label("New Group", systemImage: "person.3.sequence.fill")
-                }
-                .disabled(model.isWorking)
-
-                Menu {
-                    Button {
-                        model.maintainAllTransport()
-                    } label: {
-                        Label("Maintain Routes", systemImage: "wrench.and.screwdriver")
-                    }
-                    Button {
-                        showingGroupExchange = true
-                    } label: {
-                        Label("Group Admission Exchange", systemImage: "person.3.sequence")
-                    }
-                    Button {
-                        model.lockNow()
-                    } label: {
-                        Label("Lock Now", systemImage: "lock.fill")
-                    }
-                    Divider()
-                    Button("Burn Local Persona", role: .destructive) {
-                        showingBurnConfirmation = true
-                    }
-                } label: {
-                    Label("Actions", systemImage: "ellipsis.circle")
-                }
-            }
+            sharedToolbar
         }
         .safeAreaInset(edge: .bottom) {
             StatusBar(model: model)
         }
     }
 
-    private var sidebar: some View {
-        List {
-            Section {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(model.activePersona?.displayName ?? "Local Persona")
-                        .font(.headline)
-                    Text("Local organization only")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+    private var compactShell: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    compactIdentityCard
+
+                    compactSectionHeader("Relationships", icon: "point.3.connected.trianglepath.dotted")
+                    if model.relationships.isEmpty {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Start a private conversation")
+                                .font(.headline)
+                            Text("A new relationship creates fresh post-quantum authority used only with that peer.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            Button("New Relationship") { showingPairing = true }
+                                .glassButton(prominent: true)
+                        }
+                        .uniformGlassCard(cornerRadius: 20, padding: 18)
+                    } else {
+                        ForEach(model.relationships) { relationship in
+                            Button {
+                                model.selectedGroupID = nil
+                                model.selectedRelationshipID = relationship.id
+                                compactRoute = .relationship(relationship.id)
+                            } label: {
+                                RelationshipRow(relationship: relationship, isSelected: false)
+                            }
+                            .buttonStyle(.plain)
+                            .uniformGlassCard(cornerRadius: 18, padding: 6)
+                        }
+                    }
+
+                    compactSectionHeader("Groups", icon: "person.3.fill")
+                    if model.groups.isEmpty {
+                        Text("No groups in this persona")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .uniformGlassCard(cornerRadius: 18, padding: 16)
+                    } else {
+                        ForEach(model.groups) { group in
+                            Button {
+                                model.selectedGroupID = group.groupId
+                                model.selectedRelationshipID = nil
+                                compactRoute = .group(group.groupId)
+                            } label: {
+                                GroupRow(group: group, isSelected: false)
+                            }
+                            .buttonStyle(.plain)
+                            .uniformGlassCard(cornerRadius: 18, padding: 6)
+                        }
+                    }
+
+                    if !model.pendingGroupAdmissions.isEmpty {
+                        compactSectionHeader("Pending", icon: "person.crop.circle.badge.clock")
+                        ForEach(model.pendingGroupAdmissions) { admission in
+                            Button {
+                                showingGroupExchange = true
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "envelope.badge.shield.half.filled")
+                                        .font(.title3)
+                                        .foregroundStyle(.orange)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("Group admission")
+                                            .font(.headline)
+                                        Text(String(admission.groupID.uuidString.prefix(8)))
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .uniformGlassCard(cornerRadius: 18, padding: 14)
+                        }
+                    }
                 }
-                .padding(.vertical, 4)
-                .accessibilityElement(children: .combine)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                .padding(.bottom, 96)
+            }
+            .scrollIndicators(.hidden)
+            .navigationTitle("Messages")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.large)
+            #endif
+            .toolbar { sharedToolbar }
+            .safeAreaInset(edge: .bottom) {
+                StatusBar(model: model)
+            }
+            .navigationDestination(item: $compactRoute) { route in
+                compactDestination(route)
+            }
+        }
+    }
+
+    private var compactIdentityCard: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(theme.accent.opacity(0.18))
+                Image(systemName: "diamond.fill")
+                    .font(.title2)
+                    .foregroundStyle(theme.accent)
+            }
+            .frame(width: 52, height: 52)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(model.activePersona?.displayName ?? "Local Persona")
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("\(model.relationships.count) relationships · \(model.groups.count) groups")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button { model.syncAll() } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+            }
+            .glassCircleButton(diameter: 40)
+            .disabled(model.isWorking)
+            .accessibilityLabel("Sync")
+        }
+        .uniformGlassCard(cornerRadius: 22, padding: 16)
+    }
+
+    private func compactSectionHeader(_ title: String, icon: String) -> some View {
+        Label(title, systemImage: icon)
+            .font(.headline)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 4)
+    }
+
+    @ViewBuilder
+    private func compactDestination(_ route: CompactRoute) -> some View {
+        switch route {
+        case .relationship(let id):
+            if let relationship = model.relationships.first(where: { $0.id == id }) {
+                ConversationView(model: model, relationship: relationship)
+            } else {
+                ContentUnavailableView("Relationship unavailable", systemImage: "person.crop.circle.badge.exclamationmark")
+            }
+        case .group(let id):
+            if let group = model.groups.first(where: { $0.groupId == id }) {
+                GroupConversationView(model: model, group: group)
+            } else {
+                ContentUnavailableView("Group unavailable", systemImage: "person.3.fill")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var selectedDetail: some View {
+        if let group = model.selectedGroup {
+            GroupConversationView(model: model, group: group)
+        } else if let relationship = model.selectedRelationship {
+            ConversationView(model: model, relationship: relationship)
+        } else {
+            VStack(spacing: 14) {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 40, weight: .semibold))
+                    .foregroundStyle(theme.accent)
+                Text("Your private conversations")
+                    .font(.title2.weight(.bold))
+                Text("Choose a relationship or create a one-use encrypted invitation.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("New Relationship") { showingPairing = true }
+                    .glassButton(prominent: true)
+            }
+            .padding(30)
+            .frame(maxWidth: 520)
+            .uniformGlassCard(cornerRadius: 26, padding: 24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var sharedToolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button { model.syncAll() } label: {
+                Label("Sync", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(model.isWorking)
+
+            Menu {
+                Button { showingPairing = true } label: {
+                    Label("New Relationship", systemImage: "person.crop.circle.badge.plus")
+                }
+                Button { showingNewGroup = true } label: {
+                    Label("New Group", systemImage: "person.3.sequence.fill")
+                }
+            } label: {
+                Label("Create", systemImage: "plus")
             }
 
-            Section("Relationships") {
+            Menu {
+                Button { model.maintainAllTransport() } label: {
+                    Label("Maintain Routes", systemImage: "wrench.and.screwdriver")
+                }
+                Button { showingGroupExchange = true } label: {
+                    Label("Group Admission Exchange", systemImage: "person.3.sequence")
+                }
+                Button { model.lockNow() } label: {
+                    Label("Lock Now", systemImage: "lock.fill")
+                }
+                Divider()
+                Button("Burn Local Persona", role: .destructive) {
+                    showingBurnConfirmation = true
+                }
+            } label: {
+                Label("More", systemImage: "ellipsis.circle")
+            }
+        }
+    }
+
+    private var sidebar: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                compactIdentityCard
+
+                compactSectionHeader("Relationships", icon: "point.3.connected.trianglepath.dotted")
                 if model.relationships.isEmpty {
                     Text("No relationships yet")
                         .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
                 }
                 ForEach(model.relationships) { relationship in
                     Button {
@@ -184,44 +407,29 @@ struct ContentView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .uniformGlassCard(cornerRadius: 16, padding: 4)
                     .accessibilityIdentifier("relationship-\(relationship.id.uuidString.lowercased())")
                 }
-            }
 
-            Section("Groups") {
+                compactSectionHeader("Groups", icon: "person.3.fill")
                 if model.groups.isEmpty {
                     Text("No groups in this persona")
                         .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
                 }
                 ForEach(model.groups) { group in
                     Button {
                         model.selectedGroupID = group.groupId
                         model.selectedRelationshipID = nil
                     } label: {
-                        HStack {
-                            Image(systemName: "person.3.fill")
-                                .foregroundStyle(Color.noctweaveCoral)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Group \(group.groupId.uuidString.prefix(8))")
-                                Text("Epoch \(group.signedState.epoch) · \(group.signedState.members.count) members")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                        }
-                        .padding(.vertical, 3)
-                        .contentShape(Rectangle())
-                        .background(
-                            model.selectedGroupID == group.groupId
-                                ? Color.accentColor.opacity(0.12)
-                                : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 8)
-                        )
+                        GroupRow(group: group, isSelected: model.selectedGroupID == group.groupId)
                     }
                     .buttonStyle(.plain)
+                    .uniformGlassCard(cornerRadius: 16, padding: 4)
                 }
 
                 if !model.pendingGroupAdmissions.isEmpty {
+                    compactSectionHeader("Pending", icon: "person.crop.circle.badge.clock")
                     ForEach(model.pendingGroupAdmissions) { admission in
                         Button {
                             showingGroupExchange = true
@@ -240,15 +448,19 @@ struct ContentView: View {
                             .padding(.vertical, 3)
                         }
                         .buttonStyle(.plain)
+                        .uniformGlassCard(cornerRadius: 16, padding: 6)
                     }
                 }
             }
+            .padding(12)
+            .padding(.bottom, 64)
         }
         .navigationTitle("Noctweave")
     }
 }
 
 private struct RelationshipRow: View {
+    @Environment(\.appTheme) private var theme
     let relationship: PairwiseRelationshipV2
     let isSelected: Bool
 
@@ -258,7 +470,7 @@ private struct RelationshipRow: View {
                 ? "person.crop.circle.badge.xmark"
                 : "point.3.connected.trianglepath.dotted")
                 .font(.title3)
-                .foregroundStyle(relationship.localPolicy.consent == .blocked ? .red : .blue)
+                .foregroundStyle(relationship.localPolicy.consent == .blocked ? Color.red : theme.accent)
             VStack(alignment: .leading, spacing: 2) {
                 Text(relationship.peerIdentity.relationshipPseudonym)
                     .lineLimit(1)
@@ -270,32 +482,73 @@ private struct RelationshipRow: View {
             Spacer()
         }
         .padding(7)
-        .contentShape(Rectangle())
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .background(
-            isSelected ? Color.accentColor.opacity(0.12) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 8)
+            isSelected ? theme.accent.opacity(0.16) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+    }
+}
+
+private struct GroupRow: View {
+    @Environment(\.appTheme) private var theme
+    let group: GroupRuntimeRecord
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "person.3.fill")
+                .font(.title3)
+                .foregroundStyle(theme.glowSecondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Group \(group.groupId.uuidString.prefix(8))")
+                    .lineLimit(1)
+                Text("Epoch \(group.signedState.epoch) · \(group.signedState.members.count) members")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(7)
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(
+            isSelected ? theme.accent.opacity(0.16) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
     }
 }
 
 private struct ConversationView: View {
     @ObservedObject var model: ClientViewModel
+    @Environment(\.appTheme) private var theme
     let relationship: PairwiseRelationshipV2
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle().fill(theme.accent.opacity(0.16))
+                    Image(systemName: "point.3.connected.trianglepath.dotted")
+                        .foregroundStyle(theme.accent)
+                }
+                .frame(width: 44, height: 44)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(relationship.peerIdentity.relationshipPseudonym)
-                        .font(.title2.weight(.semibold))
-                    Text("Relationship-scoped authority · \(relationship.localPolicy.consent.rawValue)")
+                        .font(.title3.weight(.semibold))
+                        .lineLimit(1)
+                    Text("Private relationship · \(relationship.localPolicy.consent.rawValue)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
-            .padding()
-            Divider()
+            .uniformGlassCard(cornerRadius: 20, padding: 14)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
 
             if model.selectedEvents.isEmpty {
                 ContentUnavailableView(
@@ -318,7 +571,8 @@ private struct ConversationView: View {
                                 .id(event.id)
                             }
                         }
-                        .padding()
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 16)
                     }
                     .onChange(of: model.selectedEvents.count) { _, _ in
                         if let eventID = model.selectedEvents.last?.id {
@@ -328,29 +582,33 @@ private struct ConversationView: View {
                 }
             }
 
-            Divider()
             HStack(alignment: .bottom, spacing: 10) {
                 TextField("Message", text: $model.draftMessage, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...6)
+                    .lineLimit(1...4)
+                    .noctweaveInputField(cornerRadius: 17)
                     .onSubmit { model.sendDraft() }
                     .disabled(relationship.localPolicy.consent != .accepted)
                 Button {
                     model.sendDraft()
                 } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
+                    Image(systemName: "arrow.up")
+                        .font(.headline.weight(.bold))
                 }
-                .buttonStyle(.plain)
+                .glassCircleButton(prominent: true, diameter: 44)
                 .disabled(
                     model.draftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || model.isWorking
                         || relationship.localPolicy.consent != .accepted
                 )
             }
-            .padding()
+            .uniformGlassCard(cornerRadius: 22, padding: 10)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 10)
         }
         .navigationTitle(relationship.peerIdentity.relationshipPseudonym)
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
     }
 }
 
@@ -361,8 +619,7 @@ private struct MessageEventRow: View {
     let timestamp: Date
 
     var body: some View {
-        HStack {
-            if outgoing { Spacer(minLength: 80) }
+        HStack(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 4) {
                 if kind != .application {
                     Text(kind.rawValue.uppercased())
@@ -379,67 +636,73 @@ private struct MessageEventRow: View {
             .padding(.vertical, 9)
             .background(
                 outgoing ? Color.accentColor.opacity(0.22) : Color.secondary.opacity(0.12),
-                in: RoundedRectangle(cornerRadius: 14)
+                in: UnevenRoundedRectangle(
+                    topLeadingRadius: 16,
+                    bottomLeadingRadius: outgoing ? 16 : 5,
+                    bottomTrailingRadius: outgoing ? 5 : 16,
+                    topTrailingRadius: 16,
+                    style: .continuous
+                )
             )
-            if !outgoing { Spacer(minLength: 80) }
         }
+        .frame(maxWidth: .infinity, alignment: outgoing ? .trailing : .leading)
     }
 }
 
 private struct GroupConversationView: View {
     @ObservedObject var model: ClientViewModel
+    @Environment(\.appTheme) private var theme
     let group: GroupRuntimeRecord
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        Circle().fill(theme.glowSecondary.opacity(0.16))
+                        Image(systemName: "person.3.fill")
+                            .foregroundStyle(theme.glowSecondary)
+                    }
+                    .frame(width: 44, height: 44)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Group \(group.groupId.uuidString.prefix(8))")
-                            .font(.title2.weight(.semibold))
-                        Text("Group-scoped credentials only · no persona or relationship authority")
+                            .font(.title3.weight(.semibold))
+                        Text("Private group credentials")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    Button("Maintain Routes") { model.maintainSelectedGroup() }
-                        .disabled(model.isWorking)
+                    Menu {
+                        Button("Maintain Routes") { model.maintainSelectedGroup() }
+                        Divider()
+                        Label("\(group.inboundTransport.localRoutes.count) receive routes", systemImage: "arrow.down")
+                        Label("\(group.peerRouteCache.entries.count) peer route sets", systemImage: "arrow.left.arrow.right")
+                        Label("\(group.outboundTransportOperations.count) queued operations", systemImage: "tray.and.arrow.up")
+                    } label: {
+                        Image(systemName: "ellipsis")
+                    }
+                    .glassCircleButton(diameter: 40)
+                    .disabled(model.isWorking)
                 }
-                HStack(spacing: 16) {
-                    Label("Epoch \(group.signedState.epoch)", systemImage: "arrow.triangle.2.circlepath")
-                    Label("\(group.signedState.members.count) members", systemImage: "person.3")
-                    Label(
-                        "\(group.inboundTransport.localRoutes.count) receive routes",
-                        systemImage: "point.3.filled.connected.trianglepath.dotted"
-                    )
-                    Label(
-                        "\(group.peerRouteCache.entries.count) peer route sets",
-                        systemImage: "arrow.left.arrow.right"
-                    )
-                    Label(
-                        "\(group.outboundTransportOperations.count) queued transport ops",
-                        systemImage: "tray.and.arrow.up"
-                    )
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
                 HStack(spacing: 8) {
-                    Label("EXPERIMENTAL · UNAUDITED", systemImage: "exclamationmark.shield")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.orange)
-                    Text(group.signedState.profile.rawValue)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                    Spacer()
-                    if let status = model.groupMaintenanceStatus[group.groupId] {
-                        Text(status)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    GroupMetricChip(text: "Epoch \(group.signedState.epoch)", icon: "arrow.triangle.2.circlepath")
+                    GroupMetricChip(text: "\(group.signedState.members.count) members", icon: "person.3")
+                    Spacer(minLength: 0)
                 }
+                if let status = model.groupMaintenanceStatus[group.groupId] {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Label("Experimental group profile", systemImage: "exclamationmark.shield")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .accessibilityHint(group.signedState.profile.rawValue)
             }
-            .padding()
-            Divider()
+            .uniformGlassCard(cornerRadius: 20, padding: 14)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
 
             if model.selectedGroupEvents.isEmpty {
                 ContentUnavailableView(
@@ -462,7 +725,8 @@ private struct GroupConversationView: View {
                                 .id(event.id)
                             }
                         }
-                        .padding()
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 16)
                     }
                     .onChange(of: model.selectedGroupEvents.count) { _, _ in
                         if let eventID = model.selectedGroupEvents.last?.id {
@@ -472,27 +736,45 @@ private struct GroupConversationView: View {
                 }
             }
 
-            Divider()
             HStack(alignment: .bottom, spacing: 10) {
                 TextField("Group message", text: $model.groupDraftMessage, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...6)
+                    .lineLimit(1...4)
+                    .noctweaveInputField(cornerRadius: 17)
                     .onSubmit { model.sendGroupDraft() }
                 Button {
                     model.sendGroupDraft()
                 } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.title2)
+                    Image(systemName: "arrow.up")
+                        .font(.headline.weight(.bold))
                 }
-                .buttonStyle(.plain)
+                .glassCircleButton(prominent: true, diameter: 44)
                 .disabled(
                     model.groupDraftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || model.isWorking
                 )
             }
-            .padding()
+            .uniformGlassCard(cornerRadius: 22, padding: 10)
+            .padding(.horizontal, 12)
+            .padding(.bottom, 10)
         }
         .navigationTitle("Group \(group.groupId.uuidString.prefix(8))")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+    }
+}
+
+private struct GroupMetricChip: View {
+    let text: String
+    let icon: String
+
+    var body: some View {
+        Label(text, systemImage: icon)
+            .font(.caption.weight(.medium))
+            .lineLimit(1)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(.thinMaterial, in: Capsule())
     }
 }
 
@@ -503,8 +785,7 @@ private struct GroupMessageEventRow: View {
     let timestamp: Date
 
     var body: some View {
-        HStack {
-            if outgoing { Spacer(minLength: 80) }
+        HStack(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 4) {
                 if kind != .application {
                     Text(kind.rawValue.uppercased())
@@ -520,10 +801,16 @@ private struct GroupMessageEventRow: View {
             .padding(.vertical, 9)
             .background(
                 outgoing ? Color.noctweaveCoral.opacity(0.22) : Color.secondary.opacity(0.12),
-                in: RoundedRectangle(cornerRadius: 14)
+                in: UnevenRoundedRectangle(
+                    topLeadingRadius: 16,
+                    bottomLeadingRadius: outgoing ? 16 : 5,
+                    bottomTrailingRadius: outgoing ? 5 : 16,
+                    topTrailingRadius: 16,
+                    style: .continuous
+                )
             )
-            if !outgoing { Spacer(minLength: 80) }
         }
+        .frame(maxWidth: .infinity, alignment: outgoing ? .trailing : .leading)
     }
 }
 
@@ -560,6 +847,7 @@ private struct NewGroupView: View {
                 }
             }
             .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
             .navigationTitle("New Group")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -567,7 +855,11 @@ private struct NewGroupView: View {
                 }
             }
         }
+        #if os(macOS)
         .frame(minWidth: 560, minHeight: 450)
+        #endif
+        .noctweaveSheetBackground()
+        .noctweaveSheetPresentation()
     }
 }
 
@@ -696,6 +988,7 @@ private struct GroupExchangeView: View {
                 }
             }
             .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
             .navigationTitle("Group Admission Exchange")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -704,7 +997,11 @@ private struct GroupExchangeView: View {
                 }
             }
         }
+        #if os(macOS)
         .frame(minWidth: 680, minHeight: 680)
+        #endif
+        .noctweaveSheetBackground()
+        .noctweaveSheetPresentation()
         .interactiveDismissDisabled(model.isWorking)
     }
 
@@ -733,7 +1030,12 @@ private struct StatusBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
-        .background(.bar)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.white.opacity(0.10))
+                .frame(height: 0.5)
+        }
     }
 }
 
@@ -808,6 +1110,7 @@ private struct PairingView: View {
                 }
             }
             .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
             .navigationTitle("New Relationship")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -816,7 +1119,11 @@ private struct PairingView: View {
                 }
             }
         }
+        #if os(macOS)
         .frame(minWidth: 560, minHeight: 540)
+        #endif
+        .noctweaveSheetBackground()
+        .noctweaveSheetPresentation()
         .interactiveDismissDisabled(model.isPairing)
     }
 
@@ -832,56 +1139,72 @@ private struct PairingView: View {
 
 private struct ClientLockView: View {
     @ObservedObject var model: ClientViewModel
+    @Environment(\.appTheme) private var theme
     @State private var pin = ""
 
     var body: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "lock.shield.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(Color.noctweaveCoral)
-            Text("Noctweave is locked")
-                .font(.title2.weight(.semibold))
-            Text(model.appLockMessage)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 380)
-
-            switch model.appLockMode {
-            case .off:
-                Button("Unlock") { model.unlockWithPIN("") }
-                    .onAppear { Task { await model.unlockWithBiometrics() } }
-            case .biometrics:
-                Button("Unlock with Biometrics") {
-                    Task { await model.unlockWithBiometrics() }
+        ZStack {
+            GlassBackground()
+            VStack(spacing: 18) {
+                ZStack {
+                    Circle().fill(theme.accent.opacity(0.14))
+                    Image(systemName: "lock.shield.fill")
+                        .font(.system(size: 34, weight: .semibold))
+                        .foregroundStyle(theme.accent)
                 }
-            case .pinOnly:
-                pinEntry
-            case .biometricsAndPin:
-                if model.biometricStepPassed {
-                    pinEntry
-                } else {
-                    Button("Verify Biometrics") {
+                .frame(width: 72, height: 72)
+                Text("Noctweave is locked")
+                    .font(.title2.weight(.bold))
+                Text(model.appLockMessage)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 380)
+
+                switch model.appLockMode {
+                case .off:
+                    Button("Unlock") { model.unlockWithPIN("") }
+                        .glassButton(prominent: true)
+                        .onAppear { Task { await model.unlockWithBiometrics() } }
+                case .biometrics:
+                    Button("Unlock with Biometrics") {
                         Task { await model.unlockWithBiometrics() }
                     }
+                    .glassButton(prominent: true)
+                case .pinOnly:
+                    pinEntry
+                case .biometricsAndPin:
+                    if model.biometricStepPassed {
+                        pinEntry
+                    } else {
+                        Button("Verify Biometrics") {
+                            Task { await model.unlockWithBiometrics() }
+                        }
+                        .glassButton(prominent: true)
+                    }
+                }
+
+                if let error = model.lockError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
                 }
             }
-
-            if let error = model.lockError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
+            .padding(28)
+            .frame(maxWidth: 460)
+            .uniformGlassCard(cornerRadius: 26, padding: 22)
+            .padding(24)
         }
-        .padding(40)
+        .ignoresSafeArea()
     }
 
     private var pinEntry: some View {
         HStack {
             SecureField("Six-digit PIN", text: $pin)
-                .textFieldStyle(.roundedBorder)
+                .noctweaveInputField()
                 .frame(maxWidth: 220)
                 .onSubmit { submitPIN() }
             Button("Unlock") { submitPIN() }
+                .glassButton(prominent: true)
         }
     }
 
