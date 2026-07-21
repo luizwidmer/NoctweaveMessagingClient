@@ -15,7 +15,8 @@ struct NoctweaveApp: App {
                 #endif
         }
         #if os(macOS)
-        .windowStyle(.titleBar)
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .defaultSize(width: 1_120, height: 720)
         #endif
     }

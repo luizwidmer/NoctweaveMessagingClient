@@ -160,9 +160,15 @@ struct ContentView: View {
         .toolbar {
             sharedToolbar
         }
+        #if os(macOS)
+        .overlay(alignment: .bottomTrailing) {
+            StatusBar(model: model)
+        }
+        #else
         .safeAreaInset(edge: .bottom) {
             StatusBar(model: model)
         }
+        #endif
     }
 
     private var compactShell: some View {
@@ -343,8 +349,8 @@ struct ContentView: View {
                     .glassButton(prominent: true)
             }
             .padding(30)
-            .frame(maxWidth: 520)
             .uniformGlassCard(cornerRadius: 26, padding: 24)
+            .frame(maxWidth: 520)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -391,6 +397,10 @@ struct ContentView: View {
     private var sidebar: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
+                #if os(macOS)
+                sidebarBrand
+                #endif
+
                 compactIdentityCard
 
                 compactSectionHeader("Relationships", icon: "point.3.connected.trianglepath.dotted")
@@ -457,10 +467,38 @@ struct ContentView: View {
                 }
             }
             .padding(12)
+            #if os(macOS)
+            .padding(.top, 32)
+            #endif
             .padding(.bottom, 64)
         }
-        .navigationTitle("Noctweave")
+        .navigationTitle("")
     }
+
+    #if os(macOS)
+    private var sidebarBrand: some View {
+        HStack(spacing: 11) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(theme.accent.opacity(0.18))
+                Image(systemName: "diamond.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(theme.accent)
+            }
+            .frame(width: 36, height: 36)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Noctweave")
+                    .font(.headline.weight(.semibold))
+                Text("Private messaging")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 4)
+        .accessibilityElement(children: .combine)
+    }
+    #endif
 }
 
 private struct RelationshipRow: View {
@@ -1032,9 +1070,19 @@ private struct StatusBar: View {
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
         }
-        .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, 12)
-        .padding(.vertical, 9)
+        .padding(.vertical, 8)
+        #if os(macOS)
+        .frame(maxWidth: 360, alignment: .trailing)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 0.7)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+        .padding(14)
+        #else
+        .frame(maxWidth: .infinity, alignment: .center)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay {
             Capsule()
@@ -1042,6 +1090,7 @@ private struct StatusBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
+        #endif
     }
 }
 
@@ -1126,7 +1175,7 @@ private struct PairingView: View {
             }
         }
         #if os(macOS)
-        .frame(minWidth: 560, minHeight: 540)
+        .frame(minWidth: 560, minHeight: mode == 0 && model.pairingLink == nil ? 430 : 540)
         #endif
         .noctweaveSheetBackground()
         .noctweaveSheetPresentation()
