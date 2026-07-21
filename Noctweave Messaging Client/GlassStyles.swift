@@ -372,6 +372,7 @@ private struct UniformGlassCardModifier: ViewModifier {
 
     private func contentCard(content: Content, isDark: Bool) -> some View {
         content
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(padding)
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)

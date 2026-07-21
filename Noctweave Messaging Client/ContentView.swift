@@ -173,7 +173,7 @@ struct ContentView: View {
 
                     compactSectionHeader("Relationships", icon: "point.3.connected.trianglepath.dotted")
                     if model.relationships.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .center, spacing: 12) {
                             Text("Start a private conversation")
                                 .font(.headline)
                             Text("A new relationship creates fresh post-quantum authority used only with that peer.")
@@ -182,6 +182,8 @@ struct ContentView: View {
                             Button("New Relationship") { showingPairing = true }
                                 .glassButton(prominent: true)
                         }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .multilineTextAlignment(.center)
                         .uniformGlassCard(cornerRadius: 20, padding: 18)
                     } else {
                         ForEach(model.relationships) { relationship in
@@ -202,6 +204,8 @@ struct ContentView: View {
                         Text("No groups in this persona")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .multilineTextAlignment(.center)
                             .uniformGlassCard(cornerRadius: 18, padding: 16)
                     } else {
                         ForEach(model.groups) { group in
@@ -1026,16 +1030,18 @@ private struct StatusBar: View {
             Text(model.lastError ?? model.statusMessage)
                 .font(.caption)
                 .lineLimit(2)
-            Spacer()
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(Color.white.opacity(0.12), lineWidth: 0.7)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(Color.white.opacity(0.10))
-                .frame(height: 0.5)
-        }
+        .padding(.bottom, 8)
     }
 }
 
