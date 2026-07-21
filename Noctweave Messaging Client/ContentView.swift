@@ -142,7 +142,7 @@ struct ContentView: View {
                 splitShell
             }
             #else
-            splitShell
+            macShell
             #endif
         }
         .tint(theme.accent)
@@ -170,6 +170,142 @@ struct ContentView: View {
         }
         #endif
     }
+
+    #if os(macOS)
+    private var macShell: some View {
+        HStack(spacing: 0) {
+            sidebar
+                .frame(width: 300)
+                .background(.ultraThinMaterial)
+
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(width: 1)
+
+            VStack(spacing: 0) {
+                macCommandBar
+                selectedDetail
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            StatusBar(model: model)
+        }
+    }
+
+    private var macCommandBar: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(macDetailTitle)
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                Text(macDetailSubtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 18)
+
+            Button { model.syncAll() } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+            }
+            .glassCircleButton(diameter: 36)
+            .disabled(model.isWorking)
+            .help("Sync all relationships and groups")
+
+            Menu {
+                Button { showingPairing = true } label: {
+                    Label("New Relationship", systemImage: "person.crop.circle.badge.plus")
+                }
+                Button { showingNewGroup = true } label: {
+                    Label("New Group", systemImage: "person.3.sequence.fill")
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 36, height: 36)
+            .background {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(Circle().fill(theme.accent.opacity(0.18)))
+                    .overlay(Circle().stroke(Color.white.opacity(0.26), lineWidth: 0.8))
+            }
+            .clipShape(Circle())
+
+            Menu {
+                Button { model.maintainAllTransport() } label: {
+                    Label("Maintain Routes", systemImage: "wrench.and.screwdriver")
+                }
+                Button { showingGroupExchange = true } label: {
+                    Label("Group Admission Exchange", systemImage: "person.3.sequence")
+                }
+                Button { model.lockNow() } label: {
+                    Label("Lock Now", systemImage: "lock.fill")
+                }
+                Divider()
+                Button("Burn Local Persona", role: .destructive) {
+                    showingBurnConfirmation = true
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 36, height: 36)
+            .background {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(Circle().fill(theme.accent.opacity(0.07)))
+                    .overlay(Circle().stroke(Color.white.opacity(0.14), lineWidth: 0.8))
+            }
+            .clipShape(Circle())
+        }
+        .padding(.leading, 18)
+        .padding(.trailing, 16)
+        .padding(.vertical, 11)
+        .background {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    LinearGradient(
+                        colors: [theme.accent.opacity(0.07), Color.clear],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.white.opacity(0.07))
+                .frame(height: 0.5)
+        }
+    }
+
+    private var macDetailTitle: String {
+        if let group = model.selectedGroup {
+            return "Group \(group.groupId.uuidString.prefix(8))"
+        }
+        if let relationship = model.selectedRelationship {
+            return relationship.peerIdentity.relationshipPseudonym
+        }
+        return "Messages"
+    }
+
+    private var macDetailSubtitle: String {
+        if let group = model.selectedGroup {
+            return "\(group.signedState.members.count) members · epoch \(group.signedState.epoch)"
+        }
+        if let relationship = model.selectedRelationship {
+            return "Private post-quantum relationship · \(relationship.localPolicy.consent.rawValue)"
+        }
+        return "Private conversations and group messaging"
+    }
+    #endif
 
     private var compactShell: some View {
         NavigationStack {
@@ -465,6 +601,36 @@ struct ContentView: View {
                         .uniformGlassCard(cornerRadius: 16, padding: 6)
                     }
                 }
+
+                #if os(macOS)
+                compactSectionHeader("Actions", icon: "sparkles")
+                Button { showingPairing = true } label: {
+                    SidebarActionRow(
+                        title: "New Relationship",
+                        subtitle: "Create a one-use invitation",
+                        icon: "person.crop.circle.badge.plus"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Button { showingNewGroup = true } label: {
+                    SidebarActionRow(
+                        title: "New Group",
+                        subtitle: "Create group-scoped credentials",
+                        icon: "person.3.sequence.fill"
+                    )
+                }
+                .buttonStyle(.plain)
+
+                Button { showingGroupExchange = true } label: {
+                    SidebarActionRow(
+                        title: "Group Admission",
+                        subtitle: "Exchange join artifacts",
+                        icon: "person.3.sequence"
+                    )
+                }
+                .buttonStyle(.plain)
+                #endif
             }
             .padding(12)
             #if os(macOS)
@@ -500,6 +666,37 @@ struct ContentView: View {
     }
     #endif
 }
+
+#if os(macOS)
+private struct SidebarActionRow: View {
+    @Environment(\.appTheme) private var theme
+    let title: String
+    let subtitle: String
+    let icon: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(theme.accent)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+}
+
+#endif
 
 private struct RelationshipRow: View {
     @Environment(\.appTheme) private var theme
