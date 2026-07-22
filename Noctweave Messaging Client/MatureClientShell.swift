@@ -640,33 +640,23 @@ private struct MatureChatsHome: View {
             }
 
             if model.relationships.isEmpty && model.groups.isEmpty {
-                VStack(spacing: compact ? 14 : 16) {
-                    Image("NoctweaveIcon")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: compact ? 82 : 108, height: compact ? 82 : 108)
-                    Text("Welcome to Noctweave")
-                        .font(.system(size: compact ? 25 : 30, weight: .bold, design: .rounded))
-                        .multilineTextAlignment(.center)
-                    Text("Start with a contact invitation. Every conversation receives its own post-quantum identity and encryption state.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: compact ? 300 : 440)
-                    HStack(spacing: 10) {
-                        Button("Add Contact", action: onAddContact)
-                            .glassButton(prominent: true)
-                        Button("Create Group", action: onAddGroup)
-                            .glassButton()
-                    }
+                ZStack(alignment: .center) {
+                    emptyWelcomeCard
+                        .frame(maxWidth: compact ? 380 : 600)
+                        .background {
+                            Color.clear
+                                .accessibilityElement()
+                                .accessibilityIdentifier("chats.emptyWelcomeCard")
+                                .allowsHitTesting(false)
+                        }
                 }
-                .uniformGlassCard(
-                    cornerRadius: compact ? 24 : 28,
-                    padding: compact ? 24 : 30
-                )
-                .frame(maxWidth: compact ? 380 : nil)
-                .frame(width: compact ? nil : 600)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .background {
+                    Color.clear
+                        .accessibilityElement()
+                        .accessibilityIdentifier("chats.emptyWelcomeRegion")
+                        .allowsHitTesting(false)
+                }
                 .padding(.horizontal, compact ? 16 : 28)
                 .padding(.vertical, compact ? 20 : 30)
             } else {
@@ -696,6 +686,33 @@ private struct MatureChatsHome: View {
                 .scrollIndicators(.hidden)
             }
         }
+    }
+
+    private var emptyWelcomeCard: some View {
+        VStack(spacing: compact ? 14 : 16) {
+            Image("NoctweaveIcon")
+                .resizable()
+                .scaledToFit()
+                .frame(width: compact ? 82 : 108, height: compact ? 82 : 108)
+            Text("Welcome to Noctweave")
+                .font(.system(size: compact ? 25 : 30, weight: .bold, design: .rounded))
+                .multilineTextAlignment(.center)
+            Text("Start with a contact invitation. Every conversation receives its own post-quantum identity and encryption state.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: compact ? 300 : 440)
+            HStack(spacing: 10) {
+                Button("Add Contact", action: onAddContact)
+                    .glassButton(prominent: true)
+                Button("Create Group", action: onAddGroup)
+                    .glassButton()
+            }
+        }
+        .uniformGlassCard(
+            cornerRadius: compact ? 24 : 28,
+            padding: compact ? 24 : 30
+        )
     }
 
     private func preview(_ relationship: PairwiseRelationshipV2) -> String {

@@ -19,6 +19,12 @@ final class NoctweaveUITests_iOS: XCTestCase {
 
     func testPhoneShellRestoresStableProductTabs() {
         XCTAssertTrue(app.staticTexts["Welcome to Noctweave"].waitForExistence(timeout: 5))
+        let welcomeRegion = app.otherElements["chats.emptyWelcomeRegion"]
+        let welcomeCard = app.otherElements["chats.emptyWelcomeCard"]
+        XCTAssertTrue(welcomeRegion.exists)
+        XCTAssertTrue(welcomeCard.exists)
+        XCTAssertEqual(welcomeCard.frame.midX, welcomeRegion.frame.midX, accuracy: 2)
+        XCTAssertEqual(welcomeCard.frame.midY, welcomeRegion.frame.midY, accuracy: 2)
         for title in ["Chats", "Contacts", "Code", "Files", "Relays", "Identity", "Settings"] {
             XCTAssertTrue(app.buttons[title].exists, "Missing bottom navigation item: \(title)")
             assertFitsScreen(app.buttons[title])
