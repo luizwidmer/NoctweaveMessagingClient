@@ -219,21 +219,32 @@ struct MaturePairingSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(direction == .share ? "How will you share it?" : "How did you receive it?")
                 .font(.headline)
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 190), spacing: 12)],
-                spacing: 12
-            ) {
-                ForEach(availableMethods) { option in
-                    PairingMethodCard(
-                        option: option,
-                        selected: method == option.method
-                    ) {
-                        selectMethod(option.method)
-                    }
+            if horizontalSizeClass == .compact {
+                VStack(spacing: 10) {
+                    methodCards
+                }
+            } else {
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 190), spacing: 12)],
+                    spacing: 12
+                ) {
+                    methodCards
                 }
             }
         }
         .uniformGlassCard(cornerRadius: 22, padding: 16)
+    }
+
+    @ViewBuilder
+    private var methodCards: some View {
+        ForEach(availableMethods) { option in
+            PairingMethodCard(
+                option: option,
+                selected: method == option.method
+            ) {
+                selectMethod(option.method)
+            }
+        }
     }
 
     @ViewBuilder

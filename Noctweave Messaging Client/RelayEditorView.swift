@@ -37,7 +37,7 @@ struct RelayEditorView: View {
         )
     }
 
-    private static func endpointAddress(_ endpoint: RelayEndpoint) -> String {
+    static func endpointAddress(_ endpoint: RelayEndpoint) -> String {
         let defaultPort: UInt16 = {
             switch endpoint.transport {
             case .tcp:
@@ -139,10 +139,12 @@ struct RelayEditorView: View {
         let client = RelayClient(endpoint: endpoint, authToken: authToken)
         do {
             let observation = try await client.sendObservingTLS(.info(), timeout: 1.5)
+            guard observation.response.status == .success,
+                  case .relayInfo(let relayInfo)? = observation.response.successBody else {
+                return RelayProbeResult(reachable: false, observedLeafCertificateSHA256: nil)
+            }
             return RelayProbeResult(
-                reachable: observation.response.type == .info
-                    && observation.response.relayInfo != nil
-                    && observation.response.relayInfo?.kind != .coordinator,
+                reachable: relayInfo.kind != .coordinator,
                 observedLeafCertificateSHA256: observation.leafCertificateSHA256
             )
         } catch {

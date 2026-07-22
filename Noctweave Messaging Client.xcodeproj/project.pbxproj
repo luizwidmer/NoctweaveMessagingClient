@@ -63,7 +63,6 @@
 			membershipExceptions = (
 				ActionPinPlanEditorView.swift,
 				AppLockView.swift,
-				AttachmentSanitizer.swift,
 				AttachmentStore.swift,
 				CiphertextPrefetchIntent.swift,
 				CiphertextPrefetchRunner.swift,
@@ -80,13 +79,10 @@
 				PinEntryComponents.swift,
 				PinSetupView.swift,
 				PlatformModalPresentation.swift,
-				RelayEditorView.swift,
 				ScreenProtectionMonitor.swift,
-				SecureCameraCaptureView.swift,
 				StorageChoiceView.swift,
 				SystemCameraPickerView.swift,
 				ThreadMessageStore.swift,
-				VoiceRecorderSheetView.swift,
 			);
 			target = 2566835C2F00A4F0006D96F3 /* Noctweave */;
 		};

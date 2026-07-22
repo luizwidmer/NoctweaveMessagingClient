@@ -7,7 +7,7 @@ final class NoctweaveUITests_iOS: XCTestCase {
         super.setUp()
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments = ["UI_TESTING"]
+        app.launchArguments = ["UI_TESTING", "UI_TESTING_READY_STATE"]
         app.launch()
     }
 
@@ -58,7 +58,7 @@ final class NoctweaveUITests_iOS: XCTestCase {
         XCTAssertTrue(app.staticTexts["People you trust"].waitForExistence(timeout: 3))
 
         app.buttons["Relays"].tap()
-        XCTAssertTrue(app.staticTexts["Preferred Relay"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Choose a relay"].waitForExistence(timeout: 3))
 
         app.buttons["Identity"].tap()
         XCTAssertTrue(app.staticTexts["Identity Book"].waitForExistence(timeout: 3))
@@ -109,6 +109,31 @@ final class NoctweaveUITests_iOS: XCTestCase {
         app.buttons["settings.legal"].tap()
         XCTAssertTrue(app.staticTexts["Privacy Policy"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.staticTexts["Terms of Use"].exists)
+    }
+
+    func testFreshInstallCannotBypassLegalOrPersonaOnboarding() {
+        app.terminate()
+        app = XCUIApplication()
+        app.launchArguments = ["UI_TESTING"]
+        app.launch()
+
+        XCTAssertTrue(app.staticTexts["Welcome to Noctweave"].waitForExistence(timeout: 5))
+        let legalContinue = app.buttons["onboarding.legal.continue"]
+        XCTAssertTrue(legalContinue.exists)
+        XCTAssertFalse(legalContinue.isEnabled)
+
+        app.switches["onboarding.acceptPrivacy"].tap()
+        app.switches["onboarding.acceptTerms"].tap()
+        XCTAssertTrue(legalContinue.isEnabled)
+        legalContinue.tap()
+
+        XCTAssertTrue(app.staticTexts["Create your first persona"].waitForExistence(timeout: 3))
+        let personaName = app.textFields["onboarding.persona.name"]
+        XCTAssertTrue(personaName.exists)
+        XCTAssertFalse(app.buttons["onboarding.persona.continue"].isEnabled)
+        personaName.tap()
+        personaName.typeText("Fresh Test")
+        XCTAssertTrue(app.buttons["onboarding.persona.continue"].isEnabled)
     }
 
     private func attachScreenshot(named name: String) {

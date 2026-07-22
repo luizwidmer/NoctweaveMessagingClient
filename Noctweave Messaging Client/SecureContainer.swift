@@ -11,8 +11,11 @@ struct SecureContainer<Content: View>: View {
     }
 
     var body: some View {
-        SecureContainerRepresentable(content: SecureLayerRoot(content: content))
-            .ignoresSafeArea()
+        ZStack {
+            WarningBackground()
+            SecureContainerRepresentable(content: SecureLayerRoot(content: content))
+        }
+        .ignoresSafeArea()
     }
 }
 
@@ -221,7 +224,10 @@ private final class SecureContainerController<Content: View>: UIViewController {
         secureField.inputAssistantItem.leadingBarButtonGroups = []
         secureField.inputAssistantItem.trailingBarButtonGroups = []
         secureField.isOpaque = false
-        secureField.accessibilityElementsHidden = true
+        // The protected subtree must remain available to VoiceOver and UI
+        // automation. Secure rendering is provided by the text field's
+        // protected canvas, not by hiding accessibility descendants.
+        secureField.accessibilityElementsHidden = false
         secureField.isUserInteractionEnabled = true
         secureField.leftView = secureContainerView
         secureField.leftViewMode = .always
@@ -244,6 +250,9 @@ private final class SecureContainerController<Content: View>: UIViewController {
         // in screenshots/screen recordings.
         secureContainerView.isUserInteractionEnabled = true
         secureContainerView.clipsToBounds = false
+        secureContainerView.isAccessibilityElement = false
+        secureContainerView.accessibilityElementsHidden = false
+        hostingController.view.accessibilityElementsHidden = false
         hostingController.view.translatesAutoresizingMaskIntoConstraints = false
         secureContainerView.addSubview(hostingController.view)
         hostingConstraints = [

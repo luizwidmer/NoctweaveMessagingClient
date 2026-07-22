@@ -18,11 +18,13 @@ final class NotificationManager {
         }
     }
 
-    func notifyNewMessage() {
+    func notifyNewMessage(count: Int = 1) {
         guard isAuthorized else { return }
         let content = UNMutableNotificationContent()
         content.title = "Noctweave"
-        content.body = "A new encrypted message is ready."
+        content.body = count == 1
+            ? "A new encrypted message is ready."
+            : "\(count) new encrypted messages are ready."
         content.sound = .default
         content.threadIdentifier = "noctweave-encrypted-message"
         let request = UNNotificationRequest(
