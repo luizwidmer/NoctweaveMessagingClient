@@ -188,19 +188,10 @@ struct MatureClientShell: View {
 
     @ViewBuilder
     private var protectedShell: some View {
-        #if os(iOS)
-        SecureContainer {
-            ZStack {
-                GlassBackground()
-                platformShell
-            }
-        }
-        #else
         ZStack {
             GlassBackground()
             platformShell
         }
-        #endif
     }
 
     private var shouldHideSensitiveContent: Bool {
@@ -236,7 +227,7 @@ struct MatureClientShell: View {
     private var macShell: some View {
         HStack(spacing: 0) {
             macSidebar
-                .frame(width: 292)
+                .frame(width: 272)
             Rectangle()
                 .fill(Color.white.opacity(0.07))
                 .frame(width: 0.5)
@@ -251,17 +242,17 @@ struct MatureClientShell: View {
                 Image("NoctweaveIcon")
                     .resizable()
                     .scaledToFit()
-                    .frame(width: 36, height: 36)
+                    .frame(width: 40, height: 40)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Noctweave")
-                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
                     Text("Post-quantum chat")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
             .padding(.top, 50)
-            .padding(.horizontal, 18)
+            .padding(.horizontal, 20)
             .padding(.bottom, 18)
 
             ScrollView {
@@ -322,6 +313,7 @@ struct MatureClientShell: View {
                 Spacer()
                 Button { model.syncAll() } label: {
                     Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 14, weight: .medium))
                 }
                 .buttonStyle(.plain)
                 .disabled(model.isWorking)
@@ -648,18 +640,19 @@ private struct MatureChatsHome: View {
             }
 
             if model.relationships.isEmpty && model.groups.isEmpty {
-                VStack(spacing: 16) {
+                VStack(spacing: compact ? 14 : 16) {
                     Image("NoctweaveIcon")
                         .resizable()
                         .scaledToFit()
-                        .frame(width: compact ? 96 : 128, height: compact ? 96 : 128)
+                        .frame(width: compact ? 82 : 108, height: compact ? 82 : 108)
                     Text("Welcome to Noctweave")
-                        .font(.system(size: compact ? 26 : 32, weight: .bold, design: .rounded))
+                        .font(.system(size: compact ? 25 : 30, weight: .bold, design: .rounded))
+                        .multilineTextAlignment(.center)
                     Text("Start with a contact invitation. Every conversation receives its own post-quantum identity and encryption state.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
-                        .frame(maxWidth: 470)
+                        .frame(maxWidth: compact ? 300 : 440)
                     HStack(spacing: 10) {
                         Button("Add Contact", action: onAddContact)
                             .glassButton(prominent: true)
@@ -667,11 +660,15 @@ private struct MatureChatsHome: View {
                             .glassButton()
                     }
                 }
-                .padding(30)
-                .frame(maxWidth: 620)
-                .uniformGlassCard(cornerRadius: 28, padding: 24)
+                .uniformGlassCard(
+                    cornerRadius: compact ? 24 : 28,
+                    padding: compact ? 24 : 30
+                )
+                .frame(maxWidth: compact ? 380 : nil)
+                .frame(width: compact ? nil : 600)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(20)
+                .padding(.horizontal, compact ? 16 : 28)
+                .padding(.vertical, compact ? 20 : 30)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 10) {
@@ -2635,13 +2632,14 @@ private struct MatureIdentityDetails: View {
 
 #if os(iOS)
 private struct MatureBottomBar: View {
+    @Environment(\.appTheme) private var theme
     @Binding var selection: ClientDestination
     let didSelect: () -> Void
 
-    private let items: [ClientDestination] = [.chats, .contacts, .code, .relays, .identity, .settings]
+    private let items: [ClientDestination] = [.chats, .contacts, .code, .files, .relays, .identity, .settings]
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 2) {
             ForEach(items) { item in
                 Button {
                     selection = item
@@ -2649,22 +2647,27 @@ private struct MatureBottomBar: View {
                 } label: {
                     VStack(spacing: 4) {
                         Image(systemName: item.icon)
-                            .font(.system(size: 18, weight: selection == item ? .semibold : .regular))
+                            .font(.system(size: 17, weight: selection == item ? .semibold : .medium))
                         Text(bottomTitle(item))
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.system(size: 9, weight: .medium))
                             .lineLimit(1)
+                            .minimumScaleFactor(0.78)
                     }
-                    .foregroundStyle(selection == item ? Color.accentColor : Color.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(selection == item ? Color.accentColor.opacity(0.15) : Color.clear, in: Capsule())
-                    .contentShape(Rectangle())
+                    .foregroundStyle(selection == item ? theme.accent : Color.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .background(
+                        selection == item ? theme.accent.opacity(0.16) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("tab.\(item.rawValue)")
             }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 4)
+        .padding(.top, 6)
+        .padding(.bottom, 5)
         .background(.ultraThinMaterial)
         .overlay(alignment: .top) {
             Rectangle().fill(Color.white.opacity(0.07)).frame(height: 0.5)
@@ -2682,6 +2685,7 @@ private struct MatureBottomBar: View {
 }
 
 private struct MatureSideRail: View {
+    @Environment(\.appTheme) private var theme
     @Binding var selection: ClientDestination
     let didSelect: () -> Void
 
@@ -2703,9 +2707,9 @@ private struct MatureSideRail: View {
                             .font(.caption2.weight(.medium))
                             .lineLimit(1)
                     }
-                    .foregroundStyle(selection == item ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(selection == item ? theme.accent : Color.secondary)
                     .frame(width: 86, height: 60)
-                    .background(selection == item ? Color.accentColor.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .background(selection == item ? theme.accent.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
                 .buttonStyle(.plain)
             }

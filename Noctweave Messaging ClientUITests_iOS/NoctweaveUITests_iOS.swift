@@ -19,11 +19,33 @@ final class NoctweaveUITests_iOS: XCTestCase {
 
     func testPhoneShellRestoresStableProductTabs() {
         XCTAssertTrue(app.staticTexts["Welcome to Noctweave"].waitForExistence(timeout: 5))
-        for title in ["Chats", "Contacts", "Code", "Relays", "Identity", "Settings"] {
+        for title in ["Chats", "Contacts", "Code", "Files", "Relays", "Identity", "Settings"] {
             XCTAssertTrue(app.buttons[title].exists, "Missing bottom navigation item: \(title)")
             assertFitsScreen(app.buttons[title])
         }
+        app.buttons["tab.files"].tap()
+        XCTAssertTrue(app.staticTexts["Media and documents shared in chats"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.staticTexts["Local Persona"].exists)
+    }
+
+    func testSecureRenderingExposesOneInteractiveTabSet() {
+        app.terminate()
+        app = XCUIApplication()
+        app.launchArguments = ["UI_TESTING", "UI_TESTING_READY_STATE", "SECURE_RENDERING_TEST"]
+        app.launch()
+
+        let chats = app.buttons["tab.chats"]
+        XCTAssertTrue(chats.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.chats").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.contacts").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.code").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.files").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.relays").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.identity").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.settings").count, 1)
+        XCTAssertTrue(chats.isHittable)
+        assertFitsScreen(chats)
+        XCTAssertFalse(app.staticTexts["Screenshot detected"].isHittable)
     }
 
     func testPairingOffersOfflineHandoffMethods() {

@@ -31,7 +31,7 @@ struct ContentView: View {
                         Image(systemName: "lock.trianglebadge.exclamationmark")
                             .font(.system(size: 38, weight: .semibold))
                             .foregroundStyle(.orange)
-                        Text("State unavailable")
+                        Text(storageFailureTitle(message))
                             .font(.title2.weight(.bold))
                         Text(readableStorageError(message))
                             .font(.subheadline)
@@ -39,12 +39,12 @@ struct ContentView: View {
                             .multilineTextAlignment(.center)
                         Button("Try Again") { Task { await model.open() } }
                             .glassButton(prominent: true)
-                        Button("Reset Local App Data…", role: .destructive) {
+                        Button("Erase This Device…", role: .destructive) {
                             showingLocalResetConfirmation = true
                         }
                         .glassButton()
                         .accessibilityIdentifier("boot.resetLocalData")
-                        Text("Reset is the recovery path for an incompatible pre-release database or a rollback alert you have independently verified. It permanently removes local identities, contacts, messages, groups, and attachments from this device.")
+                        Text("Startup and app updates never erase this data automatically. Erase only when you intentionally want to remove every local identity, contact, message, group, and attachment from this device.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -117,11 +117,8 @@ struct ContentView: View {
             && !ProcessInfo.processInfo.arguments.contains("SECURE_RENDERING_TEST") {
             MatureClientShell(model: model)
         } else {
-            ZStack {
-                WarningBackground()
-                MatureClientShell(model: model)
-                    .secureContainerIfAvailable()
-            }
+            MatureClientShell(model: model)
+                .secureContainerIfAvailable()
         }
         #else
         MatureClientShell(model: model)
@@ -144,7 +141,19 @@ struct ContentView: View {
         if message.contains("-34018") {
             return "Secure storage is unavailable in this build. Reinstall a normally signed app build and try again."
         }
+        if message.contains("rollbackDetected") {
+            return "No data was erased. Noctweave stopped before opening because the encrypted database does not match its trusted newest-state marker. This may follow a restored backup, interrupted replacement, or development install. Try again before considering an erase."
+        }
+        if message.contains("encryptionFailed") {
+            return "No data was erased. The encrypted database could not be opened with this installation's secure key."
+        }
         return message
+    }
+
+    private func storageFailureTitle(_ message: String) -> String {
+        message.contains("rollbackDetected")
+            ? "State integrity check stopped startup"
+            : "State unavailable"
     }
 }
 

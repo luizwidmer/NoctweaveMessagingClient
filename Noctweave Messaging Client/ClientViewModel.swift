@@ -47,6 +47,11 @@ private final class ClientNotificationManager {
 @MainActor
 private final class ClientAttachmentStore {
     private static let maximumStoredAttachmentBytes = 12 * 1024 * 1024
+    // This key identity is deliberately independent of the app-container URL.
+    // Apple may relocate that URL during an update while preserving both the
+    // relative attachment files and this Keychain item.
+    private static let keyService = "com.noctweave.securestorage"
+    private static let keyAccount = "attachment-vault-v1"
     private let directory: URL
 
     init(directory: URL) {
@@ -77,8 +82,17 @@ private final class ClientAttachmentStore {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+        #if os(iOS)
+        try envelope.write(to: url, options: [.atomic, .completeFileProtection])
+        #else
         try envelope.write(to: url, options: [.atomic])
+        #endif
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        var mutableURL = url
+        try mutableURL.setResourceValues(resourceValues)
         return fileName
     }
 
@@ -143,8 +157,8 @@ private final class ClientAttachmentStore {
 
     private func storageKey() throws -> SymmetricKey {
         try SecureStorageKeyProvider.shared.loadOrCreateKey(
-            service: "com.noctweave.securestorage",
-            account: "attachment-vault-v1"
+            service: Self.keyService,
+            account: Self.keyAccount
         )
     }
 
@@ -569,10 +583,14 @@ final class ClientViewModel: ObservableObject {
                 fileURL: stateURL,
                 protection: .encrypted,
                 encryptionKey: SymmetricKey(data: Data(repeating: 0x4E, count: 32)),
-                rollbackAnchorStore: VolatileClientStateRollbackAnchorStore()
+                rollbackAnchorStore: VolatileClientStateRollbackAnchorStore(),
+                storageScopeIdentifier: "org.noctweave.apple-client.primary"
             )
         } else {
-            stateStore = ClientStateStore(fileURL: stateURL)
+            stateStore = ClientStateStore(
+                fileURL: stateURL,
+                storageScopeIdentifier: "org.noctweave.apple-client.primary"
+            )
         }
         attachmentStore = ClientAttachmentStore(
             directory: (isUITest ? testRoot : support)

@@ -59,6 +59,7 @@ struct WarningBackground: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -140,60 +141,31 @@ struct SecureGlassBackground: View {
     }
 }
 
-		private final class SecureTextField: UITextField {
-		    override var canBecomeFirstResponder: Bool {
-		        false
-		    }
+private final class SecureTextField: UITextField {
+    override var canBecomeFirstResponder: Bool { false }
 
-        override func textRect(forBounds bounds: CGRect) -> CGRect {
-            bounds
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        subviews.reversed().contains { subview in
+            let converted = subview.convert(point, from: self)
+            return subview.point(inside: converted, with: event)
         }
+    }
 
-        override func editingRect(forBounds bounds: CGRect) -> CGRect {
-            bounds
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        for subview in subviews.reversed() {
+            let converted = subview.convert(point, from: self)
+            if let hit = subview.hitTest(converted, with: event) {
+                return hit
+            }
         }
-
-	        override func placeholderRect(forBounds bounds: CGRect) -> CGRect {
-	            bounds
-	        }
-
-            override func leftViewRect(forBounds bounds: CGRect) -> CGRect {
-                bounds
-            }
-
-            override func layoutSubviews() {
-                super.layoutSubviews()
-                // Ensure the secure container (leftView) fills the field.
-                leftView?.frame = bounds
-            }
-
-		    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-		        // Don't let the invisible secure field swallow gestures meant for the hosted SwiftUI content.
-		        for sub in subviews.reversed() {
-		            let p = sub.convert(point, from: self)
-	            if sub.point(inside: p, with: event) {
-	                return true
-	            }
-	        }
-	        return false
-	    }
-
-	    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-	        // Forward hit-testing into subviews so the hosted content remains interactive.
-	        for sub in subviews.reversed() {
-	            let p = sub.convert(point, from: self)
-	            if let hit = sub.hitTest(p, with: event) {
-	                return hit
-	            }
-	        }
-	        return nil
-	    }
-	}
+        return nil
+    }
+}
 
 private final class SecureContainerController<Content: View>: UIViewController {
     private let secureField = SecureTextField()
     private let hostingController: UIHostingController<Content>
-    private let secureContainerView = UIView()
+    private var protectedCanvasView: UIView?
     private var hostingConstraints: [NSLayoutConstraint] = []
 
     init(rootView: Content) {
@@ -205,9 +177,9 @@ private final class SecureContainerController<Content: View>: UIViewController {
         return nil
     }
 
-	    override func viewDidLoad() {
-	        super.viewDidLoad()
-	        view.backgroundColor = .clear
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
 
         secureField.isSecureTextEntry = true
         secureField.text = " "
@@ -224,13 +196,9 @@ private final class SecureContainerController<Content: View>: UIViewController {
         secureField.inputAssistantItem.leadingBarButtonGroups = []
         secureField.inputAssistantItem.trailingBarButtonGroups = []
         secureField.isOpaque = false
-        // The protected subtree must remain available to VoiceOver and UI
-        // automation. Secure rendering is provided by the text field's
-        // protected canvas, not by hiding accessibility descendants.
+        secureField.isAccessibilityElement = false
         secureField.accessibilityElementsHidden = false
         secureField.isUserInteractionEnabled = true
-        secureField.leftView = secureContainerView
-        secureField.leftViewMode = .always
         secureField.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(secureField)
         NSLayoutConstraint.activate([
@@ -239,52 +207,81 @@ private final class SecureContainerController<Content: View>: UIViewController {
             secureField.topAnchor.constraint(equalTo: view.topAnchor),
             secureField.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+        view.layoutIfNeeded()
+        secureField.layoutIfNeeded()
 
         addChild(hostingController)
         hostingController.view.backgroundColor = .clear
         hostingController.view.isOpaque = false
         hostingController.didMove(toParent: self)
 
-        // Install the hosted content into the secure text field's leftView. This is a stable,
-        // non-private way to attach content to the secure rendering pipeline so it is redacted
-        // in screenshots/screen recordings.
-        secureContainerView.isUserInteractionEnabled = true
-        secureContainerView.clipsToBounds = false
-        secureContainerView.isAccessibilityElement = false
-        secureContainerView.accessibilityElementsHidden = false
         hostingController.view.accessibilityElementsHidden = false
+        hostingController.view.shouldGroupAccessibilityChildren = false
         hostingController.view.translatesAutoresizingMaskIntoConstraints = false
-        secureContainerView.addSubview(hostingController.view)
-        hostingConstraints = [
-            hostingController.view.leadingAnchor.constraint(equalTo: secureContainerView.leadingAnchor),
-            hostingController.view.trailingAnchor.constraint(equalTo: secureContainerView.trailingAnchor),
-            hostingController.view.topAnchor.constraint(equalTo: secureContainerView.topAnchor),
-            hostingController.view.bottomAnchor.constraint(equalTo: secureContainerView.bottomAnchor)
-        ]
-        NSLayoutConstraint.activate(hostingConstraints)
+        installHostedContentInProtectedCanvas()
+        publishAccessibilityTree()
     }
 
-        override func viewDidAppear(_ animated: Bool) {
-            super.viewDidAppear(animated)
-            // Re-assert secure entry after the view is attached to a window.
-            // Some iOS versions only fully enable redaction after this point.
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                // Force UIKit to rebuild its internal secure canvas if needed.
-                self.secureField.isSecureTextEntry = false
-                self.secureField.isSecureTextEntry = true
-                self.view.setNeedsLayout()
-                self.view.layoutIfNeeded()
-            }
-        }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        installHostedContentInProtectedCanvas()
+        publishAccessibilityTree()
+    }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        secureContainerView.frame = secureField.bounds
+        installHostedContentInProtectedCanvas()
     }
 
     func update(rootView: Content) {
         hostingController.rootView = rootView
+        installHostedContentInProtectedCanvas()
+        publishAccessibilityTree()
+    }
+
+    private func installHostedContentInProtectedCanvas() {
+        secureField.layoutIfNeeded()
+        let canvas: UIView
+        if let protectedCanvasView {
+            canvas = protectedCanvasView
+        } else {
+            // UIKit places secure text content in a layer-backed canvas. Keep
+            // that canvas inside the live text-field hierarchy so UIKit owns
+            // its protected rendering while the field forwards touches to the
+            // hosted SwiftUI controls.
+            guard let extracted = secureField.subviews.first else {
+                return
+            }
+            extracted.isUserInteractionEnabled = true
+            extracted.clipsToBounds = false
+            extracted.isAccessibilityElement = false
+            extracted.accessibilityElementsHidden = false
+            protectedCanvasView = extracted
+            canvas = extracted
+        }
+
+        guard hostingController.view.superview !== canvas else {
+            return
+        }
+
+        NSLayoutConstraint.deactivate(hostingConstraints)
+        hostingController.view.removeFromSuperview()
+        canvas.addSubview(hostingController.view)
+        hostingConstraints = [
+            hostingController.view.leadingAnchor.constraint(equalTo: canvas.leadingAnchor),
+            hostingController.view.trailingAnchor.constraint(equalTo: canvas.trailingAnchor),
+            hostingController.view.topAnchor.constraint(equalTo: canvas.topAnchor),
+            hostingController.view.bottomAnchor.constraint(equalTo: canvas.bottomAnchor)
+        ]
+        NSLayoutConstraint.activate(hostingConstraints)
+    }
+
+    private func publishAccessibilityTree() {
+        let elements: [Any] = [hostingController.view as Any]
+        view.isAccessibilityElement = false
+        view.accessibilityElementsHidden = false
+        view.accessibilityElements = elements
+        view.automationElements = elements
     }
 }
 #else
