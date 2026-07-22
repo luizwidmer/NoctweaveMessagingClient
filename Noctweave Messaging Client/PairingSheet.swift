@@ -17,11 +17,12 @@ struct MaturePairingSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
+    @State private var pairingMode = PairingMode.relay
     @State private var direction = PairingDirection.share
     @State private var method = PairingTransferMethod.qr
-    @State private var contactName = "New Contact"
+    @State private var contactName = "My relationship name"
     @State private var invitation = ""
-    @State private var showingAdvanced = false
+    @State private var relayPassword = ""
     @State private var revealInvitation = false
     @State private var qrCollector = QRChunkCollector()
     @State private var qrProgress = "Point the camera at the other device. Animated codes are collected automatically."
@@ -46,12 +47,18 @@ struct MaturePairingSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
+                    pairingModePicker
                     pairingExplanation
                     directionPicker
                     contactNameCard
                     methodPicker
-                    transferPanel
                     relayOptions
+                    relayReadiness
+                    if pairingMode == .relay {
+                        transferPanel
+                    } else {
+                        directTransferPanel
+                    }
                     pairingStatus
                 }
                 .frame(maxWidth: 760)
@@ -62,7 +69,12 @@ struct MaturePairingSheet: View {
             .navigationTitle("Add Contact")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    if model.isPairing {
+                    if model.directPairingCanFinish {
+                        Button("Finish") {
+                            model.finishDirectPairing()
+                            dismiss()
+                        }
+                    } else if model.isPairing {
                         Button("Cancel", role: .destructive) {
                             model.cancelPairing()
                         }
@@ -82,11 +94,11 @@ struct MaturePairingSheet: View {
             isPresented: $showingFileExporter,
             document: exportedDocument,
             contentType: .noctweavePairingInvitation,
-            defaultFilename: "Noctweave Invitation"
+            defaultFilename: "Noctweave Pairing"
         ) { result in
             switch result {
             case .success:
-                transferFeedback = "Protected invitation exported. Send its password separately."
+                transferFeedback = "Protected pairing stage exported. Send its password separately."
             case .failure(let error):
                 fileError = error.localizedDescription
             }
@@ -98,9 +110,14 @@ struct MaturePairingSheet: View {
             onCompletion: importFile
         )
         .onChange(of: model.pairingLink) { _, link in
-            outboundQRFrames = link.map {
-                QRCodeTransfer.encodeFrames($0, maxChunkSize: 600)
-            } ?? []
+            if pairingMode == .relay {
+                updateOutboundFrames(link)
+            }
+        }
+        .onChange(of: model.directPairingPayload) { _, payload in
+            if pairingMode == .direct {
+                updateOutboundFrames(payload)
+            }
         }
         .onChange(of: model.pairingStatus) { _, status in
             if status == "A fresh unlinkable relationship is ready." {
@@ -113,6 +130,7 @@ struct MaturePairingSheet: View {
         }
         .onAppear {
             consumePendingFile()
+            checkRelayReadiness()
         }
         .onDisappear {
             removeTemporaryShareFile()
@@ -133,6 +151,23 @@ struct MaturePairingSheet: View {
         #endif
     }
 
+    private var pairingModePicker: some View {
+        Picker("Pairing path", selection: $pairingMode) {
+            Text("Relay").tag(PairingMode.relay)
+            Text("Direct / Offline").tag(PairingMode.direct)
+        }
+        .pickerStyle(.segmented)
+        .disabled(model.isPairing)
+        .accessibilityIdentifier("pairing.mode")
+        .onChange(of: pairingMode) { _, _ in
+            method = .qr
+            model.clearPairingLink()
+            resetInboundTransfer()
+            updateOutboundFrames(nil)
+            checkRelayReadiness()
+        }
+    }
+
     private var pairingExplanation: some View {
         HStack(alignment: .top, spacing: 14) {
             Image(systemName: "person.2.badge.key.fill")
@@ -141,9 +176,13 @@ struct MaturePairingSheet: View {
                 .frame(width: 42, height: 42)
                 .background(Color.accentColor.opacity(0.14), in: Circle())
             VStack(alignment: .leading, spacing: 5) {
-                Text("Choose how the invitation travels")
+                Text(pairingMode == .relay
+                     ? "Pair through a relay"
+                     : "Pair directly between devices")
                     .font(.headline)
-                Text("QR, AirDrop, and protected files hand the one-use secret directly to the other device. Both devices still connect to the selected relay to verify the exchange and create their private routes.")
+                Text(pairingMode == .relay
+                     ? "One device creates a one-use invitation and the other accepts it. The selected relay carries only the encrypted, expiring handshake frames."
+                     : "QR or protected files carry every authenticated handshake stage directly. No relay stores the pairing transcript, although each device still contacts its own relay once to create its private message route.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -165,11 +204,11 @@ struct MaturePairingSheet: View {
 
     private var contactNameCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Contact name").font(.headline)
-            TextField("Name shown in your contact book", text: $contactName)
+            Text("Your relationship name").font(.headline)
+            TextField("Name the other person will see", text: $contactName)
                 .noctweaveInputField()
                 .disabled(model.isPairing)
-            Text("This label remains on your device. It is never published as an account or global identity.")
+            Text("This pseudonym exists only inside the new relationship. It is never published as an account or global identity.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -207,15 +246,120 @@ struct MaturePairingSheet: View {
     }
 
     @ViewBuilder
+    private var directTransferPanel: some View {
+        if !model.isPairing, model.directPairingPayload == nil {
+            if direction == .share {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Start a direct exchange", systemImage: "arrow.left.arrow.right.circle.fill")
+                        .font(.headline)
+                    Text("The devices will alternate a few encrypted QR or file stages. Keep this sheet open until both sides confirm completion.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Button("Begin Direct Pairing") {
+                        model.startDirectPairing(
+                            relayText: preferredRelay,
+                            pseudonym: contactName,
+                            relayPassword: relayPassword
+                        )
+                    }
+                    .glassButton(prominent: true)
+                    .disabled(
+                        !relayIsReady
+                            || contactName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .uniformGlassCard(cornerRadius: 22, padding: 18)
+            } else {
+                receivePanel
+            }
+        } else if model.isPairingProcessing, model.directPairingPayload == nil {
+            ProgressView("Preparing direct pairing…")
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .uniformGlassCard(cornerRadius: 22, padding: 18)
+        } else {
+            if let payload = model.directPairingPayload {
+                directOutboundPanel(payload: payload)
+            }
+            if model.directPairingCanFinish {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Final receipt", systemImage: "checkmark.seal.fill")
+                        .font(.headline)
+                        .foregroundStyle(.green)
+                    Text("After the other device scans or imports the receipt above, finish this exchange. Your relationship is already stored locally.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Button("Finish Pairing") {
+                        model.finishDirectPairing()
+                        dismiss()
+                    }
+                    .glassButton(prominent: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .uniformGlassCard(cornerRadius: 22, padding: 18)
+            } else if !model.isPairingProcessing {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("Receive the next stage", systemImage: "arrow.down.circle")
+                        .font(.headline)
+                    Text("Once the other device has read your stage, scan or import the stage it shows next.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .uniformGlassCard(cornerRadius: 18, padding: 14)
+                receivePanel
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func directOutboundPanel(payload: String) -> some View {
+        switch method {
+        case .qr:
+            let qrSize: CGFloat = horizontalSizeClass == .compact ? 232 : 280
+            VStack(spacing: 12) {
+                Label("Show this stage to the other device", systemImage: "qrcode")
+                    .font(.headline)
+                if outboundQRFrames.isEmpty {
+                    ProgressView("Preparing visual exchange…")
+                } else {
+                    AnimatedQRCodeView(
+                        frames: outboundQRFrames,
+                        size: qrSize,
+                        interval: 0.65
+                    )
+                    .padding(12)
+                    .background(
+                        Color.white,
+                        in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    )
+                    Text("Keep the code visible until the other device has collected every frame.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .uniformGlassCard(cornerRadius: 22, padding: 18)
+        case .nearby:
+            protectedFileControls(payload: payload, destination: .systemShare)
+        case .file:
+            protectedFileControls(payload: payload, destination: .export)
+        case .link:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
     private var sharePanel: some View {
         if let link = model.pairingLink {
             switch method {
             case .qr:
                 shareQRCode(link: link)
             case .nearby:
-                protectedFileControls(destination: .systemShare)
+                protectedFileControls(payload: link, destination: .systemShare)
             case .file:
-                protectedFileControls(destination: .export)
+                protectedFileControls(payload: link, destination: .export)
             case .link:
                 remoteLinkControls(link: link)
             }
@@ -229,12 +373,14 @@ struct MaturePairingSheet: View {
                 Button("Create One-Use Invitation") {
                     model.startOfferingPairing(
                         relayText: preferredRelay,
-                        pseudonym: contactName
+                        pseudonym: contactName,
+                        relayPassword: relayPassword
                     )
                 }
                 .glassButton(prominent: true)
                 .disabled(
                     model.isPairing
+                        || !relayIsReady
                         || contactName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 )
             }
@@ -266,7 +412,10 @@ struct MaturePairingSheet: View {
         .uniformGlassCard(cornerRadius: 22, padding: 18)
     }
 
-    private func protectedFileControls(destination: ProtectedFileDestination) -> some View {
+    private func protectedFileControls(
+        payload: String,
+        destination: ProtectedFileDestination
+    ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(
                 destination == .systemShare ? "Protected AirDrop or share" : "Password-protected file",
@@ -274,8 +423,8 @@ struct MaturePairingSheet: View {
             )
             .font(.headline)
             Text(destination == .systemShare
-                 ? "Noctweave encrypts the invitation before opening the system share sheet."
-                 : "Save an encrypted invitation that can be moved by removable storage or another offline channel.")
+                 ? "Noctweave encrypts this pairing stage before opening the system share sheet."
+                 : "Save this encrypted pairing stage for removable storage or another offline channel.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             SecureField("Password — at least 8 characters", text: $filePassword)
@@ -288,7 +437,7 @@ struct MaturePairingSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button(destination == .systemShare ? "Protect and Share" : "Export Protected File") {
-                prepareProtectedFile(destination: destination)
+                prepareProtectedFile(payload: payload, destination: destination)
             }
             .glassButton(prominent: true)
             .disabled(!passwordIsReady || isProtectingFile)
@@ -345,7 +494,10 @@ struct MaturePairingSheet: View {
 
     private var qrScannerPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Scan visual invitation", systemImage: "qrcode.viewfinder")
+            Label(
+                pairingMode == .relay ? "Scan visual invitation" : "Scan pairing stage",
+                systemImage: "qrcode.viewfinder"
+            )
                 .font(.headline)
             if invitation.isEmpty {
                 if showingQRScanner {
@@ -377,7 +529,7 @@ struct MaturePairingSheet: View {
 
     private var importProtectedFilePanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Open protected invitation", systemImage: "lock.open.display")
+            Label("Open protected pairing stage", systemImage: "lock.open.display")
                 .font(.headline)
             Text("Choose the .noctpair file received through AirDrop, removable storage, or another channel.")
                 .font(.subheadline)
@@ -391,7 +543,7 @@ struct MaturePairingSheet: View {
                     SecureField("File password", text: $importPassword)
                         .textContentType(.password)
                         .noctweaveInputField()
-                    Button("Unlock Invitation") { unlockImportedPackage() }
+                    Button("Unlock Pairing Stage") { unlockImportedPackage() }
                         .glassButton(prominent: true)
                         .disabled(
                             importPassword.count
@@ -416,8 +568,8 @@ struct MaturePairingSheet: View {
                 .font(.system(.caption, design: .monospaced))
                 .frame(minHeight: 130)
                 .noctweaveInputField()
-            if !invitation.isEmpty, !looksLikeInvitation(invitation) {
-                Text("This does not look like a current Noctweave invitation.")
+            if !invitation.isEmpty, !looksLikePairingPayload(invitation) {
+                Text("This does not look like the expected Noctweave pairing data.")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -429,10 +581,13 @@ struct MaturePairingSheet: View {
 
     private var invitationReadyView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Invitation captured", systemImage: "checkmark.seal.fill")
+            Label(
+                pairingMode == .relay ? "Invitation captured" : "Pairing stage captured",
+                systemImage: "checkmark.seal.fill"
+            )
                 .font(.headline)
                 .foregroundStyle(.green)
-            Text("No permanent identity has been added yet. Continue to verify the encrypted pairing transcript.")
+            Text("Continue only if this came from the person and device you intend to pair with.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             acceptInvitationButton
@@ -440,44 +595,103 @@ struct MaturePairingSheet: View {
     }
 
     private var acceptInvitationButton: some View {
-        Button("Accept and Pair") {
-            model.startAcceptingPairing(
-                link: invitation,
-                pseudonym: contactName
-            )
+        Button(pairingMode == .relay ? "Accept and Pair" : "Continue Exchange") {
+            let payload = invitation
+            if pairingMode == .relay {
+                model.startAcceptingPairing(
+                    link: payload,
+                    pseudonym: contactName,
+                    relayPassword: relayPassword
+                )
+            } else {
+                model.continueDirectPairing(
+                    payload: payload,
+                    relayText: preferredRelay,
+                    pseudonym: contactName,
+                    relayPassword: relayPassword
+                )
+                clearInboundCapture()
+            }
         }
         .glassButton(prominent: true)
         .disabled(
-            model.isPairing
-                || !looksLikeInvitation(invitation)
+            model.isPairingProcessing
+                || (pairingMode == .relay && model.isPairing)
+                || !relayIsReady
+                || !looksLikePairingPayload(invitation)
                 || contactName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         )
     }
 
-    @ViewBuilder
     private var relayOptions: some View {
-        if direction == .share {
-            DisclosureGroup("Relay used to finish pairing", isExpanded: $showingAdvanced) {
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField("Relay URL", text: $preferredRelay)
-                        .textContentType(.URL)
-                        .noctweaveInputField()
-                    Text("The invitation records this endpoint. QR and files move the secret locally, but both devices must reach this relay before the invitation expires.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.top, 8)
+        VStack(alignment: .leading, spacing: 10) {
+            Label(
+                pairingMode == .relay ? "Pairing relay" : "Your message relay",
+                systemImage: "network"
+            )
+            .font(.headline)
+            if pairingMode == .direct || direction == .share {
+                TextField("Relay URL", text: $preferredRelay)
+                    .textContentType(.URL)
+                    .noctweaveInputField()
+                    .disabled(model.isPairing)
+            } else {
+                Text("The relay endpoint is authenticated from the captured invitation.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
-            .disabled(model.isPairing)
-            .uniformGlassCard(cornerRadius: 18, padding: 14)
+            SecureField("Relay password, if required", text: $relayPassword)
+                .textContentType(.password)
+                .noctweaveInputField()
+                .disabled(model.isPairing)
+            Text(pairingMode == .relay
+                 ? "This relay must support one-use rendezvous and opaque relationship routes. It is checked before pairing starts."
+                 : "The direct transcript never enters this relay. Only your private relationship route is provisioned here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+        .uniformGlassCard(cornerRadius: 18, padding: 14)
+        .onChange(of: preferredRelay) { _, _ in
+            guard !model.isPairing else { return }
+            model.resetPairingRelayCheck()
+        }
+        .onChange(of: relayPassword) { _, _ in
+            guard !model.isPairing else { return }
+            model.resetPairingRelayCheck()
+        }
+    }
+
+    private var relayReadiness: some View {
+        HStack(alignment: .center, spacing: 12) {
+            relayReadinessIcon
+            VStack(alignment: .leading, spacing: 3) {
+                Text(relayReadinessTitle)
+                    .font(.subheadline.weight(.semibold))
+                Text(relayReadinessDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Button(model.pairingRelayCheckState == .checking ? "Checking…" : "Check Relay") {
+                checkRelayReadiness()
+            }
+            .glassButton(prominent: !relayIsReady)
+            .disabled(
+                model.isPairing
+                    || model.pairingRelayCheckState == .checking
+                    || (pairingMode == .relay && direction == .receive && invitation.isEmpty)
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .uniformGlassCard(cornerRadius: 18, padding: 14)
     }
 
     @ViewBuilder
     private var pairingStatus: some View {
         if !model.pairingStatus.isEmpty {
             HStack(alignment: .center, spacing: 10) {
-                if model.isPairing { ProgressView().controlSize(.small) }
+                if model.isPairingProcessing { ProgressView().controlSize(.small) }
                 Text(model.pairingStatus)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -507,7 +721,7 @@ struct MaturePairingSheet: View {
 
     private var availableMethods: [PairingMethodOption] {
         if direction == .share {
-            return [
+            var methods = [
                 PairingMethodOption(
                     method: .qr,
                     title: "Show QR",
@@ -525,16 +739,19 @@ struct MaturePairingSheet: View {
                     title: "Protected File",
                     subtitle: "Move it by drive or another offline path",
                     icon: "lock.doc"
-                ),
-                PairingMethodOption(
+                )
+            ]
+            if pairingMode == .relay {
+                methods.append(PairingMethodOption(
                     method: .link,
                     title: "Remote Link",
                     subtitle: "Copy through an existing trusted channel",
                     icon: "link"
-                )
-            ]
+                ))
+            }
+            return methods
         }
-        return [
+        var methods = [
             PairingMethodOption(
                 method: .qr,
                 title: "Scan QR",
@@ -546,14 +763,17 @@ struct MaturePairingSheet: View {
                 title: "Open Protected File",
                 subtitle: "Use a file received by AirDrop or offline",
                 icon: "lock.open"
-            ),
-            PairingMethodOption(
+            )
+        ]
+        if pairingMode == .relay {
+            methods.append(PairingMethodOption(
                 method: .link,
                 title: "Paste Link",
                 subtitle: "Use a link received through a trusted channel",
                 icon: "doc.on.clipboard"
-            )
-        ]
+            ))
+        }
+        return methods
     }
 
     private var passwordIsReady: Bool {
@@ -571,7 +791,9 @@ struct MaturePairingSheet: View {
                 filePassword = ""
                 filePasswordConfirmation = ""
                 revealInvitation = false
+                model.clearPairingLink()
                 resetInboundTransfer()
+                checkRelayReadiness()
             }
         )
     }
@@ -594,13 +816,16 @@ struct MaturePairingSheet: View {
         qrCollector = collector
         switch result {
         case .single(let value), .complete(let value):
-            guard looksLikeInvitation(value) else {
-                qrProgress = "That QR code is not a current Noctweave invitation."
+            guard looksLikePairingPayload(value) else {
+                qrProgress = "That QR code is not the expected Noctweave pairing stage."
                 return
             }
             invitation = value
             showingQRScanner = false
-            qrProgress = "Invitation captured."
+            qrProgress = "Pairing stage captured."
+            if pairingMode == .relay {
+                checkRelayReadiness()
+            }
         case .partial(_, let received, let total):
             qrProgress = "Collected \(received) of \(total) frames. Keep scanning."
         case .invalid:
@@ -608,8 +833,11 @@ struct MaturePairingSheet: View {
         }
     }
 
-    private func prepareProtectedFile(destination: ProtectedFileDestination) {
-        guard let link = model.pairingLink, passwordIsReady else { return }
+    private func prepareProtectedFile(
+        payload: String,
+        destination: ProtectedFileDestination
+    ) {
+        guard passwordIsReady else { return }
         isProtectingFile = true
         fileError = ""
         transferFeedback = ""
@@ -618,7 +846,7 @@ struct MaturePairingSheet: View {
             do {
                 let package = try await Task.detached(priority: .userInitiated) {
                     try PasswordProtectedPairingPackageV1.seal(
-                        invitation: link,
+                        invitation: payload,
                         password: password
                     )
                 }.value
@@ -629,7 +857,7 @@ struct MaturePairingSheet: View {
                 case .systemShare:
                     removeTemporaryShareFile()
                     let url = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("Noctweave Invitation")
+                        .appendingPathComponent("Noctweave Pairing")
                         .appendingPathExtension("noctpair")
                     try package.write(to: url, options: .atomic)
                     shareURL = url
@@ -658,7 +886,7 @@ struct MaturePairingSheet: View {
             importPassword = ""
             invitation = ""
             fileError = ""
-            transferFeedback = "Protected invitation selected. Enter its password."
+            transferFeedback = "Protected pairing stage selected. Enter its password."
         } catch {
             fileError = error.localizedDescription
         }
@@ -674,7 +902,7 @@ struct MaturePairingSheet: View {
         if let package = pending.package {
             importedPackage = package
             fileError = ""
-            transferFeedback = "Protected invitation received. Enter its password."
+            transferFeedback = "Protected pairing stage received. Enter its password."
         } else {
             importedPackage = nil
             fileError = pending.error ?? "The protected invitation could not be opened."
@@ -696,13 +924,16 @@ struct MaturePairingSheet: View {
                         password: password
                     )
                 }.value
-                guard looksLikeInvitation(opened) else {
+                guard looksLikePairingPayload(opened) else {
                     throw PairingTransferError.invalidInvitation
                 }
                 invitation = opened
                 self.importedPackage = nil
                 importPassword = ""
-                transferFeedback = "Invitation decrypted in memory."
+                transferFeedback = "Pairing stage decrypted in memory."
+                if pairingMode == .relay {
+                    checkRelayReadiness()
+                }
             } catch {
                 fileError = describeTransferError(error)
             }
@@ -710,13 +941,16 @@ struct MaturePairingSheet: View {
         }
     }
 
-    private func looksLikeInvitation(_ value: String) -> Bool {
+    private func looksLikePairingPayload(_ value: String) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.hasPrefix("noctweave-pair-v1:")
+        let expectedPrefix = pairingMode == .relay
+            ? "noctweave-pair-v1:"
+            : DirectPairingTransferV2.prefix
+        return trimmed.hasPrefix(expectedPrefix)
             && trimmed.count <= QRCodeTransfer.maximumAssembledCharacters
     }
 
-    private func resetInboundTransfer() {
+    private func clearInboundCapture() {
         invitation = ""
         importedPackage = nil
         importPassword = ""
@@ -727,6 +961,10 @@ struct MaturePairingSheet: View {
         transferFeedback = ""
     }
 
+    private func resetInboundTransfer() {
+        clearInboundCapture()
+    }
+
     private func describeTransferError(_ error: Error) -> String {
         switch error as? PasswordProtectedPairingPackageV1Error {
         case .invalidPassword:
@@ -734,7 +972,7 @@ struct MaturePairingSheet: View {
         case .decryptionFailed:
             return "The password is incorrect or the file was modified."
         case .invalidPackage:
-            return "This is not a valid protected Noctweave invitation."
+            return "This is not a valid protected Noctweave pairing stage."
         default:
             return error.localizedDescription
         }
@@ -755,6 +993,88 @@ struct MaturePairingSheet: View {
         try? FileManager.default.removeItem(at: shareURL)
         self.shareURL = nil
     }
+
+    private var relayRequirement: RelayPairingRequirement {
+        pairingMode == .relay ? .rendezvous : .opaqueRouteOnly
+    }
+
+    private var relayIsReady: Bool {
+        guard case .ready(let readiness) = model.pairingRelayCheckState else {
+            return false
+        }
+        return readiness.requirement == relayRequirement
+    }
+
+    @ViewBuilder
+    private var relayReadinessIcon: some View {
+        switch model.pairingRelayCheckState {
+        case .idle:
+            Image(systemName: "questionmark.circle")
+                .foregroundStyle(.secondary)
+        case .checking:
+            ProgressView().controlSize(.small)
+        case .ready:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        }
+    }
+
+    private var relayReadinessTitle: String {
+        switch model.pairingRelayCheckState {
+        case .idle: "Relay not checked"
+        case .checking: "Checking relay"
+        case .ready(let readiness): readiness.relayInfo.relayName ?? "Relay ready"
+        case .failed: "Relay unavailable or incompatible"
+        }
+    }
+
+    private var relayReadinessDetail: String {
+        switch model.pairingRelayCheckState {
+        case .idle:
+            return "Run the check before creating or accepting pairing data."
+        case .checking:
+            return "Verifying health, protocol capabilities, authentication, and a temporary route."
+        case .ready(let readiness):
+            return readiness.requirement == .rendezvous
+                ? "Reachable; message routes and one-use relay rendezvous are functional."
+                : "Reachable; a temporary private message route was created and removed successfully."
+        case .failed(let message):
+            return message
+        }
+    }
+
+    private func checkRelayReadiness() {
+        if pairingMode == .relay, direction == .receive {
+            guard looksLikePairingPayload(invitation) else {
+                model.resetPairingRelayCheck()
+                return
+            }
+            model.checkPairingInvitationRelay(
+                link: invitation,
+                relayPassword: relayPassword
+            )
+        } else {
+            model.checkPairingRelay(
+                relayText: preferredRelay,
+                relayPassword: relayPassword,
+                requirement: relayRequirement
+            )
+        }
+    }
+
+    private func updateOutboundFrames(_ payload: String?) {
+        outboundQRFrames = payload.map {
+            QRCodeTransfer.encodeFrames($0, maxChunkSize: 600)
+        } ?? []
+    }
+}
+
+private enum PairingMode: Hashable {
+    case relay
+    case direct
 }
 
 private enum PairingDirection: Hashable {

@@ -28,7 +28,7 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Local organization only"].exists)
     }
 
-    func testPairingOffersOfflineHandoffMethodsAndHidesProtocolFields() {
+    func testPairingSeparatesRelayAndDirectOfflineFlows() {
         let button = app.buttons["Add Contact"].firstMatch
         XCTAssertTrue(button.waitForExistence(timeout: 5))
         button.tap()
@@ -37,14 +37,12 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertTrue(app.buttons["pairing.method.nearby"].exists)
         XCTAssertTrue(app.buttons["pairing.method.file"].exists)
         XCTAssertTrue(app.buttons["pairing.method.link"].exists)
-        XCTAssertTrue(app.staticTexts["AirDrop or Share"].exists)
-        XCTAssertTrue(app.staticTexts["Protected File"].exists)
-        XCTAssertTrue(app.buttons["Create One-Use Invitation"].exists)
 
-        app.buttons["Receive Invitation"].tap()
-        XCTAssertTrue(app.staticTexts["Scan QR"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["Open Protected File"].exists)
-        XCTAssertTrue(app.staticTexts["Paste Link"].exists)
+        app.buttons["Direct / Offline"].tap()
+        app.scrollViews.firstMatch.swipeUp()
+        XCTAssertTrue(app.buttons["Begin Direct Pairing"].waitForExistence(timeout: 2))
+        XCTAssertFalse(app.buttons["pairing.method.link"].exists)
+        XCTAssertTrue(app.staticTexts["Pair directly between devices"].exists)
         XCTAssertFalse(app.staticTexts["Relationship-local presentation"].exists)
         XCTAssertFalse(app.staticTexts["Temporary rendezvous relay"].exists)
     }

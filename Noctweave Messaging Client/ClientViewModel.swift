@@ -10,6 +10,18 @@ enum ClientBootState: Equatable {
     case failed(String)
 }
 
+enum PairingRelayCheckState: Equatable {
+    case idle
+    case checking
+    case ready(RelayPairingReadiness)
+    case failed(String)
+
+    var isReady: Bool {
+        if case .ready = self { return true }
+        return false
+    }
+}
+
 private enum NoctweaveClientError: Error, LocalizedError {
     case invalidPairingLink
     case invalidGroupIdentifier
@@ -17,6 +29,7 @@ private enum NoctweaveClientError: Error, LocalizedError {
     case pairingExpired
     case relayRejected(String)
     case missingPairingFrame(UInt64)
+    case unexpectedDirectPairingStage
     case unavailable
 
     var errorDescription: String? {
@@ -33,10 +46,19 @@ private enum NoctweaveClientError: Error, LocalizedError {
             return message
         case .missingPairingFrame(let sequence):
             return "The pairing exchange is missing transport frame \(sequence)."
+        case .unexpectedDirectPairingStage:
+            return "This direct pairing code is not the next expected stage. Use the code currently shown on the other device."
         case .unavailable:
             return "The encrypted client state is not ready."
         }
     }
+}
+
+private struct DirectPairingOffererPendingContext {
+    var pendingOffer: PendingRendezvousOfferV2
+    let invitation: ContactPairingInvitationV2
+    let participant: PreparedContactParticipantV2
+    var ledger: RendezvousRedemptionLedgerV2
 }
 
 private struct NoctweavePairingLinkV1: Codable {
@@ -94,6 +116,10 @@ final class ClientViewModel: ObservableObject {
     @Published private(set) var isPairing = false
     @Published private(set) var pairingLink: String?
     @Published private(set) var pairingStatus = ""
+    @Published private(set) var pairingRelayCheckState: PairingRelayCheckState = .idle
+    @Published private(set) var isPairingProcessing = false
+    @Published private(set) var directPairingPayload: String?
+    @Published private(set) var directPairingCanFinish = false
 
     @Published private(set) var groupExchangeLink: String?
     @Published private(set) var groupExchangeStatus = ""
@@ -106,6 +132,12 @@ final class ClientViewModel: ObservableObject {
     private let stateStore: ClientStateStore
     private var client: HeadlessMessagingClient?
     private var pairingTask: Task<Void, Never>?
+    private var pairingRelayCheckTask: Task<Void, Never>?
+    private var pairingRelayCheckID = UUID()
+    private var directOffererPending: DirectPairingOffererPendingContext?
+    private var directOffererFlow: ContactPairingOffererFlowV2?
+    private var directResponderFlow: ContactPairingResponderFlowV2?
+    private var directTemporaryParticipant: PreparedContactParticipantV2?
     private var failedPINAttempts = 0
     private var pinLockedUntil: Date?
 
@@ -521,36 +553,168 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
-    func startOfferingPairing(relayText: String, pseudonym: String) {
+    func startOfferingPairing(
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String = ""
+    ) {
         guard !isPairing else { return }
+        pairingRelayCheckTask?.cancel()
         isPairing = true
+        isPairingProcessing = true
         pairingLink = nil
-        pairingStatus = "Preparing fresh relationship authority and opaque route…"
+        pairingStatus = "Rechecking relay readiness…"
         lastError = nil
         pairingTask = Task { [weak self] in
-            await self?.runOffererPairing(relayText: relayText, pseudonym: pseudonym)
+            await self?.runOffererPairing(
+                relayText: relayText,
+                pseudonym: pseudonym,
+                relayPassword: relayPassword
+            )
         }
     }
 
-    func startAcceptingPairing(link: String, pseudonym: String) {
+    func startAcceptingPairing(
+        link: String,
+        pseudonym: String,
+        relayPassword: String = ""
+    ) {
         guard !isPairing else { return }
+        pairingRelayCheckTask?.cancel()
         isPairing = true
+        isPairingProcessing = true
         pairingLink = nil
-        pairingStatus = "Opening the one-use encrypted rendezvous…"
+        pairingStatus = "Rechecking invitation relay readiness…"
         lastError = nil
         pairingTask = Task { [weak self] in
-            await self?.runResponderPairing(link: link, pseudonym: pseudonym)
+            await self?.runResponderPairing(
+                link: link,
+                pseudonym: pseudonym,
+                relayPassword: relayPassword
+            )
         }
+    }
+
+    func checkPairingRelay(
+        relayText: String,
+        relayPassword: String = "",
+        requirement: RelayPairingRequirement = .rendezvous
+    ) {
+        do {
+            let endpoint = try RelayEndpointParser.parse(relayText)
+            beginPairingRelayCheck(
+                endpoint: endpoint,
+                relayPassword: relayPassword,
+                requirement: requirement
+            )
+        } catch {
+            pairingRelayCheckTask?.cancel()
+            pairingRelayCheckState = .failed(describe(error))
+        }
+    }
+
+    func checkPairingInvitationRelay(link: String, relayPassword: String = "") {
+        do {
+            let shared = try NoctweavePairingLinkV1.decode(link)
+            guard Date() < shared.invitation.offer.expiresAt else {
+                throw NoctweaveClientError.pairingExpired
+            }
+            beginPairingRelayCheck(
+                endpoint: shared.relay,
+                relayPassword: relayPassword,
+                requirement: .rendezvous
+            )
+        } catch {
+            pairingRelayCheckTask?.cancel()
+            pairingRelayCheckState = .failed(describe(error))
+        }
+    }
+
+    func resetPairingRelayCheck() {
+        pairingRelayCheckTask?.cancel()
+        pairingRelayCheckTask = nil
+        pairingRelayCheckID = UUID()
+        pairingRelayCheckState = .idle
+    }
+
+    func startDirectPairing(
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String = ""
+    ) {
+        guard !isPairing else { return }
+        pairingRelayCheckTask?.cancel()
+        resetDirectPairingState()
+        isPairing = true
+        isPairingProcessing = true
+        pairingStatus = "Provisioning a private relationship route…"
+        lastError = nil
+        pairingTask = Task { [weak self] in
+            await self?.runDirectPairingStart(
+                relayText: relayText,
+                pseudonym: pseudonym,
+                relayPassword: relayPassword
+            )
+        }
+    }
+
+    func continueDirectPairing(
+        payload: String,
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String = ""
+    ) {
+        guard pairingTask == nil else { return }
+        isPairing = true
+        isPairingProcessing = true
+        lastError = nil
+        pairingTask = Task { [weak self] in
+            await self?.runDirectPairingStage(
+                payload: payload,
+                relayText: relayText,
+                pseudonym: pseudonym,
+                relayPassword: relayPassword
+            )
+        }
+    }
+
+    func finishDirectPairing() {
+        guard directPairingCanFinish else { return }
+        directPairingCanFinish = false
+        directPairingPayload = nil
+        isPairing = false
+        isPairingProcessing = false
+        pairingStatus = "A fresh unlinkable relationship is ready."
+        directOffererPending = nil
+        directOffererFlow = nil
+        directResponderFlow = nil
+        directTemporaryParticipant = nil
     }
 
     func cancelPairing() {
-        pairingTask?.cancel()
-        pairingStatus = "Cancelling and removing the temporary relay lanes…"
+        guard isPairing else { return }
+        if let pairingTask {
+            pairingStatus = "Cancelling and removing temporary relay state…"
+            pairingTask.cancel()
+            return
+        } else {
+            let participant = directTemporaryParticipant
+            resetDirectPairingState()
+            isPairing = false
+            isPairingProcessing = false
+            pairingStatus = "Pairing cancelled. Start with fresh one-use material."
+            if let participant, let client {
+                Task { try? await client.teardownContactParticipant(participant) }
+            }
+        }
     }
 
     func clearPairingLink() {
         pairingLink = nil
+        directPairingPayload = nil
         pairingStatus = ""
+        resetDirectPairingState()
+        resetPairingRelayCheck()
     }
 
     func lockNow() {
@@ -708,34 +872,121 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
-    private func runOffererPairing(relayText: String, pseudonym: String) async {
+    private func beginPairingRelayCheck(
+        endpoint: RelayEndpoint,
+        relayPassword: String,
+        requirement: RelayPairingRequirement
+    ) {
+        pairingRelayCheckTask?.cancel()
+        let checkID = UUID()
+        pairingRelayCheckID = checkID
+        pairingRelayCheckState = .checking
+        let accessPassword = relayAccessPassword(
+            for: endpoint,
+            supplied: relayPassword
+        )
+        pairingRelayCheckTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let readiness = try await RelayPairingPreflight.check(
+                    client: RelayClient(endpoint: endpoint, authToken: accessPassword),
+                    requirement: requirement
+                )
+                try Task.checkCancellation()
+                guard pairingRelayCheckID == checkID else { return }
+                pairingRelayCheckState = .ready(readiness)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard pairingRelayCheckID == checkID else { return }
+                pairingRelayCheckState = .failed(describe(error))
+            }
+            if pairingRelayCheckID == checkID {
+                pairingRelayCheckTask = nil
+            }
+        }
+    }
+
+    private func relayAccessPassword(
+        for endpoint: RelayEndpoint,
+        supplied: String
+    ) -> String? {
+        let normalized = supplied.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalized.isEmpty { return normalized }
+        return state?.relayPreferences.first(where: { $0.endpoint == endpoint })?
+            .accessPassword
+    }
+
+    private func rememberRelay(
+        _ readiness: RelayPairingReadiness,
+        accessPassword: String?,
+        client: HeadlessMessagingClient
+    ) async throws {
+        let fallbackName = readiness.endpoint.host
+        let name = readiness.relayInfo.relayName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedName: String
+        if let name, !name.isEmpty {
+            resolvedName = name
+        } else {
+            resolvedName = fallbackName
+        }
+        try await client.upsertRelayPreference(
+            endpoint: readiness.endpoint,
+            name: resolvedName,
+            accessPassword: accessPassword
+        )
+    }
+
+    private func runOffererPairing(
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String
+    ) async {
         var cleanup: (RelayClient, RendezvousRelayAdapterV2)?
+        var temporaryParticipant: PreparedContactParticipantV2?
         defer {
             isPairing = false
+            isPairingProcessing = false
             pairingTask = nil
         }
         do {
             guard let client else { throw NoctweaveClientError.unavailable }
             let endpoint = try RelayEndpointParser.parse(relayText)
+            let accessPassword = relayAccessPassword(
+                for: endpoint,
+                supplied: relayPassword
+            )
+            let readiness = try await RelayPairingPreflight.check(
+                client: RelayClient(endpoint: endpoint, authToken: accessPassword),
+                requirement: .rendezvous,
+                performRuntimeProbe: false
+            )
+            try await rememberRelay(
+                readiness,
+                accessPassword: accessPassword,
+                client: client
+            )
             let localPseudonym = try validatedPseudonym(pseudonym)
             let now = Date()
+            var offer = try await client.makeContactPairingInvitation(
+                createdAt: now,
+                expiresAt: now.addingTimeInterval(10 * 60)
+            )
+            let adapter = try RendezvousRelayAdapterV2(offer: offer.invitation.offer)
+            let relay = RelayClient(endpoint: endpoint, authToken: accessPassword)
+            cleanup = (relay, adapter)
+
+            try requireEmpty(
+                await relay.send(.registerRendezvousTransportV2(adapter.registrationRequest))
+            )
             let pendingParticipant = try await client.prepareContactParticipant(
                 relay: endpoint,
                 relationshipPseudonym: localPseudonym,
                 createdAt: now
             )
             let participant = try await client.activateContactParticipant(pendingParticipant)
-            var offer = try await client.makeContactPairingInvitation(
-                createdAt: now,
-                expiresAt: now.addingTimeInterval(10 * 60)
-            )
-            let adapter = try RendezvousRelayAdapterV2(offer: offer.invitation.offer)
-            let relay = RelayClient(endpoint: endpoint)
-            cleanup = (relay, adapter)
-
-            try requireEmpty(
-                await relay.send(.registerRendezvousTransportV2(adapter.registrationRequest))
-            )
+            temporaryParticipant = participant
             pairingLink = try NoctweavePairingLinkV1(
                 relay: endpoint,
                 invitation: offer.invitation
@@ -800,6 +1051,7 @@ final class ClientViewModel: ObservableObject {
                 consent: .accepted,
                 personaScope: scope
             )
+            temporaryParticipant = nil
             try requireEmpty(await relay.send(.appendRendezvousTransportV2(
                 try adapter.sealSessionFrame(
                     completion.confirmationFrame,
@@ -815,20 +1067,29 @@ final class ClientViewModel: ObservableObject {
             if let cleanup {
                 await deleteTemporaryLanes(relay: cleanup.0, adapter: cleanup.1)
             }
+            if let temporaryParticipant, let client {
+                try? await client.teardownContactParticipant(temporaryParticipant)
+            }
             pairingLink = nil
             if error is CancellationError {
                 pairingStatus = "Pairing cancelled. Start with a fresh invitation."
             } else {
                 lastError = describe(error)
-                pairingStatus = "Pairing did not complete. Start with a fresh invitation."
+                pairingStatus = "Pairing stopped: \(describe(error))"
             }
         }
     }
 
-    private func runResponderPairing(link: String, pseudonym: String) async {
+    private func runResponderPairing(
+        link: String,
+        pseudonym: String,
+        relayPassword: String
+    ) async {
         var cleanup: (RelayClient, RendezvousRelayAdapterV2)?
+        var temporaryParticipant: PreparedContactParticipantV2?
         defer {
             isPairing = false
+            isPairingProcessing = false
             pairingTask = nil
         }
         do {
@@ -837,9 +1098,23 @@ final class ClientViewModel: ObservableObject {
             guard Date() < shared.invitation.offer.expiresAt else {
                 throw NoctweaveClientError.pairingExpired
             }
+            let accessPassword = relayAccessPassword(
+                for: shared.relay,
+                supplied: relayPassword
+            )
+            let readiness = try await RelayPairingPreflight.check(
+                client: RelayClient(endpoint: shared.relay, authToken: accessPassword),
+                requirement: .rendezvous,
+                performRuntimeProbe: false
+            )
+            try await rememberRelay(
+                readiness,
+                accessPassword: accessPassword,
+                client: client
+            )
             let localPseudonym = try validatedPseudonym(pseudonym)
             let adapter = try RendezvousRelayAdapterV2(offer: shared.invitation.offer)
-            let relay = RelayClient(endpoint: shared.relay)
+            let relay = RelayClient(endpoint: shared.relay, authToken: accessPassword)
             cleanup = (relay, adapter)
             try requireEmpty(
                 await relay.send(.registerRendezvousTransportV2(adapter.registrationRequest))
@@ -850,6 +1125,7 @@ final class ClientViewModel: ObservableObject {
                 relationshipPseudonym: localPseudonym
             )
             let participant = try await client.activateContactParticipant(pendingParticipant)
+            temporaryParticipant = participant
             let started = try ContactPairingResponderFlowV2.begin(
                 invitation: shared.invitation,
                 participant: participant,
@@ -907,6 +1183,7 @@ final class ClientViewModel: ObservableObject {
                 consent: .accepted,
                 personaScope: scope
             )
+            temporaryParticipant = nil
             await deleteTemporaryLanes(relay: relay, adapter: adapter)
             cleanup = nil
             pairingStatus = "A fresh unlinkable relationship is ready."
@@ -915,13 +1192,239 @@ final class ClientViewModel: ObservableObject {
             if let cleanup {
                 await deleteTemporaryLanes(relay: cleanup.0, adapter: cleanup.1)
             }
+            if let temporaryParticipant, let client {
+                try? await client.teardownContactParticipant(temporaryParticipant)
+            }
             if error is CancellationError {
                 pairingStatus = "Pairing cancelled. Start with a fresh invitation."
             } else {
                 lastError = describe(error)
-                pairingStatus = "Pairing did not complete. Start with a fresh invitation."
+                pairingStatus = "Pairing stopped: \(describe(error))"
             }
         }
+    }
+
+    private func runDirectPairingStart(
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String
+    ) async {
+        defer {
+            isPairingProcessing = false
+            pairingTask = nil
+        }
+        do {
+            guard let client else { throw NoctweaveClientError.unavailable }
+            let endpoint = try RelayEndpointParser.parse(relayText)
+            let accessPassword = relayAccessPassword(
+                for: endpoint,
+                supplied: relayPassword
+            )
+            let readiness = try await RelayPairingPreflight.check(
+                client: RelayClient(endpoint: endpoint, authToken: accessPassword),
+                requirement: .opaqueRouteOnly,
+                performRuntimeProbe: false
+            )
+            try await rememberRelay(
+                readiness,
+                accessPassword: accessPassword,
+                client: client
+            )
+            let pseudonym = try validatedPseudonym(pseudonym)
+            let now = Date()
+            let pendingParticipant = try await client.prepareContactParticipant(
+                relay: endpoint,
+                relationshipPseudonym: pseudonym,
+                createdAt: now
+            )
+            let participant = try await client.activateContactParticipant(pendingParticipant)
+            directTemporaryParticipant = participant
+            let offer = try await client.makeContactPairingInvitation(
+                createdAt: now,
+                expiresAt: now.addingTimeInterval(10 * 60)
+            )
+            directOffererPending = DirectPairingOffererPendingContext(
+                pendingOffer: offer.pending,
+                invitation: offer.invitation,
+                participant: participant,
+                ledger: RendezvousRedemptionLedgerV2()
+            )
+            directPairingPayload = try DirectPairingTransferV2
+                .invitation(offer.invitation)
+                .encoded()
+            pairingStatus = "Show this invitation to the other device, then scan its encrypted response."
+        } catch {
+            await failDirectPairing(error)
+        }
+    }
+
+    private func runDirectPairingStage(
+        payload: String,
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String
+    ) async {
+        defer {
+            isPairingProcessing = false
+            pairingTask = nil
+        }
+        do {
+            guard let client else { throw NoctweaveClientError.unavailable }
+            let transfer = try DirectPairingTransferV2.decode(payload)
+            switch transfer.stage {
+            case .invitation:
+                guard directOffererPending == nil,
+                      directOffererFlow == nil,
+                      directResponderFlow == nil,
+                      directTemporaryParticipant == nil,
+                      let invitation = transfer.invitation,
+                      Date() < invitation.offer.expiresAt else {
+                    throw NoctweaveClientError.unexpectedDirectPairingStage
+                }
+                let endpoint = try RelayEndpointParser.parse(relayText)
+                let accessPassword = relayAccessPassword(
+                    for: endpoint,
+                    supplied: relayPassword
+                )
+                let readiness = try await RelayPairingPreflight.check(
+                    client: RelayClient(endpoint: endpoint, authToken: accessPassword),
+                    requirement: .opaqueRouteOnly,
+                    performRuntimeProbe: false
+                )
+                try await rememberRelay(
+                    readiness,
+                    accessPassword: accessPassword,
+                    client: client
+                )
+                let pendingParticipant = try await client.prepareContactParticipant(
+                    relay: endpoint,
+                    relationshipPseudonym: try validatedPseudonym(pseudonym)
+                )
+                let participant = try await client.activateContactParticipant(
+                    pendingParticipant
+                )
+                directTemporaryParticipant = participant
+                let started = try ContactPairingResponderFlowV2.begin(
+                    invitation: invitation,
+                    participant: participant,
+                    at: Date()
+                )
+                directResponderFlow = started.flow
+                directPairingPayload = try DirectPairingTransferV2.response(
+                    openRequest: started.openRequest,
+                    acceptanceFrame: started.acceptanceFrame
+                ).encoded()
+                pairingStatus = "Your encrypted response is ready. Show it to the inviting device, then scan its contact offer."
+
+            case .response:
+                guard var context = directOffererPending,
+                      directOffererFlow == nil,
+                      directResponderFlow == nil,
+                      let openRequest = transfer.openRequest,
+                      let acceptanceFrame = transfer.frame,
+                      Date() < context.invitation.offer.expiresAt else {
+                    throw NoctweaveClientError.unexpectedDirectPairingStage
+                }
+                let started = try ContactPairingOffererFlowV2.begin(
+                    pendingOffer: &context.pendingOffer,
+                    invitation: context.invitation,
+                    participant: context.participant,
+                    openRequest: openRequest,
+                    acceptanceFrame: acceptanceFrame,
+                    ledger: &context.ledger,
+                    at: Date()
+                )
+                directOffererPending = nil
+                directOffererFlow = started.flow
+                directPairingPayload = try DirectPairingTransferV2
+                    .offer(started.offerFrame)
+                    .encoded()
+                pairingStatus = "The contact offer is ready. Show it to the other device, then scan its confirmation."
+
+            case .offer:
+                guard var flow = directResponderFlow,
+                      directOffererPending == nil,
+                      directOffererFlow == nil,
+                      let frame = transfer.frame else {
+                    throw NoctweaveClientError.unexpectedDirectPairingStage
+                }
+                let confirmation = try flow.receiveOffer(frame, at: Date())
+                directResponderFlow = flow
+                directPairingPayload = try DirectPairingTransferV2
+                    .confirmation(confirmation)
+                    .encoded()
+                pairingStatus = "The relationship transcript is verified. Show this confirmation, then scan the final receipt."
+
+            case .confirmation:
+                guard var flow = directOffererFlow,
+                      directOffererPending == nil,
+                      directResponderFlow == nil,
+                      let frame = transfer.frame else {
+                    throw NoctweaveClientError.unexpectedDirectPairingStage
+                }
+                let completion = try flow.receiveConfirmation(frame, at: Date())
+                let scope = await client.mintActivePersonaScopeToken()
+                try await client.addRelationship(
+                    completion.relationship,
+                    consent: .accepted,
+                    personaScope: scope
+                )
+                directOffererFlow = nil
+                directTemporaryParticipant = nil
+                directPairingPayload = try DirectPairingTransferV2
+                    .finalConfirmation(completion.confirmationFrame)
+                    .encoded()
+                directPairingCanFinish = true
+                pairingStatus = "Final receipt ready. Let the other device scan it before you finish."
+                try await refresh()
+
+            case .finalConfirmation:
+                guard var flow = directResponderFlow,
+                      directOffererPending == nil,
+                      directOffererFlow == nil,
+                      let frame = transfer.frame else {
+                    throw NoctweaveClientError.unexpectedDirectPairingStage
+                }
+                let relationship = try flow.receiveConfirmation(frame, at: Date())
+                let scope = await client.mintActivePersonaScopeToken()
+                try await client.addRelationship(
+                    relationship,
+                    consent: .accepted,
+                    personaScope: scope
+                )
+                directTemporaryParticipant = nil
+                resetDirectPairingState()
+                isPairing = false
+                pairingStatus = "A fresh unlinkable relationship is ready."
+                try await refresh()
+            }
+        } catch {
+            await failDirectPairing(error)
+        }
+    }
+
+    private func failDirectPairing(_ error: Error) async {
+        let participant = directTemporaryParticipant
+        resetDirectPairingState()
+        isPairing = false
+        if let participant, let client {
+            try? await client.teardownContactParticipant(participant)
+        }
+        if error is CancellationError {
+            pairingStatus = "Direct pairing cancelled. Start with a fresh exchange."
+        } else {
+            lastError = describe(error)
+            pairingStatus = "Direct pairing stopped: \(describe(error))"
+        }
+    }
+
+    private func resetDirectPairingState() {
+        directOffererPending = nil
+        directOffererFlow = nil
+        directResponderFlow = nil
+        directTemporaryParticipant = nil
+        directPairingPayload = nil
+        directPairingCanFinish = false
     }
 
     private func waitForFrames(
