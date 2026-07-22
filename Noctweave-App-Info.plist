@@ -6,14 +6,14 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
-			<string>Noctweave Contact Share</string>
+			<string>Noctweave Pairing Invitation</string>
 			<key>CFBundleTypeRole</key>
 			<string>Viewer</string>
 			<key>LSHandlerRank</key>
 			<string>Owner</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>org.noctweave.contactshare</string>
+				<string>org.noctweave.pairing-invitation</string>
 			</array>
 		</dict>
 	</array>
@@ -25,14 +25,14 @@
 				<string>public.data</string>
 			</array>
 			<key>UTTypeDescription</key>
-			<string>Noctweave Contact Share</string>
+			<string>Noctweave Pairing Invitation</string>
 			<key>UTTypeIdentifier</key>
-			<string>org.noctweave.contactshare</string>
+			<string>org.noctweave.pairing-invitation</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
 				<array>
-					<string>noctweave</string>
+					<string>noctpair</string>
 				</array>
 			</dict>
 		</dict>

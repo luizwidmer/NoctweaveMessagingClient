@@ -26,15 +26,30 @@ final class NoctweaveUITests_iOS: XCTestCase {
         XCTAssertFalse(app.staticTexts["Local Persona"].exists)
     }
 
-    func testPairingUsesConsumerLanguage() {
+    func testPairingOffersOfflineHandoffMethods() {
         let button = app.buttons["Add Contact"].firstMatch
         XCTAssertTrue(button.waitForExistence(timeout: 5))
         button.tap()
 
-        XCTAssertTrue(app.navigationBars["Add Contact"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["Share Invitation"].exists)
-        XCTAssertTrue(app.buttons["Enter Invitation"].exists)
-        XCTAssertTrue(app.buttons["Create One-Use Invitation"].exists)
+        XCTAssertTrue(app.buttons["pairing.method.qr"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["pairing.method.nearby"].exists)
+        XCTAssertTrue(app.buttons["pairing.method.file"].exists)
+        XCTAssertTrue(app.staticTexts["AirDrop or Share"].exists)
+        XCTAssertTrue(app.staticTexts["Protected File"].exists)
+
+        let remoteLink = app.buttons["pairing.method.link"]
+        if !remoteLink.exists { app.swipeUp() }
+        XCTAssertTrue(remoteLink.waitForExistence(timeout: 2))
+
+        app.swipeDown()
+        app.swipeDown()
+        let receive = app.buttons["Receive Invitation"]
+        XCTAssertTrue(receive.waitForExistence(timeout: 2))
+        receive.tap()
+
+        XCTAssertTrue(app.staticTexts["Scan QR"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Open Protected File"].exists)
+        XCTAssertTrue(app.staticTexts["Paste Link"].exists)
         XCTAssertFalse(app.staticTexts["Relationship-local presentation"].exists)
     }
 

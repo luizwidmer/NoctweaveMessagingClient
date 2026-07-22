@@ -70,6 +70,7 @@ private enum CompactConversationRoute: Hashable {
 
 struct MatureClientShell: View {
     @ObservedObject var model: ClientViewModel
+    @ObservedObject private var pairingInbox = PairingInvitationInbox.shared
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #elseif os(macOS)
@@ -144,6 +145,12 @@ struct MatureClientShell: View {
         #if os(macOS)
         .environmentObject(windowController)
         #endif
+        .onAppear {
+            if pairingInbox.hasPendingItem { showingPairing = true }
+        }
+        .onChange(of: pairingInbox.revision) { _, _ in
+            showingPairing = true
+        }
     }
 
     @ViewBuilder
@@ -1441,119 +1448,6 @@ private struct MatureEmptyCard: View {
         .frame(maxWidth: 580)
         .frame(maxWidth: .infinity)
         .uniformGlassCard(cornerRadius: 24, padding: 18)
-    }
-}
-
-private struct MaturePairingSheet: View {
-    @ObservedObject var model: ClientViewModel
-    @Binding var preferredRelay: String
-    @Environment(\.dismiss) private var dismiss
-    @State private var mode = 0
-    @State private var contactName = "New Contact"
-    @State private var invitation = ""
-    @State private var showingAdvanced = false
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 16) {
-                    Picker("Pairing", selection: $mode) {
-                        Text("Share Invitation").tag(0)
-                        Text("Enter Invitation").tag(1)
-                    }
-                    .pickerStyle(.segmented)
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Contact name").font(.headline)
-                        TextField("Name shown in your contact book", text: $contactName)
-                            .noctweaveInputField()
-                        Text("This name stays on your device. It is never published as an account or global identity.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .uniformGlassCard(cornerRadius: 20, padding: 16)
-
-                    if mode == 0 {
-                        if let link = model.pairingLink {
-                            let frames = QRCodeTransfer.encodeFrames(link, maxChunkSize: 600)
-                            VStack(spacing: 12) {
-                                AnimatedQRCodeView(frames: frames, size: 260, interval: 0.65)
-                                    .padding(14)
-                                    .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                                Text("Scan every frame, or copy the invitation.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Button("Copy Invitation") { copy(link) }
-                                    .glassButton(prominent: true)
-                            }
-                            .uniformGlassCard(cornerRadius: 22, padding: 18)
-                        } else {
-                            Button("Create One-Use Invitation") {
-                                model.startOfferingPairing(relayText: preferredRelay, pseudonym: contactName)
-                            }
-                            .glassButton(prominent: true)
-                            .disabled(model.isPairing || contactName.trimmingCharacters(in: .whitespaces).isEmpty)
-                        }
-                    } else {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Invitation code").font(.headline)
-                            TextEditor(text: $invitation)
-                                .font(.system(.caption, design: .monospaced))
-                                .frame(minHeight: 150)
-                                .noctweaveInputField()
-                            Button("Accept Invitation") {
-                                model.startAcceptingPairing(link: invitation, pseudonym: contactName)
-                            }
-                            .glassButton(prominent: true)
-                            .disabled(model.isPairing || invitation.isEmpty)
-                        }
-                        .uniformGlassCard(cornerRadius: 20, padding: 16)
-                    }
-
-                    DisclosureGroup("Advanced Relay Options", isExpanded: $showingAdvanced) {
-                        TextField("Relay URL", text: $preferredRelay)
-                            .textContentType(.URL)
-                            .noctweaveInputField()
-                            .padding(.top, 8)
-                    }
-                    .uniformGlassCard(cornerRadius: 18, padding: 14)
-
-                    if !model.pairingStatus.isEmpty {
-                        HStack(spacing: 10) {
-                            if model.isPairing { ProgressView().controlSize(.small) }
-                            Text(model.pairingStatus)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .uniformGlassCard(cornerRadius: 18, padding: 14)
-                    }
-                }
-                .padding(18)
-            }
-            .scrollContentBackground(.hidden)
-            .navigationTitle("Add Contact")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }.disabled(model.isPairing)
-                }
-            }
-        }
-        #if os(macOS)
-        .frame(minWidth: 600, minHeight: 600)
-        #endif
-        .noctweaveSheetBackground()
-        .noctweaveSheetPresentation()
-        .interactiveDismissDisabled(model.isPairing)
-    }
-
-    private func copy(_ value: String) {
-        #if os(macOS)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-        #else
-        UIPasteboard.general.string = value
-        #endif
     }
 }
 
