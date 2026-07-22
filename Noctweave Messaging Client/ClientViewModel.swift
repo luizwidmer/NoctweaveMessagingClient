@@ -30,6 +30,10 @@ private enum NoctweaveClientError: Error, LocalizedError {
     case relayRejected(String)
     case missingPairingFrame(UInt64)
     case unexpectedDirectPairingStage
+    case settingsAuthorizationRequired
+    case biometricAuthenticationUnavailable
+    case biometricAuthenticationFailed
+    case invalidAppLockPIN
     case unavailable
 
     var errorDescription: String? {
@@ -48,6 +52,14 @@ private enum NoctweaveClientError: Error, LocalizedError {
             return "The pairing exchange is missing transport frame \(sequence)."
         case .unexpectedDirectPairingStage:
             return "This direct pairing code is not the next expected stage. Use the code currently shown on the other device."
+        case .settingsAuthorizationRequired:
+            return "Authenticate with the current unlock method before changing app security."
+        case .biometricAuthenticationUnavailable:
+            return "Biometric authentication is unavailable on this device."
+        case .biometricAuthenticationFailed:
+            return "Biometric authentication did not complete."
+        case .invalidAppLockPIN:
+            return "Enter exactly six digits and confirm the same PIN."
         case .unavailable:
             return "The encrypted client state is not ready."
         }
@@ -128,6 +140,9 @@ final class ClientViewModel: ObservableObject {
     @Published private(set) var isLocked = false
     @Published private(set) var biometricStepPassed = false
     @Published private(set) var lockError: String?
+    @Published private(set) var isSavingSettings = false
+    @Published private(set) var settingsMessage: String?
+    @Published private(set) var settingsError: String?
 
     private let stateStore: ClientStateStore
     private var client: HeadlessMessagingClient?
@@ -140,6 +155,9 @@ final class ClientViewModel: ObservableObject {
     private var directTemporaryParticipant: PreparedContactParticipantV2?
     private var failedPINAttempts = 0
     private var pinLockedUntil: Date?
+    private var backgroundedAt: Date?
+    private var settingsAuthorizedUntil: Date?
+    private var settingsBiometricAuthorizedUntil: Date?
 
     init() {
         let support = FileManager.default.urls(
@@ -218,6 +236,38 @@ final class ClientViewModel: ObservableObject {
 
     var appLockMode: AppLockMode {
         state?.appLock.mode ?? .off
+    }
+
+    var appearanceSettings: AppearanceSettings {
+        state?.appearance ?? AppearanceSettings()
+    }
+
+    var privacySettings: PrivacySettings {
+        state?.privacy ?? PrivacySettings()
+    }
+
+    var appLockSettings: AppLockSettings {
+        state?.appLock ?? AppLockSettings()
+    }
+
+    var biometricDisplayName: String {
+        let context = LAContext()
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
+            return "Biometrics unavailable"
+        }
+        switch context.biometryType {
+        case .faceID: return "Face ID"
+        case .touchID: return "Touch ID"
+        case .opticID: return "Optic ID"
+        default: return "Biometrics"
+        }
+    }
+
+    var biometricsAvailable: Bool {
+        let context = LAContext()
+        var error: NSError?
+        return context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
     }
 
     var appLockMessage: String {
@@ -718,13 +768,26 @@ final class ClientViewModel: ObservableObject {
     }
 
     func lockNow() {
+        backgroundedAt = nil
         biometricStepPassed = false
         lockError = nil
         isLocked = true
     }
 
     func lockForBackgroundIfConfigured() {
-        if appLockMode != .off { lockNow() }
+        guard appLockMode != .off else { return }
+        if backgroundedAt == nil { backgroundedAt = Date() }
+        if appLockSettings.sessionTimeoutMinutes == 0 { lockNow() }
+    }
+
+    func resumeFromBackground() {
+        guard let backgroundedAt else { return }
+        self.backgroundedAt = nil
+        guard appLockMode != .off else { return }
+        let timeout = TimeInterval(appLockSettings.sessionTimeoutMinutes * 60)
+        if timeout == 0 || Date().timeIntervalSince(backgroundedAt) >= timeout {
+            lockNow()
+        }
     }
 
     func unlockWithBiometrics() async {
@@ -751,6 +814,7 @@ final class ClientViewModel: ObservableObject {
             if appLockMode == .biometricsAndPin {
                 biometricStepPassed = true
             } else {
+                backgroundedAt = nil
                 isLocked = false
             }
         } catch {
@@ -785,7 +849,125 @@ final class ClientViewModel: ObservableObject {
         failedPINAttempts = 0
         pinLockedUntil = nil
         lockError = nil
+        backgroundedAt = nil
         isLocked = false
+    }
+
+    func saveAppearance(_ palette: ThemePalette) async -> Bool {
+        await performSettingsSave(success: "Appearance updated.") { client in
+            try await client.updateAppearanceSettings(AppearanceSettings(theme: palette))
+        }
+    }
+
+    func savePrivacy(_ settings: PrivacySettings) async -> Bool {
+        await performSettingsSave(success: "Privacy preferences updated.") { client in
+            try await client.updatePrivacySettings(settings)
+        }
+    }
+
+    func authorizeAppLockChanges(pin: String? = nil) async -> Bool {
+        settingsError = nil
+        do {
+            switch appLockMode {
+            case .off:
+                break
+            case .biometrics:
+                try await evaluateBiometrics(
+                    reason: "Authorize changes to Noctweave app security"
+                )
+                settingsBiometricAuthorizedUntil = Date().addingTimeInterval(300)
+            case .pinOnly:
+                guard let pin, verifyConfiguredPIN(pin) else {
+                    throw NoctweaveClientError.invalidAppLockPIN
+                }
+            case .biometricsAndPin:
+                guard let pin, verifyConfiguredPIN(pin) else {
+                    throw NoctweaveClientError.invalidAppLockPIN
+                }
+                try await evaluateBiometrics(
+                    reason: "Authorize changes to Noctweave app security"
+                )
+                settingsBiometricAuthorizedUntil = Date().addingTimeInterval(300)
+            }
+            settingsAuthorizedUntil = Date().addingTimeInterval(300)
+            return true
+        } catch {
+            settingsError = describe(error)
+            return false
+        }
+    }
+
+    func cancelAppLockChanges() {
+        settingsAuthorizedUntil = nil
+        settingsBiometricAuthorizedUntil = nil
+        settingsError = nil
+    }
+
+    func saveAppLockConfiguration(
+        mode: AppLockMode,
+        sessionTimeoutMinutes: Int,
+        lockScreenMessage: String,
+        newPIN: String?
+    ) async -> Bool {
+        guard !isSavingSettings else { return false }
+        settingsError = nil
+        settingsMessage = nil
+        isSavingSettings = true
+        defer { isSavingSettings = false }
+
+        do {
+            if appLockMode != .off {
+                guard let settingsAuthorizedUntil, settingsAuthorizedUntil > Date() else {
+                    throw NoctweaveClientError.settingsAuthorizationRequired
+                }
+            }
+
+            if mode == .biometrics || mode == .biometricsAndPin {
+                if settingsBiometricAuthorizedUntil.map({ $0 > Date() }) != true {
+                    try await evaluateBiometrics(
+                        reason: "Enable biometric protection for Noctweave"
+                    )
+                }
+            }
+
+            let pinRecord: AppLockPINRecordV2?
+            if mode == .pinOnly || mode == .biometricsAndPin {
+                guard let newPIN else { throw NoctweaveClientError.invalidAppLockPIN }
+                pinRecord = try await Task.detached(priority: .userInitiated) {
+                    try AppLockPINV2.makeRecord(pin: newPIN)
+                }.value
+            } else {
+                pinRecord = nil
+            }
+
+            let candidate = AppLockSettings(
+                mode: mode,
+                sessionTimeoutMinutes: sessionTimeoutMinutes,
+                lockScreenMessage: lockScreenMessage.trimmingCharacters(in: .whitespacesAndNewlines),
+                pinSalt: pinRecord?.salt,
+                pinHash: pinRecord?.encodedHash,
+                actionPlans: appLockSettings.actionPlans
+            )
+            guard candidate.isStructurallyValid else {
+                throw NoctweaveClientError.invalidAppLockPIN
+            }
+            guard let client else { throw NoctweaveClientError.unavailable }
+            try await client.updateAppLockSettings(candidate)
+            try await refresh()
+            if mode == .off {
+                isLocked = false
+                biometricStepPassed = false
+            }
+            settingsMessage = mode == .off
+                ? "App lock disabled."
+                : "App security updated."
+            settingsAuthorizedUntil = nil
+            settingsBiometricAuthorizedUntil = nil
+            return true
+        } catch {
+            settingsError = describe(error)
+            return false
+        }
     }
 
     func displayText(for event: ConversationEvent) -> String {
@@ -1495,31 +1677,50 @@ final class ClientViewModel: ObservableObject {
         salt: Data,
         expected: Data
     ) -> Bool {
-        let digits = pin.filter(\.isNumber)
-        guard digits.count == 6,
-              expected.count == 41,
-              expected.prefix(5) == Data("NPIN2".utf8) else {
+        AppLockPINV2.verify(pin: pin, salt: salt, encodedHash: expected)
+    }
+
+    private func verifyConfiguredPIN(_ value: String) -> Bool {
+        guard let salt = appLockSettings.pinSalt,
+              let hash = appLockSettings.pinHash else {
             return false
         }
-        var rounds: UInt32 = 0
-        for byte in expected[5..<9] {
-            rounds = (rounds << 8) | UInt32(byte)
+        return matchesStructuredPIN(value, salt: salt, expected: hash)
+    }
+
+    private func evaluateBiometrics(reason: String) async throws {
+        let context = LAContext()
+        context.localizedFallbackTitle = ""
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
+            throw NoctweaveClientError.biometricAuthenticationUnavailable
         }
-        guard (10_000...500_000).contains(Int(rounds)) else { return false }
-        let key = SymmetricKey(data: Data(digits.utf8))
-        var block = Data(HMAC<SHA256>.authenticationCode(for: salt, using: key))
-        var digest = block
-        if rounds > 1 {
-            for _ in 2...rounds {
-                block = Data(HMAC<SHA256>.authenticationCode(for: block, using: key))
-                for index in digest.indices { digest[index] ^= block[index] }
-            }
+        let accepted = try await context.evaluatePolicy(
+            .deviceOwnerAuthenticationWithBiometrics,
+            localizedReason: reason
+        )
+        guard accepted else { throw NoctweaveClientError.biometricAuthenticationFailed }
+    }
+
+    private func performSettingsSave(
+        success: String,
+        operation: (HeadlessMessagingClient) async throws -> Void
+    ) async -> Bool {
+        guard !isSavingSettings else { return false }
+        isSavingSettings = true
+        settingsError = nil
+        settingsMessage = nil
+        defer { isSavingSettings = false }
+        do {
+            guard let client else { throw NoctweaveClientError.unavailable }
+            try await operation(client)
+            try await refresh()
+            settingsMessage = success
+            return true
+        } catch {
+            settingsError = describe(error)
+            return false
         }
-        let stored = Data(expected.suffix(32))
-        guard digest.count == stored.count else { return false }
-        var difference: UInt8 = 0
-        for index in digest.indices { difference |= digest[index] ^ stored[index] }
-        return difference == 0
     }
 
     private func describe(_ error: Error) -> String {

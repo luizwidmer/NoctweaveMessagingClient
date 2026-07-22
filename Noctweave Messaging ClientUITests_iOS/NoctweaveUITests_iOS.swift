@@ -78,6 +78,46 @@ final class NoctweaveUITests_iOS: XCTestCase {
         assertFitsScreen(app.buttons["Settings"])
     }
 
+    func testSettingsRowsNavigateAndAppSecuritySetupOpens() {
+        app.buttons["Settings"].tap()
+
+        let appearance = app.buttons["settings.appearance"]
+        XCTAssertTrue(appearance.waitForExistence(timeout: 3))
+        attachScreenshot(named: "iPhone Settings Root")
+        appearance.tap()
+        XCTAssertTrue(app.staticTexts["Choose a palette"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Make it yours"].exists)
+        app.buttons["Back"].tap()
+
+        app.buttons["settings.privacy"].tap()
+        XCTAssertTrue(app.staticTexts["Local protections with clear limits"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Hide when unfocused"].exists)
+        app.buttons["Back"].tap()
+
+        app.buttons["settings.appSecurity"].tap()
+        XCTAssertTrue(app.staticTexts["Control access to local conversations"].waitForExistence(timeout: 2))
+        app.buttons["settings.appSecurity.configure"].tap()
+        XCTAssertTrue(app.staticTexts["UNLOCK METHOD"].waitForExistence(timeout: 2))
+        attachScreenshot(named: "iPhone App Security Setup")
+        app.buttons["Close"].tap()
+        app.buttons["Back"].tap()
+
+        app.buttons["settings.storage"].tap()
+        XCTAssertTrue(app.staticTexts["Encrypted at rest"].waitForExistence(timeout: 2))
+        app.buttons["Back"].tap()
+
+        app.buttons["settings.legal"].tap()
+        XCTAssertTrue(app.staticTexts["Privacy Policy"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["Terms of Use"].exists)
+    }
+
+    private func attachScreenshot(named name: String) {
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     private func assertFitsScreen(
         _ element: XCUIElement,
         file: StaticString = #filePath,

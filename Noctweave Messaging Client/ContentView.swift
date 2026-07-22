@@ -43,6 +43,7 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
+                model.resumeFromBackground()
                 model.syncAll()
             } else {
                 model.lockForBackgroundIfConfigured()
@@ -120,7 +121,7 @@ private struct ClientLockView: View {
                 .frame(width: 72, height: 72)
                 Text("Noctweave is locked")
                     .font(.title2.weight(.bold))
-                Text(model.appLockMessage)
+                Text(lockMessage)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 380)
@@ -160,6 +161,22 @@ private struct ClientLockView: View {
             .padding(24)
         }
         .ignoresSafeArea()
+        .task {
+            guard model.appLockMode == .biometrics
+                    || (model.appLockMode == .biometricsAndPin && !model.biometricStepPassed) else {
+                return
+            }
+            await model.unlockWithBiometrics()
+        }
+    }
+
+    private var lockMessage: String {
+        switch model.appLockMode {
+        case .pinOnly, .biometricsAndPin:
+            model.appLockMessage
+        case .off, .biometrics:
+            "Authenticate to reveal your encrypted conversations."
+        }
     }
 
     private var pinEntry: some View {

@@ -71,6 +71,7 @@ private enum CompactConversationRoute: Hashable {
 struct MatureClientShell: View {
     @ObservedObject var model: ClientViewModel
     @ObservedObject private var pairingInbox = PairingInvitationInbox.shared
+    @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #elseif os(macOS)
@@ -147,10 +148,34 @@ struct MatureClientShell: View {
         #endif
         .onAppear {
             if pairingInbox.hasPendingItem { showingPairing = true }
+            #if os(macOS)
+            windowController.setBlockWindowCapture(model.privacySettings.macBlockWindowCapture)
+            #endif
         }
         .onChange(of: pairingInbox.revision) { _, _ in
             showingPairing = true
         }
+        #if os(macOS)
+        .onChange(of: model.privacySettings.macBlockWindowCapture) { _, blocked in
+            windowController.setBlockWindowCapture(blocked)
+        }
+        #endif
+        .overlay {
+            if shouldHideSensitiveContent {
+                MaturePrivacyShield()
+                    .transition(.opacity)
+                    .zIndex(100)
+            }
+        }
+    }
+
+    private var shouldHideSensitiveContent: Bool {
+        guard model.privacySettings.hideSensitiveWhenUnfocused else { return false }
+        #if os(macOS)
+        return !windowController.isActiveForControls
+        #else
+        return scenePhase != .active
+        #endif
     }
 
     @ViewBuilder
@@ -534,7 +559,7 @@ private struct MatureSidebarConversationRow: View {
     }
 }
 
-private struct MatureTopBar<Trailing: View>: View {
+struct MatureTopBar<Trailing: View>: View {
     let title: String
     let subtitle: String
     let backAction: (() -> Void)?
@@ -547,6 +572,7 @@ private struct MatureTopBar<Trailing: View>: View {
                     Image(systemName: "chevron.left")
                 }
                 .glassCircleButton(diameter: 38)
+                .accessibilityLabel("Back")
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -770,6 +796,7 @@ private struct MatureConversationView: View {
                 .glassCircleButton(diameter: 42)
                 TextField("Message", text: $model.draftMessage, axis: .vertical)
                     .lineLimit(1...2)
+                    .autocorrectionDisabled(model.privacySettings.secureTypingEnabled)
                     .noctweaveInputField(cornerRadius: 18)
                     .onSubmit { model.sendDraft() }
                     .disabled(relationship.localPolicy.consent != .accepted)
@@ -938,6 +965,7 @@ private struct MatureGroupConversationView: View {
             HStack(alignment: .bottom, spacing: 9) {
                 TextField("Message the group", text: $model.groupDraftMessage, axis: .vertical)
                     .lineLimit(1...2)
+                    .autocorrectionDisabled(model.privacySettings.secureTypingEnabled)
                     .noctweaveInputField(cornerRadius: 18)
                     .onSubmit { model.sendGroupDraft() }
                 Button { model.sendGroupDraft() } label: {
@@ -1293,100 +1321,6 @@ private struct MatureIdentityView: View {
                 .frame(maxWidth: .infinity)
             }
         }
-    }
-}
-
-private struct MatureSettingsView: View {
-    @ObservedObject var model: ClientViewModel
-    @Binding var selectedPalette: String
-    let onLock: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            MatureTopBar(title: "Settings", subtitle: "Appearance, privacy, and app security", backAction: nil) {
-                EmptyView()
-            }
-            ScrollView {
-                VStack(spacing: 12) {
-                    settingsCard(
-                        icon: "paintpalette",
-                        title: "Appearance",
-                        subtitle: ThemePalette(rawValue: selectedPalette)?.displayName ?? "Noir"
-                    ) {
-                        Menu {
-                            ForEach([ThemePalette.noir, .noirBright, .glacierDark, .glacier, .forestDark, .forest, .prismDark, .prism, .weaveDark, .weave], id: \.self) { palette in
-                                Button(palette.displayName) { selectedPalette = palette.rawValue }
-                            }
-                        } label: {
-                            Text("Choose")
-                        }
-                        .glassButton(compact: true)
-                    }
-
-                    settingsCard(
-                        icon: "hand.raised.fill",
-                        title: "Privacy",
-                        subtitle: "Secure typing, protected previews, and local-only preferences"
-                    ) {
-                        Image(systemName: "chevron.right").foregroundStyle(.tertiary)
-                    }
-
-                    settingsCard(
-                        icon: "lock.shield.fill",
-                        title: "App Security",
-                        subtitle: model.appLockMode == .off ? "App lock is off" : model.appLockMode.displayName
-                    ) {
-                        Button("Lock Now", action: onLock)
-                            .glassButton(compact: true)
-                    }
-
-                    settingsCard(
-                        icon: "externaldrive.fill.badge.checkmark",
-                        title: "Storage Protection",
-                        subtitle: "Encrypted local state"
-                    ) {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                    }
-
-                    settingsCard(
-                        icon: "doc.text",
-                        title: "Legal & About",
-                        subtitle: "Privacy policy, terms, licenses, and version"
-                    ) {
-                        Image(systemName: "chevron.right").foregroundStyle(.tertiary)
-                    }
-                }
-                .padding(16)
-                .frame(maxWidth: 820)
-                .frame(maxWidth: .infinity)
-            }
-        }
-    }
-
-    private func settingsCard<Trailing: View>(
-        icon: String,
-        title: String,
-        subtitle: String,
-        @ViewBuilder trailing: () -> Trailing
-    ) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(.tint)
-                .frame(width: 44, height: 44)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.headline)
-                Text(subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-            Spacer(minLength: 8)
-            trailing()
-        }
-        .padding(16)
-        .uniformGlassCard(cornerRadius: 21, padding: 0, minHeight: 78)
     }
 }
 

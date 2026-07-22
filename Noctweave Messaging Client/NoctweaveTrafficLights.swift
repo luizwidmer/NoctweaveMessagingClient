@@ -14,9 +14,14 @@ final class AppWindowController: ObservableObject {
 
     weak var window: NSWindow? {
         didSet {
-            // Also triggers observers so focus state updates immediately.
-            attachFocusObservers()
-            applySharingType()
+            guard window !== oldValue else { return }
+            // NSViewRepresentable can assign the window while SwiftUI is updating.
+            // Defer published focus changes until that transaction has completed.
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                self?.attachFocusObservers()
+                self?.applySharingType()
+            }
         }
     }
 
@@ -44,7 +49,12 @@ final class AppWindowController: ObservableObject {
     }
 
     func setBlockWindowCapture(_ blocked: Bool) {
-        isWindowCaptureBlocked = isUITesting ? false : blocked
+        let resolved = isUITesting ? false : blocked
+        guard resolved != isWindowCaptureBlocked else {
+            applySharingType()
+            return
+        }
+        isWindowCaptureBlocked = resolved
         applySharingType()
     }
 
