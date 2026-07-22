@@ -114,6 +114,23 @@ private final class ClientAttachmentStore {
         return opened
     }
 
+    func eraseAllLocalAttachments() throws {
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        )
+        for entry in entries {
+            let values = try entry.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            if values.isRegularFile == true, values.isSymbolicLink != true {
+                bestEffortOverwrite(entry)
+            }
+            try FileManager.default.removeItem(at: entry)
+        }
+        try FileManager.default.removeItem(at: directory)
+    }
+
     private func attachmentURL(fileName: String) throws -> URL {
         let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed == (trimmed as NSString).lastPathComponent,
@@ -129,6 +146,28 @@ private final class ClientAttachmentStore {
             service: "com.noctweave.securestorage",
             account: "attachment-vault-v1"
         )
+    }
+
+    private func bestEffortOverwrite(_ url: URL) {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let byteCount = (attributes[.size] as? NSNumber)?.uint64Value,
+              byteCount > 0,
+              let handle = try? FileHandle(forWritingTo: url) else {
+            return
+        }
+        defer { try? handle.close() }
+        let chunkSize = 64 * 1_024
+        let zeroChunk = Data(repeating: 0, count: chunkSize)
+        var remaining = byteCount
+        try? handle.seek(toOffset: 0)
+        while remaining > 0 {
+            let count = min(UInt64(chunkSize), remaining)
+            try? handle.write(contentsOf: count == UInt64(chunkSize)
+                ? zeroChunk
+                : Data(repeating: 0, count: Int(count)))
+            remaining -= count
+        }
+        try? handle.synchronize()
     }
 }
 
@@ -716,6 +755,67 @@ final class ClientViewModel: ObservableObject {
         } catch {
             let message = describe(error)
             lastError = message
+            bootState = .failed(message)
+        }
+    }
+
+    /// User-confirmed recovery for an incompatible pre-release database or a
+    /// rollback alert the user has independently investigated. The Core store
+    /// advances its rollback anchor to an erased tombstone before any new
+    /// state is created, so an older encrypted database cannot be replayed
+    /// after reset.
+    func resetLocalApplication() async {
+        bootState = .loading
+        lastError = nil
+        statusMessage = "Erasing local encrypted state…"
+        pairingTask?.cancel()
+        pairingRelayCheckTask?.cancel()
+        onboardingRelayCheckTask?.cancel()
+        relayManagementTask?.cancel()
+
+        do {
+            try await stateStore.eraseAllLocalState()
+            try attachmentStore.eraseAllLocalAttachments()
+            try? OpaqueRoutePrefetchBridge.eraseAllLocalState()
+
+            if let bundleIdentifier = Bundle.main.bundleIdentifier {
+                UserDefaults.standard.removePersistentDomain(forName: bundleIdentifier)
+            }
+
+            client = nil
+            state = nil
+            selectedRelationshipID = nil
+            selectedGroupID = nil
+            draftMessage = ""
+            groupDraftMessage = ""
+            archivedPersonaIDs = []
+            receivedAttachmentFileNames = [:]
+            attachmentDownloadsInFlight.removeAll()
+            pairingLink = nil
+            directPairingPayload = nil
+            directPairingCanFinish = false
+            groupExchangeLink = nil
+            groupExchangeStatus = ""
+            groupMaintenanceStatus = [:]
+            onboardingLegalAccepted = false
+            onboardingPersonaNameSaved = false
+            onboardingPrivacyCompleted = false
+            onboardingStorageProtectionAcknowledged = false
+            isLocked = false
+            biometricStepPassed = false
+            lockError = nil
+            settingsAuthorizedUntil = nil
+            settingsBiometricAuthorizedUntil = nil
+            settingsMessage = nil
+            settingsError = nil
+            isWorking = false
+            _ = PairingInvitationInbox.shared.takePendingItem()
+
+            await open()
+        } catch {
+            let message = describe(error)
+            lastError = message
+            statusMessage = "Local reset failed."
             bootState = .failed(message)
         }
     }

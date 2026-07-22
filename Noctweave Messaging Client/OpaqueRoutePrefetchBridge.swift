@@ -101,6 +101,26 @@ enum OpaqueRoutePrefetchBridge {
         }
     }
 
+    static func eraseAllLocalState() throws {
+        if let directory = try? sharedDirectory(),
+           FileManager.default.fileExists(atPath: directory.path) {
+            try FileManager.default.removeItem(at: directory)
+        }
+        UserDefaults(suiteName: appGroupIdentifier)?.removeObject(forKey: snapshotKey)
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
+            kSecAttrAccessGroup as String: keychainAccessGroup
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw PrefetchBridgeError.keychainFailure(status)
+        }
+    }
+
     private static func sharedDirectory() throws -> URL {
         guard let root = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: appGroupIdentifier

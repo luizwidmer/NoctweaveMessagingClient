@@ -118,13 +118,14 @@ final class NoctweaveUITests_iOS: XCTestCase {
         app.launch()
 
         XCTAssertTrue(app.staticTexts["Welcome to Noctweave"].waitForExistence(timeout: 5))
+        assertOnboardingIsHorizontallyCentered()
         let legalContinue = app.buttons["onboarding.legal.continue"]
         XCTAssertTrue(legalContinue.exists)
         XCTAssertFalse(legalContinue.isEnabled)
 
         app.switches["onboarding.acceptPrivacy"].tap()
         app.switches["onboarding.acceptTerms"].tap()
-        XCTAssertTrue(legalContinue.isEnabled)
+        XCTAssertTrue(waitUntilEnabled(legalContinue))
         legalContinue.tap()
 
         XCTAssertTrue(app.staticTexts["Create your first persona"].waitForExistence(timeout: 3))
@@ -134,6 +135,23 @@ final class NoctweaveUITests_iOS: XCTestCase {
         personaName.tap()
         personaName.typeText("Fresh Test")
         XCTAssertTrue(app.buttons["onboarding.persona.continue"].isEnabled)
+    }
+
+    private func assertOnboardingIsHorizontallyCentered(
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let container = app.otherElements["onboarding.container"]
+        XCTAssertTrue(container.waitForExistence(timeout: 3), file: file, line: line)
+        XCTAssertEqual(container.frame.midX, app.frame.midX, accuracy: 2, file: file, line: line)
+    }
+
+    private func waitUntilEnabled(_ element: XCUIElement, timeout: TimeInterval = 2) -> Bool {
+        let expectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "enabled == true"),
+            object: element
+        )
+        return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
     }
 
     private func attachScreenshot(named name: String) {

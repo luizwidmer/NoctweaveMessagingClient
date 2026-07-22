@@ -77,7 +77,7 @@ struct MatureClientShell: View {
     #if os(iOS)
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #elseif os(macOS)
-    @StateObject private var windowController = AppWindowController()
+    @EnvironmentObject private var windowController: AppWindowController
     #endif
 
     @AppStorage("noctweave.appearance.palette") private var paletteRaw = ThemePalette.noir.rawValue
@@ -156,9 +156,6 @@ struct MatureClientShell: View {
         } message: {
             Text("All contacts and groups inside this identity are replaced without a continuity link. This cannot be undone.")
         }
-        #if os(macOS)
-        .environmentObject(windowController)
-        #endif
         .onAppear {
             syncPreferredRelayFromModel()
             if pairingInbox.hasPendingItem { showingPairing = true }
@@ -246,17 +243,6 @@ struct MatureClientShell: View {
             destinationView(compact: false)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(MatureWindowConfigurator())
-        .overlay {
-            WindowCaptureView(controller: windowController)
-                .frame(width: 0, height: 0)
-        }
-        .overlay(alignment: .topLeading) {
-            NoctweaveTrafficLights()
-                .padding(.leading, 14)
-                .padding(.top, 12)
-        }
-        .ignoresSafeArea(.container, edges: .top)
     }
 
     private var macSidebar: some View {
@@ -2730,32 +2716,4 @@ private struct MatureSideRail: View {
         .background(.ultraThinMaterial)
     }
 }
-#endif
-
-#if os(macOS)
-private struct MatureWindowConfigurator: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        DispatchQueue.main.async { configure(view.window) }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { configure(nsView.window) }
-    }
-
-    private func configure(_ window: NSWindow?) {
-        guard let window else { return }
-        window.title = ""
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.toolbar = nil
-        window.styleMask.insert(.fullSizeContentView)
-        window.isMovableByWindowBackground = true
-        window.standardWindowButton(.closeButton)?.isHidden = true
-        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        window.standardWindowButton(.zoomButton)?.isHidden = true
-    }
-}
-
 #endif

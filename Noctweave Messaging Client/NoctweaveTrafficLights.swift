@@ -151,6 +151,40 @@ struct WindowCaptureView: NSViewRepresentable {
     }
 }
 
+/// Applies one window-chrome policy for every client surface, including boot,
+/// lock, onboarding, and the mature shell. SwiftUI's hidden-title-bar style
+/// still creates native traffic lights, so those controls must be hidden on the
+/// actual NSWindow before the custom controls are shown.
+struct NoctweaveWindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        ConfigurationView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? ConfigurationView)?.configureWindow()
+    }
+
+    private final class ConfigurationView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            configureWindow()
+        }
+
+        func configureWindow() {
+            guard let window else { return }
+            window.title = ""
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.toolbar = nil
+            window.styleMask.insert(.fullSizeContentView)
+            window.isMovableByWindowBackground = true
+            window.standardWindowButton(.closeButton)?.isHidden = true
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window.standardWindowButton(.zoomButton)?.isHidden = true
+        }
+    }
+}
+
 private enum TrafficLightKind {
     case close
     case minimize
@@ -169,6 +203,14 @@ private enum TrafficLightKind {
         case .close: return "xmark"
         case .minimize: return "minus"
         case .zoom: return "plus"
+        }
+    }
+
+    var accessibilityIdentifier: String {
+        switch self {
+        case .close: return "window.close"
+        case .minimize: return "window.minimize"
+        case .zoom: return "window.zoom"
         }
     }
 }
@@ -225,6 +267,7 @@ struct NoctweaveTrafficLights: View {
             hovering = isHovering ? kind : (hovering == kind ? nil : hovering)
         }
         .accessibilityLabel(accessibilityLabel(for: kind))
+        .accessibilityIdentifier(kind.accessibilityIdentifier)
     }
 
     private func accessibilityLabel(for kind: TrafficLightKind) -> String {

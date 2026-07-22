@@ -4,6 +4,10 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var model: ClientViewModel
     @Environment(\.scenePhase) private var scenePhase
+    @State private var showingLocalResetConfirmation = false
+    #if os(macOS)
+    @StateObject private var windowController = AppWindowController()
+    #endif
 
     var body: some View {
         Group {
@@ -35,6 +39,15 @@ struct ContentView: View {
                             .multilineTextAlignment(.center)
                         Button("Try Again") { Task { await model.open() } }
                             .glassButton(prominent: true)
+                        Button("Reset Local App Data…", role: .destructive) {
+                            showingLocalResetConfirmation = true
+                        }
+                        .glassButton()
+                        .accessibilityIdentifier("boot.resetLocalData")
+                        Text("Reset is the recovery path for an incompatible pre-release database or a rollback alert you have independently verified. It permanently removes local identities, contacts, messages, groups, and attachments from this device.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
                     }
                 case .ready:
                     if model.isOnboardingComplete {
@@ -44,6 +57,34 @@ struct ContentView: View {
                     }
                 }
             }
+        }
+        #if os(macOS)
+        .environmentObject(windowController)
+        .background(NoctweaveWindowConfigurator())
+        .overlay {
+            WindowCaptureView(controller: windowController)
+                .frame(width: 0, height: 0)
+        }
+        .overlay(alignment: .topLeading) {
+            NoctweaveTrafficLights()
+                .environmentObject(windowController)
+                .padding(.leading, 14)
+                .padding(.top, 12)
+                .zIndex(1_000)
+        }
+        .ignoresSafeArea(.container, edges: .top)
+        #endif
+        .confirmationDialog(
+            "Reset all local Noctweave data?",
+            isPresented: $showingLocalResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Local App Data", role: .destructive) {
+                Task { await model.resetLocalApplication() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently erases local identities, contacts, messages, groups, attachments, and app settings. It cannot be undone and starts onboarding again.")
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
@@ -92,8 +133,8 @@ struct ContentView: View {
             GlassBackground()
             VStack(spacing: 14, content: content)
                 .padding(28)
-                .frame(maxWidth: 430)
                 .uniformGlassCard(cornerRadius: 24, padding: 22)
+                .frame(maxWidth: 430)
                 .padding(24)
         }
         .ignoresSafeArea()
@@ -159,8 +200,8 @@ private struct ClientLockView: View {
                 }
             }
             .padding(28)
-            .frame(maxWidth: 460)
             .uniformGlassCard(cornerRadius: 26, padding: 22)
+            .frame(maxWidth: 460)
             .padding(24)
         }
         .ignoresSafeArea()
@@ -225,8 +266,15 @@ private struct ClientOnboardingView: View {
                     stepContent
                 }
                 .padding(24)
-                .frame(maxWidth: 680)
                 .uniformGlassCard(cornerRadius: 30, padding: 0)
+                .frame(maxWidth: 680)
+                .background {
+                    Color.clear
+                        .accessibilityElement()
+                        .accessibilityIdentifier("onboarding.container")
+                        .allowsHitTesting(false)
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.horizontal, 18)
                 .padding(.vertical, 28)
             }
