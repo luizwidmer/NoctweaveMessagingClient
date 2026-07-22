@@ -18,7 +18,7 @@ final class NoctweaveUITests_iOS: XCTestCase {
     }
 
     func testPhoneShellRestoresStableProductTabs() {
-        XCTAssertTrue(app.staticTexts["Welcome to Noctyra"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Welcome to Noctweave"].waitForExistence(timeout: 5))
         for title in ["Chats", "Contacts", "Code", "Relays", "Identity", "Settings"] {
             XCTAssertTrue(app.buttons[title].exists, "Missing bottom navigation item: \(title)")
             assertFitsScreen(app.buttons[title])

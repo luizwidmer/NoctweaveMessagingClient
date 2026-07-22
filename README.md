@@ -43,10 +43,6 @@ xcodebuild \
   build
 ```
 
-## App identity migration
-
-This project replaces the former Noctyra product identity. Its product names, schemes, bundle identifiers, app-group identifier, local storage labels, and authenticated widget configuration label now use Noctweave. Existing Noctyra installations and their local data are not migrated automatically.
-
 ## License
 
 This project is free software licensed under the GNU Affero General Public License, version 3 or, at your option, any later version (`AGPL-3.0-or-later`). See [LICENSE](LICENSE).

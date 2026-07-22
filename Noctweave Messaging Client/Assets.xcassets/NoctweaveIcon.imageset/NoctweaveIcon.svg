@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Noctweave app icon</title>
+  <desc id="desc">The Offset Veil mark on a plum-black rounded square.</desc>
+  <defs>
+    <linearGradient id="surface" x1="28" y1="20" x2="228" y2="238" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2D1C23"/>
+      <stop offset="1" stop-color="#1B1217"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="58" fill="url(#surface)" stroke="#56313A" stroke-width="3"/>
+  <g transform="translate(32 32) scale(.75)">
+    <path d="M96 32H224V176L140 134V110L96 88Z" fill="#FAF3EA"/>
+    <path d="M32 80L116 122V146L160 168V224H32Z" fill="#C96A61"/>
+  </g>
+</svg>

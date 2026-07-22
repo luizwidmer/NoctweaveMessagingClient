@@ -118,7 +118,7 @@ private struct ClientLockView: View {
                         .foregroundStyle(theme.accent)
                 }
                 .frame(width: 72, height: 72)
-                Text("Noctyra is locked")
+                Text("Noctweave is locked")
                     .font(.title2.weight(.bold))
                 Text(model.appLockMessage)
                     .foregroundStyle(.secondary)

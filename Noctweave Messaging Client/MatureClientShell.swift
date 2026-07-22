@@ -76,9 +76,9 @@ struct MatureClientShell: View {
     @StateObject private var windowController = AppWindowController()
     #endif
 
-    @AppStorage("noctyra.appearance.palette") private var paletteRaw = ThemePalette.noir.rawValue
-    @AppStorage("noctyra.preferredRelay") private var preferredRelay = "https://noctyratest.luizwidmer.com"
-    @AppStorage("noctyra.groupNames") private var groupNamesJSON = "{}"
+    @AppStorage("noctweave.appearance.palette") private var paletteRaw = ThemePalette.noir.rawValue
+    @AppStorage("noctweave.preferredRelay") private var preferredRelay = "https://noctyratest.luizwidmer.com"
+    @AppStorage("noctweave.groupNames") private var groupNamesJSON = "{}"
     @State private var destination: ClientDestination = .chats
     @State private var compactRoute: CompactConversationRoute?
     @State private var showingPairing = false
@@ -188,12 +188,12 @@ struct MatureClientShell: View {
     private var macSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 11) {
-                Image("Rhombus")
+                Image("NoctweaveIcon")
                     .resizable()
                     .scaledToFit()
                     .frame(width: 36, height: 36)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Noctyra")
+                    Text("Noctweave")
                         .font(.system(size: 17, weight: .semibold, design: .rounded))
                     Text("Post-quantum chat")
                         .font(.caption)
@@ -588,11 +588,11 @@ private struct MatureChatsHome: View {
 
             if model.relationships.isEmpty && model.groups.isEmpty {
                 VStack(spacing: 16) {
-                    Image("Rhombus")
+                    Image("NoctweaveIcon")
                         .resizable()
                         .scaledToFit()
                         .frame(width: compact ? 96 : 128, height: compact ? 96 : 128)
-                    Text("Welcome to Noctyra")
+                    Text("Welcome to Noctweave")
                         .font(.system(size: compact ? 26 : 32, weight: .bold, design: .rounded))
                     Text("Start with a contact invitation. Every conversation receives its own post-quantum identity and encryption state.")
                         .font(.subheadline)
@@ -1056,13 +1056,13 @@ private struct MatureMyCodeView: View {
                         .uniformGlassCard(cornerRadius: 26, padding: 20)
                     } else {
                         VStack(spacing: 15) {
-                            Image("Rhombus")
+                            Image("NoctweaveIcon")
                                 .resizable()
                                 .scaledToFit()
                                 .frame(width: 132, height: 132)
                             Text("Nothing permanent to expose")
                                 .font(.title2.weight(.bold))
-                            Text("Noctyra creates a fresh invitation for each person. Your identity is never published as a global code.")
+                            Text("Noctweave creates a fresh invitation for each person. Your identity is never published as a global code.")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center)
@@ -1236,7 +1236,7 @@ private struct MatureIdentityView: View {
                         .font(.headline)
                     Button(action: onDetails) {
                         HStack(spacing: 15) {
-                            Image("Rhombus")
+                            Image("NoctweaveIcon")
                                 .resizable()
                                 .scaledToFit()
                                 .frame(width: 54, height: 54)
@@ -1759,7 +1759,7 @@ private struct MatureGroupAdmissionSheet: View {
         case 0:
             "Create a one-use access request using the group ID supplied by a member."
         case 1:
-            "Paste a member's request. Noctyra will prepare credentials that work only inside this group."
+            "Paste a member's request. Noctweave will prepare credentials that work only inside this group."
         default:
             "Paste the invitation package you received to verify it and enter the group."
         }
@@ -1921,7 +1921,7 @@ private struct MatureSideRail: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            Image("Rhombus")
+            Image("NoctweaveIcon")
                 .resizable()
                 .scaledToFit()
                 .frame(width: 44, height: 44)

@@ -17,7 +17,7 @@ final class NoctweaveUITests: XCTestCase {
     }
 
     func testMatureShellRestoresProductNavigation() {
-        XCTAssertTrue(app.staticTexts["Noctyra"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Noctweave"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Post-quantum chat"].exists)
         XCTAssertTrue(app.buttons["Contact Book"].exists)
         XCTAssertTrue(app.buttons["My Code"].exists)
