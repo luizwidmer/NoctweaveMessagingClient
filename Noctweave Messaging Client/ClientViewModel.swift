@@ -4,7 +4,8 @@ import Combine
 import Foundation
 import ImageIO
 import LocalAuthentication
-import NoctweaveCore
+@_spi(Testing) import NoctweaveCore
+import OSLog
 import Security
 import UserNotifications
 import UniformTypeIdentifiers
@@ -501,6 +502,12 @@ private struct NoctweavePairingLinkV1: Codable {
 
 @MainActor
 final class ClientViewModel: ObservableObject {
+    #if DEBUG
+    private static let transportLogger = Logger(
+        subsystem: "org.noctweave.client",
+        category: "Transport"
+    )
+    #endif
     @Published private(set) var bootState: ClientBootState = .loading
     @Published private(set) var state: ClientState?
     @Published var selectedRelationshipID: UUID?
@@ -556,6 +563,7 @@ final class ClientViewModel: ObservableObject {
     private var biometricRequestInFlight = false
     private var onboardingRelayCheckTask: Task<Void, Never>?
     private var relayManagementTask: Task<Void, Never>?
+    private var queuedOperationTask: Task<Void, Never>?
     private var attachmentDownloadsInFlight = Set<UUID>()
     private let notificationManager = ClientNotificationManager()
     private let onboardingStorageKey = "noctweave.onboarding.storage-protection-ack.v1"
@@ -582,12 +590,16 @@ final class ClientViewModel: ObservableObject {
             ? testRoot.appendingPathComponent("client-state-v1.nwstate")
             : support.appendingPathComponent("client-state-v1.nwstate")
         if isUITest {
-            try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent())
+            if ProcessInfo.processInfo.arguments.contains("UI_TESTING_RESET_STATE") {
+                try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent())
+            }
             stateStore = ClientStateStore(
                 fileURL: stateURL,
                 protection: .encrypted,
                 encryptionKey: SymmetricKey(data: Data(repeating: 0x4E, count: 32)),
-                rollbackAnchorStore: VolatileClientStateRollbackAnchorStore(),
+                rollbackAnchorStore: UITestFileRollbackAnchorStore(
+                    fileURL: testRoot.appendingPathComponent("rollback-anchor-v1.json")
+                ),
                 storageScopeIdentifier: "org.noctweave.apple-client.primary"
             )
         } else {
@@ -602,7 +614,17 @@ final class ClientViewModel: ObservableObject {
         )
         onboardingStorageProtectionAcknowledged = isUITest
             || UserDefaults.standard.bool(forKey: onboardingStorageKey)
-        Task { await open() }
+        Task {
+            if isUITest {
+                // UI-test fixtures created before the durable file anchor used
+                // a process-local anchor. Authenticate and adopt that one
+                // legacy ciphertext once instead of presenting a false
+                // rollback warning or deleting the fixture after a rebuild.
+                try? await stateStore
+                    .adoptUnanchoredEncryptedStateForTesting()
+            }
+            await open()
+        }
     }
 
     var activePersona: PersonaProfileV1? {
@@ -888,7 +910,7 @@ final class ClientViewModel: ObservableObject {
         // onboarding flag. The widget only stages sealed packets; foreground
         // sync remains authoritative because current Core has no public
         // staged-batch import method yet.
-        if snapshot.hasCompletedOnboarding {
+        if snapshot.hasCompletedOnboarding && !isUITest {
             try OpaqueRoutePrefetchBridge.update(from: snapshot)
         }
         #endif
@@ -1250,7 +1272,9 @@ final class ClientViewModel: ObservableObject {
     }
 
     func syncAll() {
-        guard bootState == .ready, isOnboardingComplete, !isLocked else { return }
+        // Automatic synchronization is best effort. It must never occupy the
+        // single queued-action slot ahead of an explicit user operation.
+        guard bootState == .ready, isOnboardingComplete, !isLocked, !isWorking else { return }
         runOperation(label: "Maintaining routes and synchronizing…") { client in
             var errors: [Error] = []
             do {
@@ -1277,6 +1301,11 @@ final class ClientViewModel: ObservableObject {
                         relationshipID: relationshipID
                     )
                 } catch {
+                    #if DEBUG
+                    Self.transportLogger.error(
+                        "Relationship outbound maintenance failed: \(String(describing: error), privacy: .public)"
+                    )
+                    #endif
                     errors.append(error)
                 }
                 do {
@@ -1285,7 +1314,20 @@ final class ClientViewModel: ObservableObject {
                         received += batches.reduce(0) { $0 + $1.receivedEvents.count }
                         if !batches.contains(where: \.hasMore) { break }
                     }
+                    #if DEBUG
+                    let synchronized = try await client.relationship(relationshipID)
+                    if let quarantine = synchronized.transportQuarantine.last {
+                        Self.transportLogger.error(
+                            "Latest relationship transport quarantine: \(quarantine.reason.rawValue, privacy: .public)"
+                        )
+                    }
+                    #endif
                 } catch {
+                    #if DEBUG
+                    Self.transportLogger.error(
+                        "Relationship inbound synchronization failed: \(String(describing: error), privacy: .public)"
+                    )
+                    #endif
                     errors.append(error)
                 }
                 if self.privacySettings.autoDownloadAttachments {
@@ -1419,27 +1461,32 @@ final class ClientViewModel: ObservableObject {
         groupExchangeLink = nil
         groupExchangeStatus = "Preparing a fresh group-only credential and route…"
         runOperation(label: "Preparing one-use group admission…") { client in
-            guard let groupID = UUID(
-                uuidString: groupIDText.trimmingCharacters(in: .whitespacesAndNewlines)
-            ) else {
-                throw NoctweaveClientError.invalidGroupIdentifier
+            do {
+                guard let groupID = UUID(
+                    uuidString: groupIDText.trimmingCharacters(in: .whitespacesAndNewlines)
+                ) else {
+                    throw NoctweaveClientError.invalidGroupIdentifier
+                }
+                let relay = try RelayEndpointParser.parse(relayText)
+                let bindingDigest = Self.freshGroupInvitationBinding(groupID: groupID)
+                let prepared = try await client.prepareGroupAdmission(
+                    groupID: groupID,
+                    invitationBindingDigest: bindingDigest,
+                    relay: relay,
+                    expiresAt: Date().addingTimeInterval(12 * 60 * 60)
+                )
+                _ = try await client.resumeGroupAdmissionRoute(admissionID: prepared.admissionID)
+                let pending = try Self.pendingAdmission(
+                    prepared.admissionID,
+                    in: await client.activePersona()
+                )
+                let request = try Self.groupAdmissionRequest(from: pending)
+                self.groupExchangeLink = try request.encoded()
+                self.groupExchangeStatus = "Admission \(prepared.admissionID.uuidString) is saved. Share this one-use request only through an authenticated encrypted channel."
+            } catch {
+                self.groupExchangeStatus = "Could not create the access request: \(self.describe(error))"
+                throw error
             }
-            let relay = try RelayEndpointParser.parse(relayText)
-            let bindingDigest = Self.freshGroupInvitationBinding(groupID: groupID)
-            let prepared = try await client.prepareGroupAdmission(
-                groupID: groupID,
-                invitationBindingDigest: bindingDigest,
-                relay: relay,
-                expiresAt: Date().addingTimeInterval(12 * 60 * 60)
-            )
-            _ = try await client.resumeGroupAdmissionRoute(admissionID: prepared.admissionID)
-            let pending = try Self.pendingAdmission(
-                prepared.admissionID,
-                in: await client.activePersona()
-            )
-            let request = try Self.groupAdmissionRequest(from: pending)
-            self.groupExchangeLink = try request.encoded()
-            self.groupExchangeStatus = "Admission \(prepared.admissionID.uuidString) is saved. Share this one-use request only through an authenticated encrypted channel."
         }
     }
 
@@ -1523,11 +1570,45 @@ final class ClientViewModel: ObservableObject {
             guard progress.completed else {
                 throw NoctweaveGroupExchangeLinkError.invalidLink
             }
+
+            var maintenanceNote = "Your group route is published."
+            do {
+                let report = try await client.maintainGroup(
+                    groupID: response.groupID
+                )
+                self.groupMaintenanceStatus[response.groupID] =
+                    report.requiresFollowUp
+                        ? "The group is joined; queued route publication will retry automatically."
+                        : "Group routes and pending transport are healthy."
+                maintenanceNote = report.requiresFollowUp
+                    ? "Your route is queued for automatic retry."
+                    : "Your group route is published."
+            } catch {
+                self.groupMaintenanceStatus[response.groupID] =
+                    "The group is joined; route maintenance will retry automatically."
+                maintenanceNote =
+                    "Route publication will retry automatically when the relay is available."
+            }
+
+            do {
+                for _ in 0..<8 {
+                    let batches = try await client.syncGroup(
+                        groupID: response.groupID
+                    )
+                    if !batches.contains(where: \.hasMore) { break }
+                }
+            } catch {
+                // The durable Welcome has already been consumed. Background
+                // sync owns transient relay recovery from this point forward.
+            }
+
             self.selectedRelationshipID = nil
             self.selectedGroupID = response.groupID
             self.groupExchangeLink = nil
-            self.groupExchangeStatus = "The one-use admission was consumed. This group now has an independent group-scoped runtime."
-            self.statusMessage = "Joined group \(response.groupID.uuidString.prefix(8))."
+            self.groupExchangeStatus =
+                "The one-use admission was consumed. This group now has an independent group-scoped runtime. \(maintenanceNote)"
+            self.statusMessage =
+                "Joined group \(response.groupID.uuidString.prefix(8)). \(maintenanceNote)"
         }
     }
 
@@ -2368,7 +2449,24 @@ final class ClientViewModel: ObservableObject {
         label: String,
         _ operation: @escaping (HeadlessMessagingClient) async throws -> Void
     ) {
-        guard !isWorking else { return }
+        guard !isWorking else {
+            queuedOperationTask?.cancel()
+            statusMessage = "\(label) Waiting for the current operation to finish."
+            queuedOperationTask = Task { [weak self] in
+                guard let self else { return }
+                while self.isWorking {
+                    do {
+                        try await Task.sleep(for: .milliseconds(100))
+                    } catch {
+                        return
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                self.queuedOperationTask = nil
+                self.runOperation(label: label, operation)
+            }
+            return
+        }
         isWorking = true
         statusMessage = label
         lastError = nil
@@ -2787,7 +2885,11 @@ final class ClientViewModel: ObservableObject {
                     transportSequence: 2
                 )
             )))
-            await deleteTemporaryLanes(relay: relay, adapter: adapter)
+            // The offerer has published the terminal confirmation but has no
+            // authenticated receipt proving that the responder fetched it.
+            // Keep the expiring one-use lanes until their short relay lease
+            // ends; eager deletion races polling responders and strands an
+            // otherwise completed relationship.
             cleanup = nil
             pairingLink = nil
             pairingStatus = "A fresh unlinkable relationship is ready."
@@ -3306,5 +3408,57 @@ final class ClientViewModel: ObservableObject {
         guard let status else { return false }
         return status == errSecInteractionNotAllowed
             || status == errSecNotAvailable
+    }
+}
+
+/// UI-test state intentionally survives app-process restarts so simulator and
+/// desktop interoperability scenarios can exercise durable recovery. This
+/// file-backed anchor is scoped to the disposable UI-test directory and is
+/// deleted only with `UI_TESTING_RESET_STATE`; production continues to use
+/// the platform rollback-anchor store.
+private final class UITestFileRollbackAnchorStore:
+    ClientStateRollbackAnchorStore, @unchecked Sendable {
+    private let fileURL: URL
+    private let lock = NSLock()
+
+    init(fileURL: URL) {
+        self.fileURL = fileURL
+    }
+
+    func load() throws -> ClientStateRollbackAnchorRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+        return try loadUnlocked()
+    }
+
+    func compareAndSwap(
+        expected: ClientStateRollbackAnchorRecord?,
+        replacement: ClientStateRollbackAnchorRecord
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard try loadUnlocked() == expected else {
+            throw ClientStateRollbackAnchorError.compareAndSwapFailed
+        }
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try NoctweaveCoder.encode(replacement, sortedKeys: true)
+            .write(to: fileURL, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: fileURL.path
+        )
+    }
+
+    private func loadUnlocked() throws -> ClientStateRollbackAnchorRecord? {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return nil
+        }
+        return try NoctweaveCoder.decode(
+            ClientStateRollbackAnchorRecord.self,
+            from: Data(contentsOf: fileURL)
+        )
     }
 }

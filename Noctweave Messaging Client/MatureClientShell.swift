@@ -406,7 +406,8 @@ struct MatureClientShell: View {
                             relationship: relationship,
                             compact: compact,
                             onBack: { self.compactRoute = nil },
-                            onOpenFiles: { destination = .files }
+                            onOpenFiles: { destination = .files },
+                            onJoinGroup: { showingGroupAdmission = true }
                         )
                     } else {
                         chatHome(compact: compact)
@@ -432,7 +433,8 @@ struct MatureClientShell: View {
                     relationship: relationship,
                     compact: false,
                     onBack: nil,
-                    onOpenFiles: { destination = .files }
+                    onOpenFiles: { destination = .files },
+                    onJoinGroup: { showingGroupAdmission = true }
                 )
             } else if !compact, let group = model.selectedGroup {
                 MatureGroupConversationView(
@@ -498,6 +500,7 @@ struct MatureClientShell: View {
             },
             onAddContact: { showingPairing = true },
             onAddGroup: { showingNewGroup = true },
+            onJoinGroup: { showingGroupAdmission = true },
             onFiles: { destination = .files }
         )
     }
@@ -624,6 +627,7 @@ private struct MatureChatsHome: View {
     let onGroup: (GroupRuntimeRecord) -> Void
     let onAddContact: () -> Void
     let onAddGroup: () -> Void
+    let onJoinGroup: () -> Void
     let onFiles: () -> Void
 
     var body: some View {
@@ -634,6 +638,7 @@ private struct MatureChatsHome: View {
                 Menu {
                     Button("Add Contact", systemImage: "person.crop.circle.badge.plus", action: onAddContact)
                     Button("Create Group", systemImage: "person.3.fill", action: onAddGroup)
+                    Button("Join Group", systemImage: "person.badge.plus", action: onJoinGroup)
                 } label: {
                     Image(systemName: "plus")
                 }
@@ -709,6 +714,8 @@ private struct MatureChatsHome: View {
                 Button("Create Group", action: onAddGroup)
                     .glassButton()
             }
+            Button("Join Existing Group", systemImage: "person.badge.plus", action: onJoinGroup)
+                .glassButton()
         }
         .uniformGlassCard(
             cornerRadius: compact ? 24 : 28,
@@ -776,6 +783,7 @@ private struct MatureConversationView: View {
     let compact: Bool
     let onBack: (() -> Void)?
     let onOpenFiles: () -> Void
+    let onJoinGroup: () -> Void
     @State private var showingFileImporter = false
     @State private var showingVoiceRecorder = false
     @State private var attachmentPreview: MatureAttachmentPreview?
@@ -791,6 +799,11 @@ private struct MatureConversationView: View {
                 subtitle: relationship.localPolicy.consent == .accepted ? "Secure conversation" : "Approval pending",
                 backAction: onBack
             ) {
+                Button(action: onJoinGroup) {
+                    Image(systemName: "person.badge.plus")
+                }
+                .glassCircleButton(diameter: 38)
+                .accessibilityLabel("Join Group")
                 Button { model.syncAll() } label: {
                     Image(systemName: "arrow.triangle.2.circlepath")
                 }
@@ -1985,12 +1998,31 @@ private struct MatureRelaysView: View {
             .font(.subheadline)
             .uniformGlassCard(cornerRadius: 18, padding: 14)
         case .ready(let readiness):
-            Label(
-                "\(readiness.relayInfo.relayName ?? readiness.endpoint.host) is reachable and compatible.",
-                systemImage: "checkmark.circle.fill"
-            )
+            VStack(alignment: .leading, spacing: 8) {
+                Label(
+                    "\(readiness.relayInfo.relayName ?? readiness.endpoint.host) is reachable and compatible.",
+                    systemImage: "checkmark.circle.fill"
+                )
+                .foregroundStyle(.green)
+
+                if readiness.relayInfo.protocolCapabilities?.supports(
+                    module: "nw.net-host",
+                    version: 1
+                ) == true {
+                    Label(
+                        "Noctweb hosting and Publisher / Lab are available.",
+                        systemImage: "globe"
+                    )
+                    .foregroundStyle(.mint)
+                } else {
+                    Label(
+                        "Messaging relay only; Noctweb hosting is not advertised.",
+                        systemImage: "minus.circle"
+                    )
+                    .foregroundStyle(.secondary)
+                }
+            }
             .font(.subheadline)
-            .foregroundStyle(.green)
             .uniformGlassCard(cornerRadius: 18, padding: 14)
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle.fill")
