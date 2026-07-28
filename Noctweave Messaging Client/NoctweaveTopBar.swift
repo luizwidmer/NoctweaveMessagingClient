@@ -71,7 +71,7 @@ struct NoctweaveTopBar: View {
                 )
                 .overlay(alignment: .bottom) {
                     Rectangle()
-                        .fill(Color.white.opacity(isDark ? 0.055 : 0.10))
+                        .fill(theme.surfaceBorder)
                         .frame(height: 0.5)
                 }
             .allowsHitTesting(false)
@@ -79,6 +79,6 @@ struct NoctweaveTopBar: View {
             .ignoresSafeArea(.container, edges: [.top, .leading, .trailing])
             #endif
         }
-        .shadow(color: theme.accent.opacity(isDark ? 0.055 : 0.035), radius: 8, x: 0, y: 3)
+        .shadow(color: theme.surfaceShadow, radius: 8, x: 0, y: 3)
     }
 }

@@ -590,7 +590,11 @@ private struct ClientOnboardingView: View {
                 .padding(.trailing, 8)
         }
         .padding(12)
-        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .background(theme.surface, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .stroke(theme.surfaceBorder.opacity(0.65), lineWidth: 0.8)
+        )
     }
 
     private var availableLockModes: [AppLockMode] {

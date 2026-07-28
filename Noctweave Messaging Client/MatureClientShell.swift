@@ -229,7 +229,7 @@ struct MatureClientShell: View {
             macSidebar
                 .frame(width: 272)
             Rectangle()
-                .fill(Color.white.opacity(0.07))
+                .fill(theme.surfaceBorder)
                 .frame(width: 0.5)
             destinationView(compact: false)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -385,7 +385,7 @@ struct MatureClientShell: View {
                 compactRoute = nil
             }
             Rectangle()
-                .fill(Color.white.opacity(0.07))
+                .fill(theme.surfaceBorder)
                 .frame(width: 0.5)
             destinationView(compact: false)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -580,6 +580,7 @@ private struct MatureSidebarConversationRow: View {
 }
 
 struct MatureTopBar<Trailing: View>: View {
+    @Environment(\.appTheme) private var theme
     let title: String
     let subtitle: String
     let backAction: (() -> Void)?
@@ -610,7 +611,7 @@ struct MatureTopBar<Trailing: View>: View {
         .padding(.vertical, 12)
         .background(.ultraThinMaterial)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Color.white.opacity(0.06)).frame(height: 0.5)
+            Rectangle().fill(theme.surfaceBorder).frame(height: 0.5)
         }
     }
 }
@@ -2460,6 +2461,7 @@ private struct MatureIdentityDetails: View {
     let personaID: UUID
     let onBurn: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
     @State private var revealIdentifier = false
     @State private var displayName: String
     @State private var showingDeleteConfirmation = false
@@ -2530,7 +2532,11 @@ private struct MatureIdentityDetails: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
-                                .background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .background(theme.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .stroke(theme.surfaceBorder, lineWidth: 1)
+                                }
                             }
                         }
                     }
@@ -2687,7 +2693,7 @@ private struct MatureBottomBar: View {
         .padding(.bottom, 5)
         .background(.ultraThinMaterial)
         .overlay(alignment: .top) {
-            Rectangle().fill(Color.white.opacity(0.07)).frame(height: 0.5)
+            Rectangle().fill(theme.surfaceBorder).frame(height: 0.5)
         }
     }
 

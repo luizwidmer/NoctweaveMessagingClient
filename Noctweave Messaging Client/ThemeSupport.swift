@@ -142,6 +142,48 @@ struct ThemeStyle: Equatable {
             accent = Color.blue
         }
     }
+
+    var isDark: Bool {
+        preferredColorScheme == .dark
+    }
+
+    /// Semantic surfaces keep glass legible when a bright palette is selected. The palette's
+    /// brand colors still tint these surfaces, but they do not rely on black overlays in light mode.
+    var canvas: Color {
+        if palette == .noirBright {
+            return .noctweaveIvory
+        }
+        return isDark
+            ? (basePalette == .noir ? .noctweavePlumBlack : .black)
+            : .white
+    }
+
+    var surface: Color {
+        if isDark {
+            return Color.white.opacity(basePalette == .noir ? 0.11 : 0.09)
+        }
+        return Color.white.opacity(palette == .noirBright ? 0.88 : 0.78)
+    }
+
+    var elevatedSurface: Color {
+        isDark ? Color.white.opacity(0.16) : Color.white.opacity(0.94)
+    }
+
+    var inputSurface: Color {
+        isDark ? Color.black.opacity(0.24) : Color.white.opacity(0.72)
+    }
+
+    var surfaceBorder: Color {
+        isDark ? Color.white.opacity(0.22) : accent.opacity(basePalette == .noir ? 0.25 : 0.18)
+    }
+
+    var surfaceHighlight: Color {
+        isDark ? Color.white.opacity(0.18) : Color.white.opacity(0.78)
+    }
+
+    var surfaceShadow: Color {
+        isDark ? Color.black.opacity(0.38) : Color.black.opacity(0.16)
+    }
 }
 
 private struct AppThemeKey: EnvironmentKey {
@@ -180,29 +222,15 @@ struct GlassBackground: View {
     }
 
     private var baseColor: Color {
-        #if os(iOS)
-        return Color(UIColor.tertiarySystemBackground)
-        #elseif os(macOS)
-        return Color(NSColor.windowBackgroundColor)
-        #else
-        return Color.white
-        #endif
+        theme.canvas
     }
 
     private var primaryGlowOpacity: Double {
-        #if os(iOS)
-        return isDarkMode ? 0.5 : 0.32
-        #else
-        return 0.25
-        #endif
+        isDarkMode ? 0.34 : 0.16
     }
 
     private var secondaryGlowOpacity: Double {
-        #if os(iOS)
-        return isDarkMode ? 0.36 : 0.22
-        #else
-        return 0.18
-        #endif
+        isDarkMode ? 0.24 : 0.11
     }
 
     private var recipe: BackgroundRecipe {
@@ -374,15 +402,20 @@ struct GlassBackground: View {
             )
         case .noir:
             return BackgroundRecipe(
-                stops: [
-                    // Noir should stay dark even in system light mode (privacy-forward by default).
-                    Color.black.opacity(isDarkMode ? 0.94 : 0.92),
-                    Color.black.opacity(isDarkMode ? 0.86 : 0.88),
-                    theme.backgroundTint.opacity(isDarkMode ? 0.55 : 0.24)
-                ],
+                stops: isDarkMode
+                    ? [
+                        theme.canvas.opacity(0.98),
+                        theme.canvas.opacity(0.90),
+                        theme.backgroundTint.opacity(0.55)
+                    ]
+                    : [
+                        theme.canvas,
+                        theme.backgroundTint.opacity(0.24),
+                        theme.glowTertiary.opacity(0.16)
+                    ],
                 glows: [
-                    glow(theme.glowPrimary, size: 520, blur: 130, x: -200, y: -240, opacity: isDarkMode ? 0.12 : 0.06),
-                    glow(theme.glowTertiary, size: 520, blur: 130, x: 220, y: 200, opacity: isDarkMode ? 0.10 : 0.05)
+                    glow(theme.glowPrimary, size: 520, blur: 130, x: -200, y: -240, opacity: isDarkMode ? 0.12 : 0.10),
+                    glow(theme.glowTertiary, size: 520, blur: 130, x: 220, y: 200, opacity: isDarkMode ? 0.10 : 0.08)
                 ],
                 grainOpacity: grain * 0.8
             )

@@ -102,9 +102,9 @@ struct SecureGlassBackground: View {
         ZStack {
             LinearGradient(
                 colors: [
-                    Color.black.opacity(isDark ? 0.72 : 0.08),
+                    theme.canvas.opacity(isDark ? 0.72 : 1.0),
                     theme.backgroundTint.opacity(isDark ? 0.65 : 0.22),
-                    Color.black.opacity(isDark ? 0.92 : 0.06)
+                    theme.canvas.opacity(isDark ? 0.92 : 0.94)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing

@@ -11,14 +11,7 @@ enum GlassButtonSize {
 
 private enum GlassBacking {
     static func color(theme: ThemeStyle, colorScheme: ColorScheme) -> Color {
-        let isDark = (colorScheme == .dark)
-        let baseOpacity: Double = {
-            if isDark {
-                return theme.basePalette == .noir ? 0.36 : 0.24
-            }
-            return theme.basePalette == .noir ? 0.15 : 0.09
-        }()
-        return Color.black.opacity(baseOpacity)
+        theme.isDark == (colorScheme == .dark) ? theme.surface : theme.elevatedSurface
     }
 }
 
@@ -54,7 +47,6 @@ struct GlassButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         let fillOpacity = prominent ? (configuration.isPressed ? 0.24 : 0.17) : (configuration.isPressed ? 0.08 : 0.03)
-        let strokeOpacity = prominent ? 0.42 : 0.26
         return configuration.label
             #if os(iOS)
             .font(IOSControlMetrics.isPad ? .system(size: ipadLabelFontSize, weight: .semibold, design: .rounded) : nil)
@@ -94,9 +86,9 @@ struct GlassButtonStyle: ButtonStyle {
                             .stroke(
                                 LinearGradient(
                                     colors: [
-                                        Color.white.opacity(strokeOpacity),
-                                        theme.accent.opacity(0.28),
-                                        Color.white.opacity(0.08)
+                                        theme.surfaceHighlight,
+                                        theme.surfaceBorder,
+                                        theme.accent.opacity(prominent ? 0.28 : 0.12)
                                     ],
                                     startPoint: .topLeading,
                                     endPoint: .bottomTrailing
@@ -107,7 +99,7 @@ struct GlassButtonStyle: ButtonStyle {
             )
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .shadow(color: theme.accent.opacity(configuration.isPressed ? 0.12 : 0.18), radius: configuration.isPressed ? 3 : 7, x: 0, y: configuration.isPressed ? 1 : 3)
+            .shadow(color: theme.surfaceShadow, radius: configuration.isPressed ? 3 : 7, x: 0, y: configuration.isPressed ? 1 : 3)
             .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
             .opacity(isEnabled ? (configuration.isPressed ? 0.9 : 1.0) : 0.42)
             .saturation(isEnabled ? 1.0 : 0.35)
@@ -142,7 +134,6 @@ struct GlassCircleButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         let fillOpacity = prominent ? (configuration.isPressed ? 0.25 : 0.17) : (configuration.isPressed ? 0.08 : 0.03)
-        let strokeOpacity = prominent ? 0.42 : 0.26
         return configuration.label
             .scaleEffect(labelScale)
             .frame(width: resolvedDiameter, height: resolvedDiameter)
@@ -176,9 +167,9 @@ struct GlassCircleButtonStyle: ButtonStyle {
                             .stroke(
                                 LinearGradient(
                                     colors: [
-                                        Color.white.opacity(strokeOpacity),
-                                        theme.accent.opacity(0.28),
-                                        Color.white.opacity(0.08)
+                                        theme.surfaceHighlight,
+                                        theme.surfaceBorder,
+                                        theme.accent.opacity(prominent ? 0.28 : 0.12)
                                     ],
                                     startPoint: .topLeading,
                                     endPoint: .bottomTrailing
@@ -189,7 +180,7 @@ struct GlassCircleButtonStyle: ButtonStyle {
             )
             .clipShape(Circle())
             .contentShape(Circle())
-            .shadow(color: theme.accent.opacity(configuration.isPressed ? 0.12 : 0.18), radius: configuration.isPressed ? 3 : 7, x: 0, y: configuration.isPressed ? 1 : 3)
+            .shadow(color: theme.surfaceShadow, radius: configuration.isPressed ? 3 : 7, x: 0, y: configuration.isPressed ? 1 : 3)
             .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
             .opacity(isEnabled ? (configuration.isPressed ? 0.9 : 1.0) : 0.42)
             .saturation(isEnabled ? 1.0 : 0.35)
@@ -327,7 +318,7 @@ private struct NoctweaveInputFieldModifier: ViewModifier {
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.black.opacity(colorScheme == .dark ? 0.20 : 0.06))
+                    .fill(theme.inputSurface)
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                             .fill(theme.accent.opacity(colorScheme == .dark ? 0.07 : 0.04))
@@ -337,9 +328,9 @@ private struct NoctweaveInputFieldModifier: ViewModifier {
                             .stroke(
                                 LinearGradient(
                                     colors: [
-                                        Color.white.opacity(colorScheme == .dark ? 0.18 : 0.34),
-                                        theme.accent.opacity(0.16),
-                                        Color.white.opacity(0.05)
+                                        theme.surfaceHighlight,
+                                        theme.surfaceBorder,
+                                        theme.accent.opacity(0.10)
                                     ],
                                     startPoint: .topLeading,
                                     endPoint: .bottomTrailing
@@ -379,7 +370,7 @@ private struct UniformGlassCardModifier: ViewModifier {
                     .fill(.ultraThinMaterial)
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .fill(Color.black.opacity(isDark ? 0.22 : 0.08))
+                            .fill(theme.surface)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -400,9 +391,9 @@ private struct UniformGlassCardModifier: ViewModifier {
                             .stroke(
                                 LinearGradient(
                                     colors: [
-                                        Color.white.opacity(isDark ? 0.30 : 0.40),
-                                        theme.accent.opacity(isDark ? 0.22 : 0.14),
-                                        Color.white.opacity(0.08)
+                                        theme.surfaceHighlight,
+                                        theme.surfaceBorder,
+                                        theme.accent.opacity(isDark ? 0.18 : 0.10)
                                     ],
                                     startPoint: .topLeading,
                                     endPoint: .bottomTrailing
@@ -413,6 +404,7 @@ private struct UniformGlassCardModifier: ViewModifier {
             )
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .shadow(color: theme.surfaceShadow, radius: isDark ? 12 : 8, x: 0, y: isDark ? 5 : 3)
     }
 }
 
@@ -430,7 +422,8 @@ private struct NoctweaveSheetBackground: View {
             #endif
             Rectangle()
                 .fill(.ultraThinMaterial)
-                .opacity(isDark ? 0.70 : 0.55)
+                .overlay(Rectangle().fill(theme.elevatedSurface))
+                .opacity(isDark ? 0.70 : 0.92)
             LinearGradient(
                 colors: [
                     theme.accent.opacity(isDark ? 0.18 : 0.10),

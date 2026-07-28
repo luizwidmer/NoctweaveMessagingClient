@@ -114,11 +114,11 @@ struct ChipSegmentedControl<Option: Hashable & Identifiable>: View {
                         .padding(.vertical, 8)
                         .padding(.horizontal, 10)
                         .background(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(.ultraThinMaterial)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .fill(Color.black.opacity(isDark ? 0.16 : 0.06))
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(.ultraThinMaterial)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(theme.surface)
                                 )
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -127,7 +127,10 @@ struct ChipSegmentedControl<Option: Hashable & Identifiable>: View {
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .stroke(Color.white.opacity(selection == opt ? (isDark ? 0.22 : 0.18) : 0.10), lineWidth: 0.8)
+                            .stroke(
+                                selection == opt ? theme.accent.opacity(isDark ? 0.38 : 0.30) : theme.surfaceBorder,
+                                lineWidth: 0.8
+                            )
                         )
                 }
                 .buttonStyle(.plain)

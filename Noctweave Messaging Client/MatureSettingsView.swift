@@ -220,7 +220,7 @@ private struct MatureAppearanceSettings: View {
         )
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(selected ? style.accent.opacity(0.8) : Color.white.opacity(0.09), lineWidth: selected ? 1.5 : 1)
+                .stroke(selected ? style.accent.opacity(0.8) : style.surfaceBorder, lineWidth: selected ? 1.5 : 1)
         }
         .accessibilityIdentifier("settings.palette.\(palette.rawValue)")
     }
@@ -465,6 +465,7 @@ private enum AppLockSetupStage {
 private struct MatureAppLockSetupFlow: View {
     @ObservedObject var model: ClientViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appTheme) private var theme
 
     @State private var stage: AppLockSetupStage
     @State private var mode: AppLockMode
@@ -697,7 +698,7 @@ private struct MatureAppLockSetupFlow: View {
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(mode == candidate ? Color.accentColor.opacity(0.75) : Color.white.opacity(0.08), lineWidth: 1)
+                .stroke(mode == candidate ? theme.accent.opacity(0.75) : theme.surfaceBorder, lineWidth: 1)
         }
     }
 
@@ -788,6 +789,7 @@ private struct MatureAppLockSetupFlow: View {
 
 private struct SettingsPINPad: View {
     @Binding var pin: String
+    @Environment(\.appTheme) private var theme
     private let keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "delete.left.fill"]
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
 
@@ -799,7 +801,7 @@ private struct SettingsPINPad: View {
                         .fill(index < pin.count ? Color.accentColor : Color.secondary.opacity(0.22))
                         .frame(width: 14, height: 14)
                         .overlay {
-                            Circle().stroke(Color.white.opacity(0.12), lineWidth: 1)
+                            Circle().stroke(theme.surfaceBorder, lineWidth: 1)
                         }
                 }
             }
@@ -832,7 +834,7 @@ private struct SettingsPINPad: View {
                         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                         .overlay {
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(Color.white.opacity(0.09), lineWidth: 1)
+                                .stroke(theme.surfaceBorder, lineWidth: 1)
                         }
                     }
                 }
