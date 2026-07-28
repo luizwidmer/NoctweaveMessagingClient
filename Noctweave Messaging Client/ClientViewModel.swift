@@ -5,8 +5,12 @@ import Foundation
 import ImageIO
 import LocalAuthentication
 import NoctweaveCore
+import Security
 import UserNotifications
 import UniformTypeIdentifiers
+#if os(iOS)
+import UIKit
+#endif
 
 @MainActor
 private final class ClientNotificationManager {
@@ -731,49 +735,70 @@ final class ClientViewModel: ObservableObject {
 
     func open() async {
         bootState = .loading
-        do {
-            // Integration assumption: current Core exposes ClientState's
-            // onboarding flags but not a dedicated first-run builder. Create
-            // only a non-authoritative placeholder aggregate; the user-chosen
-            // persona is persisted before the mature shell is revealed.
-            let opened: HeadlessMessagingClient
-            if let existing = try await stateStore.load() {
-                opened = try HeadlessMessagingClient(stateStore: stateStore, initialState: existing)
-            } else {
-                var initial: ClientState
-                if isUITestProductFixture {
-                    initial = try Self.makeProductFixtureState()
+        lastError = nil
+        var retryDelayNanoseconds: UInt64 = 250_000_000
+
+        while !Task.isCancelled {
+            do {
+                // Integration assumption: current Core exposes ClientState's
+                // onboarding flags but not a dedicated first-run builder. Create
+                // only a non-authoritative placeholder aggregate; the user-chosen
+                // persona is persisted before the mature shell is revealed.
+                let opened: HeadlessMessagingClient
+                if let existing = try await stateStore.load() {
+                    opened = try HeadlessMessagingClient(stateStore: stateStore, initialState: existing)
                 } else {
-                    initial = try ClientState.initialLocalState(
-                        displayName: isUITestReadyState ? "UI Test Persona" : "Unnamed Persona"
-                    )
-                    if isUITestReadyState {
-                        var accepted = initial
-                        try accepted.completeOnboarding(
-                            privacyPolicyAccepted: true,
-                            termsOfUseAccepted: true
+                    var initial: ClientState
+                    if isUITestProductFixture {
+                        initial = try Self.makeProductFixtureState()
+                    } else {
+                        initial = try ClientState.initialLocalState(
+                            displayName: isUITestReadyState ? "UI Test Persona" : "Unnamed Persona"
                         )
-                        initial = accepted
+                        if isUITestReadyState {
+                            var accepted = initial
+                            try accepted.completeOnboarding(
+                                privacyPolicyAccepted: true,
+                                termsOfUseAccepted: true
+                            )
+                            initial = accepted
+                        }
                     }
+                    try await stateStore.save(initial, replacing: nil)
+                    opened = try HeadlessMessagingClient(stateStore: stateStore, initialState: initial)
                 }
-                try await stateStore.save(initial, replacing: nil)
-                opened = try HeadlessMessagingClient(stateStore: stateStore, initialState: initial)
+                client = opened
+                try await refresh()
+                onboardingLegalAccepted = state?.hasAcceptedPrivacyPolicy == true
+                    && state?.hasAcceptedTermsOfUse == true
+                isLocked = isOnboardingComplete && appLockMode != .off
+                statusMessage = "Encrypted local state is ready."
+                bootState = .ready
+                if isOnboardingComplete && !isLocked {
+                    await notificationManager.requestAuthorization()
+                    syncAll()
+                }
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                guard isTransientSecureStorageFailure(error) else {
+                    let message = describe(error)
+                    lastError = message
+                    bootState = .failed(message)
+                    return
+                }
+                statusMessage = "Waiting for secure storage…"
+                do {
+                    try await Task.sleep(nanoseconds: retryDelayNanoseconds)
+                } catch {
+                    return
+                }
+                retryDelayNanoseconds = min(
+                    retryDelayNanoseconds.multipliedReportingOverflow(by: 2).partialValue,
+                    2_000_000_000
+                )
             }
-            client = opened
-            try await refresh()
-            onboardingLegalAccepted = state?.hasAcceptedPrivacyPolicy == true
-                && state?.hasAcceptedTermsOfUse == true
-            isLocked = isOnboardingComplete && appLockMode != .off
-            statusMessage = "Encrypted local state is ready."
-            bootState = .ready
-            if isOnboardingComplete && !isLocked {
-                await notificationManager.requestAuthorization()
-                syncAll()
-            }
-        } catch {
-            let message = describe(error)
-            lastError = message
-            bootState = .failed(message)
         }
     }
 
@@ -3257,5 +3282,29 @@ final class ClientViewModel: ObservableObject {
             return description
         }
         return String(describing: error)
+    }
+
+    private func isTransientSecureStorageFailure(_ error: Error) -> Bool {
+        #if os(iOS)
+        // Complete file protection and Keychain records using
+        // WhenUnlockedThisDeviceOnly can both be unavailable during protected
+        // startup. Any state-opening error in that interval is retried only
+        // after the device makes protected data available.
+        if !UIApplication.shared.isProtectedDataAvailable {
+            return true
+        }
+        #endif
+
+        let status: OSStatus?
+        if case let SecureStorageKeyProviderError.unavailable(value) = error {
+            status = value
+        } else if case let ClientStateRollbackAnchorError.unavailable(value) = error {
+            status = value
+        } else {
+            status = nil
+        }
+        guard let status else { return false }
+        return status == errSecInteractionNotAllowed
+            || status == errSecNotAvailable
     }
 }
