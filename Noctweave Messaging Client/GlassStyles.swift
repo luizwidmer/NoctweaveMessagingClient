@@ -9,9 +9,19 @@ enum GlassButtonSize {
     case compact
 }
 
+enum NoctweaveNavigationEdge: Equatable {
+    case top
+    case bottom
+    case trailing
+}
+
 private enum GlassBacking {
     static func color(theme: ThemeStyle, colorScheme: ColorScheme) -> Color {
         theme.isDark == (colorScheme == .dark) ? theme.surface : theme.elevatedSurface
+    }
+
+    static func material(colorScheme: ColorScheme) -> Material {
+        colorScheme == .dark ? .ultraThin : .thin
     }
 }
 
@@ -58,7 +68,7 @@ struct GlassButtonStyle: ButtonStyle {
             .padding(.horizontal, horizontalPadding)
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(.ultraThinMaterial)
+                    .fill(GlassBacking.material(colorScheme: colorScheme))
                     .overlay(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .fill(GlassBacking.color(theme: theme, colorScheme: colorScheme))
@@ -139,7 +149,7 @@ struct GlassCircleButtonStyle: ButtonStyle {
             .frame(width: resolvedDiameter, height: resolvedDiameter)
             .background(
                 Circle()
-                    .fill(.ultraThinMaterial)
+                    .fill(GlassBacking.material(colorScheme: colorScheme))
                     .overlay(
                         Circle()
                             .fill(GlassBacking.color(theme: theme, colorScheme: colorScheme))
@@ -252,6 +262,10 @@ extension View {
         modifier(NoctweaveInputFieldModifier(cornerRadius: cornerRadius))
     }
 
+    func noctweaveNavigationSurface(edge: NoctweaveNavigationEdge) -> some View {
+        modifier(NoctweaveNavigationSurfaceModifier(edge: edge))
+    }
+
     @ViewBuilder
     func hideSheetNavigationBar() -> some View {
         #if os(iOS)
@@ -259,6 +273,41 @@ extension View {
         #else
         self
         #endif
+    }
+}
+
+private struct NoctweaveNavigationSurfaceModifier: ViewModifier {
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
+    let edge: NoctweaveNavigationEdge
+
+    private var dividerAlignment: Alignment {
+        switch edge {
+        case .top: .top
+        case .bottom: .bottom
+        case .trailing: .trailing
+        }
+    }
+
+    private var dividerSize: CGSize {
+        edge == .trailing ? CGSize(width: 0.5, height: 0) : CGSize(width: 0, height: 0.5)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                Rectangle()
+                    .fill(GlassBacking.material(colorScheme: colorScheme))
+                    .overlay(Rectangle().fill(theme.surface.opacity(colorScheme == .dark ? 0.82 : 0.52)))
+                    .overlay(alignment: dividerAlignment) {
+                        Rectangle()
+                            .fill(theme.surfaceBorder)
+                            .frame(width: dividerSize.width == 0 ? nil : dividerSize.width,
+                                   height: dividerSize.height == 0 ? nil : dividerSize.height)
+                    }
+            }
+            .shadow(color: theme.surfaceShadow, radius: colorScheme == .dark ? 10 : 6, x: 0, y: edge == .top ? -2 : 3)
     }
 }
 
@@ -367,10 +416,10 @@ private struct UniformGlassCardModifier: ViewModifier {
             .padding(padding)
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
+                    .fill(isDark ? Material.ultraThin : Material.regular)
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .fill(theme.surface)
+                            .fill(theme.surface.opacity(isDark ? 0.82 : 0.48))
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -404,7 +453,7 @@ private struct UniformGlassCardModifier: ViewModifier {
             )
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .shadow(color: theme.surfaceShadow, radius: isDark ? 12 : 8, x: 0, y: isDark ? 5 : 3)
+            .shadow(color: theme.surfaceShadow, radius: isDark ? 10 : 5, x: 0, y: isDark ? 4 : 2)
     }
 }
 
@@ -421,7 +470,7 @@ private struct NoctweaveSheetBackground: View {
             GlassBackground()
             #endif
             Rectangle()
-                .fill(.ultraThinMaterial)
+                .fill(isDark ? Material.thin : Material.regular)
                 .overlay(Rectangle().fill(theme.elevatedSurface))
                 .opacity(isDark ? 0.70 : 0.92)
             LinearGradient(

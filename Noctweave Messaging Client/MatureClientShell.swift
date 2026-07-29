@@ -251,8 +251,14 @@ struct MatureClientShell: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .padding(.top, 50)
-            .padding(.horizontal, 20)
+            .padding(12)
+            .background(theme.surface.opacity(0.34), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(theme.surfaceBorder.opacity(0.72), lineWidth: 0.7)
+            }
+            .padding(.top, 42)
+            .padding(.horizontal, 14)
             .padding(.bottom, 18)
 
             ScrollView {
@@ -321,9 +327,8 @@ struct MatureClientShell: View {
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 14)
-            .background(.ultraThinMaterial)
         }
-        .background(.ultraThinMaterial)
+        .noctweaveNavigationSurface(edge: .trailing)
     }
 
     @ViewBuilder
@@ -359,9 +364,15 @@ struct MatureClientShell: View {
             .padding(.horizontal, 11)
             .padding(.vertical, 9)
             .background(
-                destination == item ? theme.accent.opacity(0.16) : Color.clear,
+                destination == item ? theme.accent.opacity(0.14) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 11, style: .continuous)
             )
+            .overlay {
+                if destination == item {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(theme.accent.opacity(0.22), lineWidth: 0.7)
+                }
+            }
             .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -576,6 +587,12 @@ private struct MatureSidebarConversationRow: View {
                 isSelected ? theme.accent.opacity(0.14) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 12, style: .continuous)
             )
+            .overlay {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(theme.accent.opacity(0.22), lineWidth: 0.7)
+                }
+            }
             .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
@@ -583,7 +600,6 @@ private struct MatureSidebarConversationRow: View {
 }
 
 struct MatureTopBar<Trailing: View>: View {
-    @Environment(\.appTheme) private var theme
     let title: String
     let subtitle: String
     let backAction: (() -> Void)?
@@ -611,11 +627,8 @@ struct MatureTopBar<Trailing: View>: View {
             trailing()
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(theme.surfaceBorder).frame(height: 0.5)
-        }
+        .padding(.vertical, 11)
+        .noctweaveNavigationSurface(edge: .bottom)
     }
 }
 
@@ -2723,10 +2736,7 @@ private struct MatureBottomBar: View {
         .padding(.horizontal, 4)
         .padding(.top, 6)
         .padding(.bottom, 5)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .top) {
-            Rectangle().fill(theme.surfaceBorder).frame(height: 0.5)
-        }
+        .noctweaveNavigationSurface(edge: .top)
     }
 
     private func bottomTitle(_ item: ClientDestination) -> String {
@@ -2765,6 +2775,12 @@ private struct MatureSideRail: View {
                     .foregroundStyle(selection == item ? theme.accent : Color.secondary)
                     .frame(width: 86, height: 60)
                     .background(selection == item ? theme.accent.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay {
+                        if selection == item {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(theme.accent.opacity(0.22), lineWidth: 0.7)
+                        }
+                    }
                 }
                 .buttonStyle(.plain)
             }
@@ -2772,7 +2788,7 @@ private struct MatureSideRail: View {
         }
         .padding(.top, 16)
         .padding(.horizontal, 8)
-        .background(.ultraThinMaterial)
+        .noctweaveNavigationSurface(edge: .trailing)
     }
 }
 #endif

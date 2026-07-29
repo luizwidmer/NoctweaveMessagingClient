@@ -14,6 +14,7 @@ struct MatureSettingsView: View {
     @Binding var selectedPalette: String
     let onLock: () -> Void
 
+    @Environment(\.appTheme) private var theme
     @State private var destination: MatureSettingsDestination?
 
     var body: some View {
@@ -53,9 +54,8 @@ struct MatureSettingsView: View {
             ) { EmptyView() }
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("PERSONALIZE")
-                        .settingsSectionLabel()
+                VStack(alignment: .leading, spacing: 14) {
+                    settingsSectionHeader("PERSONALIZE")
                     settingsRow(
                         destination: .appearance,
                         identifier: "settings.appearance",
@@ -65,9 +65,8 @@ struct MatureSettingsView: View {
                         color: .purple
                     )
 
-                    Text("PROTECTION")
-                        .settingsSectionLabel()
-                        .padding(.top, 8)
+                    settingsSectionHeader("PROTECTION")
+                        .padding(.top, 4)
                     settingsRow(
                         destination: .privacy,
                         identifier: "settings.privacy",
@@ -95,9 +94,8 @@ struct MatureSettingsView: View {
                         color: .orange
                     )
 
-                    Text("NOCTWEAVE")
-                        .settingsSectionLabel()
-                        .padding(.top, 8)
+                    settingsSectionHeader("NOCTWEAVE")
+                        .padding(.top, 4)
                     settingsRow(
                         destination: .legal,
                         identifier: "settings.legal",
@@ -113,6 +111,17 @@ struct MatureSettingsView: View {
             }
             .scrollIndicators(.hidden)
         }
+    }
+
+    private func settingsSectionHeader(_ title: String) -> some View {
+        HStack(spacing: 9) {
+            Text(title)
+                .settingsSectionLabel()
+            Rectangle()
+                .fill(theme.surfaceBorder.opacity(0.7))
+                .frame(height: 0.5)
+        }
+        .padding(.horizontal, 4)
     }
 
     private func settingsRow(
@@ -848,12 +857,22 @@ private struct SettingsIcon: View {
     let symbol: String
     let color: Color
 
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
     var body: some View {
         Image(systemName: symbol)
             .font(.system(size: 18, weight: .semibold))
             .foregroundStyle(color)
             .frame(width: 44, height: 44)
-            .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(color.opacity(colorScheme == .dark ? 0.16 : 0.10))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .stroke(theme.surfaceHighlight.opacity(0.7), lineWidth: 0.6)
+                    }
+            )
     }
 }
 
