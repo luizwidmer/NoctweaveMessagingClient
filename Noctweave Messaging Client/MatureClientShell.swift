@@ -618,13 +618,17 @@ struct MatureTopBar<Trailing: View>: View {
                 Text(title)
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.82)
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.78)
             }
+            .layoutPriority(1)
             Spacer(minLength: 12)
             trailing()
+                .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 11)
@@ -1027,65 +1031,73 @@ private struct MatureMessageBubble: View {
     var body: some View {
         HStack(alignment: .bottom, spacing: 0) {
             if outgoing { Spacer(minLength: 54) }
-            VStack(alignment: .leading, spacing: 5) {
-                if event.content.type == .attachment,
-                   let descriptor = try? NoctweaveCoder.decode(AttachmentDescriptor.self, from: event.content.payload) {
-                    HStack(spacing: 10) {
-                        Image(systemName: attachmentIcon(descriptor.mimeType))
-                            .font(.title3)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(descriptor.fileName ?? "Protected file")
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                            Text(ByteCountFormatter.string(fromByteCount: Int64(descriptor.byteCount), countStyle: .file))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 4)
-                        if model.isAttachmentAvailable(descriptor.id) {
-                            Button {
-                                onOpen(descriptor)
-                            } label: {
-                                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Open attachment")
-                        } else if !outgoing {
-                            Button {
-                                onDownload(event, descriptor)
-                            } label: {
-                                Image(systemName: "arrow.down.circle.fill")
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Download attachment")
-                        }
-                    }
-                } else {
-                    Text(displayText)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Text(event.createdAt, style: .time)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+            ViewThatFits(in: .horizontal) {
+                bubbleContent
+                    .fixedSize(horizontal: true, vertical: false)
+                bubbleContent
+                    .frame(maxWidth: 520, alignment: .leading)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(
-                outgoing ? Color.accentColor.opacity(0.25) : Color.secondary.opacity(0.16),
-                in: UnevenRoundedRectangle(
-                    topLeadingRadius: 17,
-                    bottomLeadingRadius: outgoing ? 17 : 5,
-                    bottomTrailingRadius: outgoing ? 5 : 17,
-                    topTrailingRadius: 17,
-                    style: .continuous
-                )
-            )
-            .frame(maxWidth: 520, alignment: outgoing ? .trailing : .leading)
             if !outgoing { Spacer(minLength: 54) }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var bubbleContent: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if event.content.type == .attachment,
+               let descriptor = try? NoctweaveCoder.decode(AttachmentDescriptor.self, from: event.content.payload) {
+                HStack(spacing: 10) {
+                    Image(systemName: attachmentIcon(descriptor.mimeType))
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(descriptor.fileName ?? "Protected file")
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                        Text(ByteCountFormatter.string(fromByteCount: Int64(descriptor.byteCount), countStyle: .file))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 4)
+                    if model.isAttachmentAvailable(descriptor.id) {
+                        Button {
+                            onOpen(descriptor)
+                        } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Open attachment")
+                    } else if !outgoing {
+                        Button {
+                            onDownload(event, descriptor)
+                        } label: {
+                            Image(systemName: "arrow.down.circle.fill")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Download attachment")
+                    }
+                }
+            } else {
+                Text(displayText)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(event.createdAt, style: .time)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(
+            outgoing ? Color.accentColor.opacity(0.25) : Color.secondary.opacity(0.16),
+            in: UnevenRoundedRectangle(
+                topLeadingRadius: 17,
+                bottomLeadingRadius: outgoing ? 17 : 5,
+                bottomTrailingRadius: outgoing ? 5 : 17,
+                topTrailingRadius: 17,
+                style: .continuous
+            )
+        )
     }
 
     private var displayText: String {
@@ -1885,7 +1897,7 @@ private struct MatureRelaysView: View {
         VStack(spacing: 0) {
             MatureTopBar(
                 title: "Relays",
-                subtitle: "\(preferences.count) saved · relationship routes remain independent",
+                subtitle: "\(preferences.count) saved · independent relationship routes",
                 backAction: nil
             ) {
                 Button(action: onEdit) { Image(systemName: "plus") }
@@ -2057,7 +2069,7 @@ private struct MatureIdentityView: View {
         VStack(spacing: 0) {
             MatureTopBar(
                 title: "Identity Management",
-                subtitle: "Local personas with independent contacts and relay choices",
+                subtitle: "Personas, contacts, and relay choices",
                 backAction: nil
             ) {
                 Button { showingCreatePersona = true } label: {

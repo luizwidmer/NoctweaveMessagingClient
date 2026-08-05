@@ -261,7 +261,8 @@ private struct OpaqueRouteWidgetRunner {
                 fetchedPacketCount: 0,
                 stagedPacketCount: previous.stagedPacketCount,
                 routeCount: previous.routeCount,
-                status: "Fetching sealed opaque-route packets."
+                status: "Fetching sealed opaque-route packets.",
+                paletteRawValue: previous.paletteRawValue
             )
         )
     }
@@ -280,7 +281,8 @@ private struct OpaqueRouteWidgetRunner {
                 fetchedPacketCount: result.fetchedPacketCount,
                 stagedPacketCount: stagedCount,
                 routeCount: result.routeCount,
-                status: result.status
+                status: result.status,
+                paletteRawValue: OpaqueRouteWidgetStore.readSnapshot().paletteRawValue
             )
         )
     }

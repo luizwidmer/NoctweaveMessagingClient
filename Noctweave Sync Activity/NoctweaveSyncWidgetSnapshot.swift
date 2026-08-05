@@ -9,6 +9,7 @@ struct NoctweaveSyncWidgetSnapshot: Codable, Hashable {
     var stagedPacketCount: Int
     var routeCount: Int
     var status: String
+    var paletteRawValue: String?
 
     static let empty = NoctweaveSyncWidgetSnapshot(
         updatedAt: Date(timeIntervalSince1970: 0),
@@ -18,6 +19,7 @@ struct NoctweaveSyncWidgetSnapshot: Codable, Hashable {
         fetchedPacketCount: 0,
         stagedPacketCount: 0,
         routeCount: 0,
-        status: "No sync yet"
+        status: "No sync yet",
+        paletteRawValue: "noir"
     )
 }

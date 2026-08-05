@@ -2540,7 +2540,7 @@ final class ClientViewModel: ObservableObject {
         let firstPersonaID = state.activePersonaID
         let offer = try ContactPairingHandshakeV2.makeOffer(
             createdAt: now,
-            expiresAt: now.addingTimeInterval(24 * 60 * 60)
+            expiresAt: now.addingTimeInterval(NoctweaveRendezvousV2.maximumLifetime)
         )
         let offerer = try Self.makeFixtureParticipant(
             pseudonym: "Fixture local contact",
@@ -2557,7 +2557,7 @@ final class ClientViewModel: ObservableObject {
         let responderStart = try ContactPairingResponderFlowV2.begin(
             invitation: offer.invitation,
             participant: responder,
-            at: now
+            at: now.addingTimeInterval(1)
         )
         var responderFlow = responderStart.flow
         let offererStart = try ContactPairingOffererFlowV2.begin(
@@ -2567,20 +2567,20 @@ final class ClientViewModel: ObservableObject {
             openRequest: responderStart.openRequest,
             acceptanceFrame: responderStart.acceptanceFrame,
             ledger: &ledger,
-            at: now
+            at: now.addingTimeInterval(2)
         )
         var offererFlow = offererStart.flow
         let responderConfirmation = try responderFlow.receiveOffer(
             offererStart.offerFrame,
-            at: now
+            at: now.addingTimeInterval(3)
         )
         let offererCompletion = try offererFlow.receiveConfirmation(
             responderConfirmation,
-            at: now
+            at: now.addingTimeInterval(4)
         )
         let relationship = try responderFlow.receiveConfirmation(
             offererCompletion.confirmationFrame,
-            at: now
+            at: now.addingTimeInterval(5)
         )
         var relationshipWithEvent = relationship
         guard let content = EncodedContent.text("Fixture message") else {

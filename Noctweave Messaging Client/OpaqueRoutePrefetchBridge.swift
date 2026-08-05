@@ -2,6 +2,9 @@ import CryptoKit
 import Foundation
 import NoctweaveCore
 import Security
+#if os(iOS)
+import WidgetKit
+#endif
 
 struct OpaqueRoutePrefetchRouteV1: Codable {
     let routeID: OpaqueReceiveRouteIDV2
@@ -19,6 +22,30 @@ struct OpaqueRoutePrefetchConfigV1: Codable {
 private struct OpaqueRoutePrefetchSealedFileV1: Codable {
     let version: Int
     let ciphertext: Data
+}
+
+private struct OpaqueRoutePrefetchWidgetSnapshot: Codable {
+    var updatedAt: Date
+    var isFetching: Bool
+    var lastAttemptAt: Date?
+    var lastSuccessAt: Date?
+    var fetchedPacketCount: Int
+    var stagedPacketCount: Int
+    var routeCount: Int
+    var status: String
+    var paletteRawValue: String?
+
+    static let empty = OpaqueRoutePrefetchWidgetSnapshot(
+        updatedAt: Date(timeIntervalSince1970: 0),
+        isFetching: false,
+        lastAttemptAt: nil,
+        lastSuccessAt: nil,
+        fetchedPacketCount: 0,
+        stagedPacketCount: 0,
+        routeCount: 0,
+        status: "No sync yet",
+        paletteRawValue: ThemePalette.noir.rawValue
+    )
 }
 
 enum OpaqueRoutePrefetchBridge {
@@ -99,6 +126,7 @@ enum OpaqueRoutePrefetchBridge {
         if FileManager.default.fileExists(atPath: batches.path) {
             try? FileManager.default.removeItem(at: batches)
         }
+        updateWidgetAppearance(state.appearance.theme)
     }
 
     static func eraseAllLocalState() throws {
@@ -119,6 +147,23 @@ enum OpaqueRoutePrefetchBridge {
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw PrefetchBridgeError.keychainFailure(status)
         }
+    }
+
+    private static func updateWidgetAppearance(_ palette: ThemePalette) {
+        let defaults = UserDefaults(suiteName: appGroupIdentifier)
+        let snapshot = defaults?
+            .data(forKey: snapshotKey)
+            .flatMap { try? JSONDecoder().decode(OpaqueRoutePrefetchWidgetSnapshot.self, from: $0) }
+            ?? .empty
+        guard snapshot.paletteRawValue != palette.rawValue else { return }
+        var updated = snapshot
+        updated.paletteRawValue = palette.rawValue
+        updated.updatedAt = Date()
+        guard let data = try? JSONEncoder().encode(updated) else { return }
+        defaults?.set(data, forKey: snapshotKey)
+        #if os(iOS)
+        WidgetCenter.shared.reloadTimelines(ofKind: "NoctweaveSyncDashboardWidget")
+        #endif
     }
 
     private static func sharedDirectory() throws -> URL {
