@@ -289,6 +289,30 @@ private struct MaturePrivacySettings: View {
                         symbol: "keyboard.badge.ellipsis",
                         isOn: privacyBinding(\.secureTypingEnabled)
                     )
+
+                    Text("LOCAL ALERTS")
+                        .settingsSectionLabel()
+                        .padding(.top, 6)
+                    SettingsStatusCard(
+                        title: "Local message notifications",
+                        message: notificationMessage,
+                        symbol: "bell.badge.fill",
+                        status: notificationStatus
+                    )
+                    if model.localNotificationPermission == .notDetermined {
+                        Button {
+                            Task { await model.requestLocalNotificationPermission() }
+                        } label: {
+                            SettingsActionLabel(
+                                icon: "bell.and.waves.left.and.right.fill",
+                                title: "Enable Local Notifications",
+                                message: "Opens the operating-system permission prompt. No APNs token or centralized notification service is used."
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .uniformGlassCard(cornerRadius: 21, padding: 0, minHeight: 92)
+                        .accessibilityIdentifier("settings.privacy.enableLocalNotifications")
+                    }
                     SettingsFeedback(model: model)
                 }
                 .padding(16)
@@ -307,6 +331,25 @@ private struct MaturePrivacySettings: View {
             var settings = model.privacySettings
             settings[keyPath: keyPath] = value
             Task { _ = await model.savePrivacy(settings) }
+        }
+    }
+
+    private var notificationStatus: String {
+        switch model.localNotificationPermission {
+        case .authorized: return "Enabled"
+        case .denied: return "Blocked"
+        case .notDetermined: return "Off"
+        }
+    }
+
+    private var notificationMessage: String {
+        switch model.localNotificationPermission {
+        case .authorized:
+            return "Alerts are created locally after Noctweave completes an encrypted sync. Closed-app delivery still depends on OS-permitted background execution."
+        case .denied:
+            return "The operating system denied local alerts. Change this only from System Settings; Noctweave will not interrupt you with another prompt."
+        case .notDetermined:
+            return "Notifications stay off until you explicitly enable them below. Noctweave does not register for centralized push delivery."
         }
     }
 }

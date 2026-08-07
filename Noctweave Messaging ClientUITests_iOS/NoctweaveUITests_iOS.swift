@@ -7,7 +7,11 @@ final class NoctweaveUITests_iOS: XCTestCase {
         super.setUp()
         continueAfterFailure = false
         app = XCUIApplication()
-        app.launchArguments = ["UI_TESTING", "UI_TESTING_READY_STATE"]
+        app.launchArguments = [
+            "UI_TESTING",
+            "UI_TESTING_READY_STATE",
+            "UI_TESTING_RESET_STATE"
+        ]
         app.launch()
     }
 
@@ -25,11 +29,14 @@ final class NoctweaveUITests_iOS: XCTestCase {
         XCTAssertTrue(welcomeCard.exists)
         XCTAssertEqual(welcomeCard.frame.midX, welcomeRegion.frame.midX, accuracy: 2)
         XCTAssertEqual(welcomeCard.frame.midY, welcomeRegion.frame.midY, accuracy: 2)
-        for title in ["Chats", "Contacts", "Code", "Files", "Relays", "Identity", "Settings"] {
+        for title in ["Chats", "Contacts", "Code", "Relays", "Identity", "Settings"] {
             XCTAssertTrue(app.buttons[title].exists, "Missing bottom navigation item: \(title)")
             assertFitsScreen(app.buttons[title])
         }
-        app.buttons["tab.files"].tap()
+        let files = app.buttons["chats.files"]
+        XCTAssertTrue(files.exists)
+        assertFitsScreen(files)
+        files.tap()
         XCTAssertTrue(app.staticTexts["Media and documents shared in chats"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.staticTexts["Local Persona"].exists)
     }
@@ -45,7 +52,8 @@ final class NoctweaveUITests_iOS: XCTestCase {
         XCTAssertEqual(app.buttons.matching(identifier: "tab.chats").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "tab.contacts").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "tab.code").count, 1)
-        XCTAssertEqual(app.buttons.matching(identifier: "tab.files").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "chats.files").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.files").count, 0)
         XCTAssertEqual(app.buttons.matching(identifier: "tab.relays").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "tab.identity").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "tab.settings").count, 1)
@@ -142,7 +150,7 @@ final class NoctweaveUITests_iOS: XCTestCase {
     func testFreshInstallCannotBypassLegalOrPersonaOnboarding() {
         app.terminate()
         app = XCUIApplication()
-        app.launchArguments = ["UI_TESTING"]
+        app.launchArguments = ["UI_TESTING", "UI_TESTING_RESET_STATE"]
         app.launch()
 
         XCTAssertTrue(app.staticTexts["Welcome to Noctweave"].waitForExistence(timeout: 5))

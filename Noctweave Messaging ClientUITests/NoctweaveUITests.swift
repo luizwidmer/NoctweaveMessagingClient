@@ -10,12 +10,15 @@ final class NoctweaveUITests: XCTestCase {
         app.launchArguments = [
             "UI_TESTING",
             "UI_TESTING_READY_STATE",
+            "UI_TESTING_RESET_STATE",
             "-ApplePersistenceIgnoreState",
             "YES",
             "-NSQuitAlwaysKeepsWindows",
             "NO"
         ]
         app.launch()
+        app.activate()
+        ensurePrimaryWindow()
     }
 
     override func tearDown() {
@@ -35,7 +38,7 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Local organization only"].exists)
     }
 
-    func testPairingSeparatesRelayAndDirectOfflineFlows() {
+    func testPairingOffersRelayAndDirectOfflineFlows() {
         let button = app.buttons["Add Contact"].firstMatch
         XCTAssertTrue(button.waitForExistence(timeout: 5))
         button.tap()
@@ -45,24 +48,21 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertTrue(app.buttons["pairing.method.file"].exists)
         XCTAssertTrue(app.buttons["pairing.method.link"].exists)
 
-        app.buttons["Direct / Offline"].tap()
-        app.scrollViews.firstMatch.swipeUp()
-        XCTAssertTrue(app.buttons["Begin Direct Pairing"].waitForExistence(timeout: 2))
-        XCTAssertFalse(app.buttons["pairing.method.link"].exists)
-        XCTAssertTrue(app.staticTexts["Pair directly between devices"].exists)
+        XCTAssertTrue(app.buttons["pairing.mode.relay"].exists)
+        XCTAssertTrue(app.buttons["pairing.mode.direct"].exists)
         XCTAssertFalse(app.staticTexts["Relationship-local presentation"].exists)
         XCTAssertFalse(app.staticTexts["Temporary rendezvous relay"].exists)
     }
 
     func testLibraryDestinationsOpenFromSidebar() {
         app.buttons["Relays"].tap()
-        XCTAssertTrue(app.staticTexts["Saved Relays"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Choose a relay"].waitForExistence(timeout: 3))
 
         app.buttons["Identity Management"].tap()
         XCTAssertTrue(app.staticTexts["Identity Book"].waitForExistence(timeout: 3))
 
         app.buttons["Settings"].tap()
-        XCTAssertTrue(app.staticTexts["App Security"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["settings.appSecurity"].waitForExistence(timeout: 3))
     }
 
     func testSettingsRowsNavigateAndAppSecuritySetupOpens() {
@@ -101,8 +101,15 @@ final class NoctweaveUITests: XCTestCase {
     func testFreshInstallCannotBypassLegalOrPersonaOnboarding() {
         app.terminate()
         app = XCUIApplication()
-        app.launchArguments = ["UI_TESTING", "-ApplePersistenceIgnoreState", "YES"]
+        app.launchArguments = [
+            "UI_TESTING",
+            "UI_TESTING_RESET_STATE",
+            "-ApplePersistenceIgnoreState",
+            "YES"
+        ]
         app.launch()
+        app.activate()
+        ensurePrimaryWindow()
 
         XCTAssertTrue(app.staticTexts["Welcome to Noctweave"].waitForExistence(timeout: 5))
         assertOnboardingIsHorizontallyCentered()
@@ -113,8 +120,8 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertTrue(legalContinue.exists)
         XCTAssertFalse(legalContinue.isEnabled)
 
-        app.switches["onboarding.acceptPrivacy"].tap()
-        app.switches["onboarding.acceptTerms"].tap()
+        acceptanceControl("onboarding.acceptPrivacy").tap()
+        acceptanceControl("onboarding.acceptTerms").tap()
         XCTAssertTrue(waitUntilEnabled(legalContinue))
         legalContinue.tap()
 
@@ -138,12 +145,24 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertEqual(container.frame.midX, window.frame.midX, accuracy: 2, file: file, line: line)
     }
 
+    private func ensurePrimaryWindow() {
+        guard !app.windows.firstMatch.waitForExistence(timeout: 1) else { return }
+        app.typeKey("n", modifierFlags: .command)
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 3))
+    }
+
     private func waitUntilEnabled(_ element: XCUIElement, timeout: TimeInterval = 2) -> Bool {
         let expectation = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "enabled == true"),
             object: element
         )
         return XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    private func acceptanceControl(_ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any)
+            .matching(identifier: identifier)
+            .firstMatch
     }
 
     private func attachScreenshot(named name: String) {

@@ -13,19 +13,51 @@ import UniformTypeIdentifiers
 import UIKit
 #endif
 
+enum ClientNotificationPermissionStatus: Equatable {
+    case notDetermined
+    case denied
+    case authorized
+}
+
 @MainActor
 private final class ClientNotificationManager {
     private var isAuthorized = false
-    private var didRequest = false
 
-    func requestAuthorization() async {
-        guard !didRequest else { return }
-        didRequest = true
+    func refreshAuthorization() async -> ClientNotificationPermissionStatus {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        return apply(settings.authorizationStatus)
+    }
+
+    func requestAuthorization() async -> ClientNotificationPermissionStatus {
+        let center = UNUserNotificationCenter.current()
+        let existing = await center.notificationSettings().authorizationStatus
+        guard existing == .notDetermined else {
+            return apply(existing)
+        }
         do {
-            isAuthorized = try await UNUserNotificationCenter.current()
+            _ = try await center
                 .requestAuthorization(options: [.alert, .sound, .badge])
         } catch {
             isAuthorized = false
+            return .denied
+        }
+        return await refreshAuthorization()
+    }
+
+    private func apply(_ status: UNAuthorizationStatus) -> ClientNotificationPermissionStatus {
+        switch status {
+        case .authorized, .provisional, .ephemeral:
+            isAuthorized = true
+            return .authorized
+        case .denied:
+            isAuthorized = false
+            return .denied
+        case .notDetermined:
+            isAuthorized = false
+            return .notDetermined
+        @unknown default:
+            isAuthorized = false
+            return .denied
         }
     }
 
@@ -539,6 +571,7 @@ final class ClientViewModel: ObservableObject {
     @Published private(set) var onboardingRelayCheckState: PairingRelayCheckState = .idle
     @Published private(set) var relayManagementCheckState: PairingRelayCheckState = .idle
     @Published private(set) var onboardingStorageProtectionAcknowledged = false
+    @Published private(set) var localNotificationPermission: ClientNotificationPermissionStatus = .notDetermined
     @Published private(set) var archivedPersonaIDs: Set<UUID> = []
     @Published private(set) var receivedAttachmentFileNames: [UUID: String] = [:]
 
@@ -797,7 +830,7 @@ final class ClientViewModel: ObservableObject {
                 statusMessage = "Encrypted local state is ready."
                 bootState = .ready
                 if isOnboardingComplete && !isLocked {
-                    await notificationManager.requestAuthorization()
+                    localNotificationPermission = await notificationManager.refreshAuthorization()
                     syncAll()
                 }
                 return
@@ -1056,7 +1089,7 @@ final class ClientViewModel: ObservableObject {
                 )
             }
             settingsError = nil
-            await notificationManager.requestAuthorization()
+            localNotificationPermission = await notificationManager.refreshAuthorization()
             syncAll()
             return true
         } catch {
@@ -1389,11 +1422,26 @@ final class ClientViewModel: ObservableObject {
     func foregroundResumeSync() {
         guard isOnboardingComplete else { return }
         Task {
-            await notificationManager.requestAuthorization()
+            localNotificationPermission = await notificationManager.refreshAuthorization()
             // Current Core exposes direct relay sync as the authoritative
             // import path. Widget batches remain sealed metadata-only staging
             // until Core publishes a staged-batch ingest API.
             syncAll()
+        }
+    }
+
+    func requestLocalNotificationPermission() async {
+        localNotificationPermission = await notificationManager.requestAuthorization()
+        switch localNotificationPermission {
+        case .authorized:
+            settingsError = nil
+            settingsMessage = "Local message alerts are enabled on this device."
+        case .denied:
+            settingsMessage = nil
+            settingsError = "Local notifications are blocked in System Settings. Noctweave will not prompt again automatically."
+        case .notDetermined:
+            settingsMessage = nil
+            settingsError = "Notification permission was not changed."
         }
     }
 

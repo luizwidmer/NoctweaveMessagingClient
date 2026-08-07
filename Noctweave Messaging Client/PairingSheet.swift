@@ -152,13 +152,28 @@ struct MaturePairingSheet: View {
     }
 
     private var pairingModePicker: some View {
-        Picker("Pairing path", selection: $pairingMode) {
-            Text("Relay").tag(PairingMode.relay)
-            Text("Direct / Offline").tag(PairingMode.direct)
+        HStack(spacing: 4) {
+            pairingModeButton(
+                .relay,
+                title: "Relay",
+                systemImage: "antenna.radiowaves.left.and.right"
+            )
+            pairingModeButton(
+                .direct,
+                title: "Direct / Offline",
+                systemImage: "arrow.left.arrow.right"
+            )
         }
-        .pickerStyle(.segmented)
+        .padding(4)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+        }
         .disabled(model.isPairing)
-        .accessibilityIdentifier("pairing.mode")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Pairing path")
+        .accessibilityValue(pairingMode == .relay ? "Relay" : "Direct / Offline")
         .onChange(of: pairingMode) { _, _ in
             method = .qr
             model.clearPairingLink()
@@ -166,6 +181,31 @@ struct MaturePairingSheet: View {
             updateOutboundFrames(nil)
             checkRelayReadiness()
         }
+    }
+
+    private func pairingModeButton(
+        _ mode: PairingMode,
+        title: String,
+        systemImage: String
+    ) -> some View {
+        let selected = pairingMode == mode
+        return Button {
+            pairingMode = mode
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(selected ? Color.white : Color.primary.opacity(0.78))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 9)
+                .background(
+                    selected ? Color.accentColor.opacity(0.88) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(mode == .relay ? "pairing.mode.relay" : "pairing.mode.direct")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private var pairingExplanation: some View {

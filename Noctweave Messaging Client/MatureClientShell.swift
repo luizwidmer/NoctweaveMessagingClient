@@ -195,6 +195,9 @@ struct MatureClientShell: View {
     }
 
     private var shouldHideSensitiveContent: Bool {
+        if ProcessInfo.processInfo.arguments.contains("UI_TESTING") {
+            return false
+        }
         guard model.privacySettings.hideSensitiveWhenUnfocused else { return false }
         #if os(macOS)
         return !windowController.isActiveForControls
@@ -652,6 +655,8 @@ private struct MatureChatsHome: View {
             MatureTopBar(title: "Chats", subtitle: "Private conversations and groups", backAction: nil) {
                 Button(action: onFiles) { Image(systemName: "rectangle.stack") }
                     .glassCircleButton(diameter: 38)
+                    .accessibilityLabel("Files")
+                    .accessibilityIdentifier("chats.files")
                 Menu {
                     Button("Add Contact", systemImage: "person.crop.circle.badge.plus", action: onAddContact)
                     Button("Create Group", systemImage: "person.3.fill", action: onAddGroup)
