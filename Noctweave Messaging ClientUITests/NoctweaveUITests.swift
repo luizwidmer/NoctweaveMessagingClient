@@ -38,6 +38,28 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Local organization only"].exists)
     }
 
+    func testEncryptedReadyStateSurvivesSignedRelaunch() {
+        XCTAssertTrue(app.staticTexts["Noctweave"].waitForExistence(timeout: 5))
+        app.terminate()
+
+        app = XCUIApplication()
+        app.launchArguments = [
+            "UI_TESTING",
+            "UI_TESTING_READY_STATE",
+            "-ApplePersistenceIgnoreState",
+            "YES",
+            "-NSQuitAlwaysKeepsWindows",
+            "NO"
+        ]
+        app.launch()
+        app.activate()
+        ensurePrimaryWindow()
+
+        XCTAssertTrue(app.staticTexts["Noctweave"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["State integrity check stopped startup"].exists)
+        XCTAssertFalse(app.buttons["boot.resetLocalData"].exists)
+    }
+
     func testPairingOffersRelayAndDirectOfflineFlows() {
         let button = app.buttons["Add Contact"].firstMatch
         XCTAssertTrue(button.waitForExistence(timeout: 5))

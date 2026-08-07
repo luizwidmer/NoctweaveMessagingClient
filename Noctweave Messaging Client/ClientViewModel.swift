@@ -19,6 +19,76 @@ enum ClientNotificationPermissionStatus: Equatable {
     case authorized
 }
 
+private struct ClientStorageLocation {
+    let supportDirectory: URL
+    let scopeIdentifier: String
+}
+
+private enum ClientStorageLocationResolver {
+    static let primaryScopeIdentifier = "org.noctweave.apple-client.primary"
+    private static let unsandboxedDevelopmentScopeIdentifier =
+        "org.noctweave.apple-client.unsandboxed-development"
+
+    static func resolve(
+        fileManager: FileManager = .default,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
+    ) -> ClientStorageLocation {
+        let defaultSupport = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("NoctweaveClient", isDirectory: true)
+
+        #if os(macOS)
+        guard let bundleIdentifier, !bundleIdentifier.isEmpty else {
+            return ClientStorageLocation(
+                supportDirectory: defaultSupport,
+                scopeIdentifier: unsandboxedDevelopmentScopeIdentifier
+            )
+        }
+
+        let sandboxPathComponent = "/Library/Containers/\(bundleIdentifier)/Data/"
+        if defaultSupport.standardizedFileURL.path.contains(sandboxPathComponent) {
+            return ClientStorageLocation(
+                supportDirectory: defaultSupport,
+                scopeIdentifier: primaryScopeIdentifier
+            )
+        }
+
+        // A code-sign-disabled development build resolves Application Support
+        // outside the app container. Reuse an existing production container so
+        // that it cannot fork the encrypted database while advancing the same
+        // Keychain rollback marker. If no container exists yet, isolate that
+        // development database under a distinct marker scope.
+        let containerRoot = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("Containers", isDirectory: true)
+            .appendingPathComponent(bundleIdentifier, isDirectory: true)
+            .appendingPathComponent("Data", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: containerRoot.path, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            return ClientStorageLocation(
+                supportDirectory: containerRoot
+                    .appendingPathComponent("Library", isDirectory: true)
+                    .appendingPathComponent("Application Support", isDirectory: true)
+                    .appendingPathComponent("NoctweaveClient", isDirectory: true),
+                scopeIdentifier: primaryScopeIdentifier
+            )
+        }
+
+        return ClientStorageLocation(
+            supportDirectory: defaultSupport,
+            scopeIdentifier: unsandboxedDevelopmentScopeIdentifier
+        )
+        #else
+        return ClientStorageLocation(
+            supportDirectory: defaultSupport,
+            scopeIdentifier: primaryScopeIdentifier
+        )
+        #endif
+    }
+}
+
 @MainActor
 private final class ClientNotificationManager {
     private var isAuthorized = false
@@ -607,10 +677,8 @@ final class ClientViewModel: ObservableObject {
     private let isUITestProductFixture: Bool
 
     init() {
-        let support = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        )[0].appendingPathComponent("NoctweaveClient", isDirectory: true)
+        let storageLocation = ClientStorageLocationResolver.resolve()
+        let support = storageLocation.supportDirectory
         let isUITest = ProcessInfo.processInfo.arguments.contains("UI_TESTING")
         self.isUITest = isUITest
         isUITestReadyState = ProcessInfo.processInfo.arguments.contains("UI_TESTING_READY_STATE")
@@ -633,12 +701,12 @@ final class ClientViewModel: ObservableObject {
                 rollbackAnchorStore: UITestFileRollbackAnchorStore(
                     fileURL: testRoot.appendingPathComponent("rollback-anchor-v1.json")
                 ),
-                storageScopeIdentifier: "org.noctweave.apple-client.primary"
+                storageScopeIdentifier: ClientStorageLocationResolver.primaryScopeIdentifier
             )
         } else {
             stateStore = ClientStateStore(
                 fileURL: stateURL,
-                storageScopeIdentifier: "org.noctweave.apple-client.primary"
+                storageScopeIdentifier: storageLocation.scopeIdentifier
             )
         }
         attachmentStore = ClientAttachmentStore(
