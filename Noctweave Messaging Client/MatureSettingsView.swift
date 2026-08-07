@@ -62,7 +62,7 @@ struct MatureSettingsView: View {
                         icon: "paintpalette.fill",
                         title: "Appearance",
                         subtitle: ThemePalette(rawValue: selectedPalette)?.displayName ?? "Noir",
-                        color: .purple
+                        color: theme.accent
                     )
 
                     settingsSectionHeader("PROTECTION")
@@ -73,7 +73,7 @@ struct MatureSettingsView: View {
                         icon: "hand.raised.fill",
                         title: "Privacy",
                         subtitle: "Screen, focus, and typing protections",
-                        color: .cyan
+                        color: theme.accent
                     )
                     settingsRow(
                         destination: .appSecurity,
@@ -83,7 +83,7 @@ struct MatureSettingsView: View {
                         subtitle: model.appLockMode == .off
                             ? "App lock is off"
                             : "Protected with \(model.appLockMode.displayName)",
-                        color: .green
+                        color: theme.accent
                     )
                     settingsRow(
                         destination: .storage,
@@ -91,7 +91,7 @@ struct MatureSettingsView: View {
                         icon: "externaldrive.fill.badge.checkmark",
                         title: "Storage Protection",
                         subtitle: "Encrypted local state and memory boundaries",
-                        color: .orange
+                        color: theme.accent
                     )
 
                     settingsSectionHeader("NOCTWEAVE")
@@ -102,7 +102,7 @@ struct MatureSettingsView: View {
                         icon: "doc.text.fill",
                         title: "Legal & About",
                         subtitle: "Privacy policy, terms, licenses, and version",
-                        color: .indigo
+                        color: theme.accent
                     )
                 }
                 .padding(16)

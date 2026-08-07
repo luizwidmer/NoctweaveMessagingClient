@@ -726,13 +726,16 @@ private struct MatureChatsHome: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: compact ? 300 : 440)
             HStack(spacing: 10) {
-                Button("Add Contact", action: onAddContact)
+                Button("Add Contact", systemImage: "person.crop.circle.badge.plus", action: onAddContact)
                     .glassButton(prominent: true)
-                Button("Create Group", action: onAddGroup)
-                    .glassButton()
-            }
-            Button("Join Existing Group", systemImage: "person.badge.plus", action: onJoinGroup)
+                Menu {
+                    Button("Create Group", systemImage: "person.3.fill", action: onAddGroup)
+                    Button("Join Existing Group", systemImage: "person.badge.plus", action: onJoinGroup)
+                } label: {
+                    Label("Groups", systemImage: "person.3")
+                }
                 .glassButton()
+            }
         }
         .uniformGlassCard(
             cornerRadius: compact ? 24 : 28,
@@ -2716,10 +2719,13 @@ private struct MatureBottomBar: View {
     @Binding var selection: ClientDestination
     let didSelect: () -> Void
 
-    private let items: [ClientDestination] = [.chats, .contacts, .code, .files, .relays, .identity, .settings]
+    // Files remain available from the Chats header and attachment menu. Keeping
+    // the primary dock to six destinations preserves readable labels and touch
+    // targets on compact phones instead of shrinking seven tabs into the width.
+    private let items: [ClientDestination] = [.chats, .contacts, .code, .relays, .identity, .settings]
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 3) {
             ForEach(items) { item in
                 Button {
                     selection = item
@@ -2727,14 +2733,14 @@ private struct MatureBottomBar: View {
                 } label: {
                     VStack(spacing: 4) {
                         Image(systemName: item.icon)
-                            .font(.system(size: 17, weight: selection == item ? .semibold : .medium))
+                            .font(.system(size: 18, weight: selection == item ? .semibold : .medium))
                         Text(bottomTitle(item))
-                            .font(.system(size: 9, weight: .medium))
+                            .font(.system(size: 10, weight: selection == item ? .semibold : .medium))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.78)
+                            .minimumScaleFactor(0.82)
                     }
                     .foregroundStyle(selection == item ? theme.accent : Color.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 48)
+                    .frame(maxWidth: .infinity, minHeight: 52)
                     .background(
                         selection == item ? theme.accent.opacity(0.16) : Color.clear,
                         in: RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -2745,9 +2751,9 @@ private struct MatureBottomBar: View {
                 .accessibilityIdentifier("tab.\(item.rawValue)")
             }
         }
-        .padding(.horizontal, 4)
-        .padding(.top, 6)
-        .padding(.bottom, 5)
+        .padding(.horizontal, 6)
+        .padding(.top, 7)
+        .padding(.bottom, 6)
         .noctweaveNavigationSurface(edge: .top)
     }
 
