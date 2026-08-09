@@ -263,8 +263,14 @@ private struct ClientOnboardingView: View {
     @State private var acceptedTerms = false
     @State private var showingLegalDocuments = false
     @State private var showingAdvancedRelayOptions = false
+    @State private var showingPrivacyChoices = false
 
     private let bundledTestRelay = "https://noctyratest.luizwidmer.com"
+
+    init(model: ClientViewModel) {
+        self.model = model
+        _appLockMode = State(initialValue: model.biometricsAvailable ? .biometrics : .off)
+    }
 
     var body: some View {
         ZStack {
@@ -395,9 +401,12 @@ private struct ClientOnboardingView: View {
                 Button {
                     relay = bundledTestRelay
                 } label: {
-                    Label("Use bundled test relay", systemImage: "testtube.2")
+                    Label("Try the Public Test Relay", systemImage: "testtube.2")
                 }
                 .glassButton(compact: true)
+                Text("For evaluation only. The test relay is not an account, recovery service, or availability guarantee; replace it with a relay you trust before relying on this installation.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 DisclosureGroup("Advanced access options", isExpanded: $showingAdvancedRelayOptions) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -410,7 +419,7 @@ private struct ClientOnboardingView: View {
                     .padding(.top, 8)
                 }
 
-                Button("Check and Save Relay") {
+                Button("Verify Relay and Continue") {
                     model.validateOnboardingRelay(relayText: relay, password: relayPassword)
                 }
                 .glassButton(prominent: true)
@@ -441,34 +450,59 @@ private struct ClientOnboardingView: View {
         case .privacy:
             onboardingSection(
                 icon: "hand.raised.fill",
-                title: "Choose local privacy controls",
-                message: "These controls reduce exposure on the device. They cannot protect against a fully compromised operating system or hardware."
+                title: "Use recommended privacy",
+                message: "Noctweave can apply a balanced private setup now. You can review or change every choice here and later in Settings."
             ) {
-                privacyChoice(
-                    "Noctweave keyboard",
-                    detail: "Use the in-app keyboard so message text does not pass through the operating system keyboard or its suggestions.",
-                    isOn: $privacy.secureTypingEnabled
+                VStack(alignment: .leading, spacing: 9) {
+                    recommendedPrivacyRow("Noctweave keyboard", icon: "keyboard.badge.ellipsis")
+                    recommendedPrivacyRow("Private in-app camera", icon: "camera.fill")
+                    recommendedPrivacyRow("Sensitive details hidden when unfocused", icon: "eye.slash.fill")
+                    recommendedPrivacyRow("Encrypted attachments fetched automatically", icon: "arrow.down.circle.fill")
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(theme.surfaceBorder.opacity(0.65), lineWidth: 0.8)
                 )
-                privacyChoice(
-                    "In-app camera",
-                    detail: "Capture directly into the encrypted attachment pipeline without first writing to the Photos library.",
-                    isOn: $privacy.useSecureCameraCapture
-                )
-                privacyChoice(
-                    "Auto-download attachments",
-                    detail: "Fetch encrypted files automatically. Turn this off to approve each download in chat or the file gallery.",
-                    isOn: $privacy.autoDownloadAttachments
-                )
-                privacyChoice(
-                    "Hide when unfocused",
-                    detail: "Cover contact, identity, relay, and conversation details whenever the app loses focus.",
-                    isOn: $privacy.hideSensitiveWhenUnfocused
-                )
-                Button("Save Privacy Choices") {
-                    Task { _ = await model.completeOnboardingPrivacy(privacy) }
+
+                Button("Continue with Recommended Privacy") {
+                    privacy = recommendedPrivacySettings
+                    Task { _ = await model.completeOnboardingPrivacy(recommendedPrivacySettings) }
                 }
                 .glassButton(prominent: true)
                 .accessibilityIdentifier("onboarding.privacy.continue")
+
+                DisclosureGroup("Customize privacy controls", isExpanded: $showingPrivacyChoices) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        privacyChoice(
+                            "Noctweave keyboard",
+                            detail: "Use the in-app keyboard so message text does not pass through the operating system keyboard or its suggestions.",
+                            isOn: $privacy.secureTypingEnabled
+                        )
+                        privacyChoice(
+                            "In-app camera",
+                            detail: "Capture directly into the encrypted attachment pipeline without first writing to the Photos library.",
+                            isOn: $privacy.useSecureCameraCapture
+                        )
+                        privacyChoice(
+                            "Auto-download attachments",
+                            detail: "Fetch encrypted files automatically. Turn this off to approve each download in chat or the file gallery.",
+                            isOn: $privacy.autoDownloadAttachments
+                        )
+                        privacyChoice(
+                            "Hide when unfocused",
+                            detail: "Cover contact, identity, relay, and conversation details whenever the app loses focus.",
+                            isOn: $privacy.hideSensitiveWhenUnfocused
+                        )
+                        Button("Save Custom Privacy Choices") {
+                            Task { _ = await model.completeOnboardingPrivacy(privacy) }
+                        }
+                        .glassButton()
+                    }
+                    .padding(.top, 10)
+                }
             }
         case .appLock:
             onboardingSection(
@@ -487,7 +521,14 @@ private struct ClientOnboardingView: View {
                                 Image(systemName: lockIcon(for: mode))
                                     .frame(width: 28)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(lockTitle(for: mode)).font(.subheadline.weight(.semibold))
+                                    HStack(spacing: 6) {
+                                        Text(lockTitle(for: mode)).font(.subheadline.weight(.semibold))
+                                        if mode == .biometrics && model.biometricsAvailable {
+                                            Text("RECOMMENDED")
+                                                .font(.caption2.weight(.bold))
+                                                .foregroundStyle(theme.accent)
+                                        }
+                                    }
                                     Text(lockDetail(for: mode))
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
@@ -597,9 +638,36 @@ private struct ClientOnboardingView: View {
         )
     }
 
+    private var recommendedPrivacySettings: PrivacySettings {
+        PrivacySettings(
+            secureTypingEnabled: true,
+            secureTypingKeyboard: .noctweave,
+            useSecureCameraCapture: true,
+            autoDownloadAttachments: true,
+            hideSensitiveWhenUnfocused: true,
+            macBlockWindowCapture: true
+        )
+    }
+
+    private func recommendedPrivacyRow(_ title: String, icon: String) -> some View {
+        Label(title, systemImage: icon)
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(.secondary)
+    }
+
     private var availableLockModes: [AppLockMode] {
-        AppLockMode.allCases.filter { mode in
+        let available = AppLockMode.allCases.filter { mode in
             model.biometricsAvailable || (mode != .biometrics && mode != .biometricsAndPin)
+        }
+        return available.sorted { lockModeRank($0) < lockModeRank($1) }
+    }
+
+    private func lockModeRank(_ mode: AppLockMode) -> Int {
+        switch mode {
+        case .biometrics: 0
+        case .biometricsAndPin: 1
+        case .pinOnly: 2
+        case .off: 3
         }
     }
 
