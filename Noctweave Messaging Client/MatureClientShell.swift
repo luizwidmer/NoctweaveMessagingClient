@@ -904,6 +904,7 @@ private struct MatureConversationView: View {
                     Image(systemName: "paperclip")
                 }
                 .glassCircleButton(diameter: 42)
+                .accessibilityLabel("Attachments")
                 TextField("Message", text: $model.draftMessage, axis: .vertical)
                     .lineLimit(1...2)
                     .autocorrectionDisabled(model.privacySettings.secureTypingEnabled)
@@ -1614,8 +1615,10 @@ private struct MatureContactsView: View {
     var body: some View {
         VStack(spacing: 0) {
             MatureTopBar(title: "Contact Book", subtitle: "People you trust", backAction: nil) {
-                Button(action: onAdd) { Image(systemName: "person.badge.plus") }
-                    .glassCircleButton(prominent: true, diameter: 38)
+                if !model.relationships.isEmpty {
+                    Button(action: onAdd) { Image(systemName: "person.badge.plus") }
+                        .glassCircleButton(prominent: true, diameter: 38)
+                }
             }
             ScrollView {
                 LazyVStack(spacing: 10) {
@@ -1696,8 +1699,10 @@ private struct MatureMyCodeView: View {
     var body: some View {
         VStack(spacing: 0) {
             MatureTopBar(title: "My Code", subtitle: "Share a one-use invitation", backAction: nil) {
-                Button(action: onCreate) { Image(systemName: "plus") }
-                    .glassCircleButton(prominent: true, diameter: 38)
+                if model.pairingLink != nil {
+                    Button(action: onCreate) { Image(systemName: "plus") }
+                        .glassCircleButton(prominent: true, diameter: 38)
+                }
             }
             ScrollView {
                 VStack(spacing: 18) {
@@ -1908,9 +1913,11 @@ private struct MatureRelaysView: View {
                 subtitle: "\(preferences.count) saved · independent relationship routes",
                 backAction: nil
             ) {
-                Button(action: onEdit) { Image(systemName: "plus") }
-                    .glassCircleButton(diameter: 38)
-                    .accessibilityLabel("Add Relay")
+                if !preferences.isEmpty {
+                    Button(action: onEdit) { Image(systemName: "plus") }
+                        .glassCircleButton(diameter: 38)
+                        .accessibilityLabel("Add Relay")
+                }
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
