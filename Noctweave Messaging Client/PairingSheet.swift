@@ -907,10 +907,18 @@ struct MaturePairingSheet: View {
                     showingFileExporter = true
                 case .systemShare:
                     removeTemporaryShareFile()
-                    let url = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("Noctweave Pairing")
+                    let directory = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("NoctweavePairingShares", isDirectory: true)
+                    try SecureRegularFileIO.ensurePrivateDirectory(at: directory)
+                    let url = directory
+                        .appendingPathComponent("Noctweave Pairing \(UUID().uuidString)")
                         .appendingPathExtension("noctpair")
-                    try package.write(to: url, options: .atomic)
+                    try SecureRegularFileIO.writePrivate(
+                        package,
+                        to: url,
+                        maximumBytes: PasswordProtectedPairingPackageV1.maximumPackageBytes,
+                        excludedFromBackup: false
+                    )
                     shareURL = url
                     showingShareSheet = true
                 }
@@ -928,11 +936,10 @@ struct MaturePairingSheet: View {
             defer {
                 if scoped { url.stopAccessingSecurityScopedResource() }
             }
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            guard !data.isEmpty,
-                  data.count <= PasswordProtectedPairingPackageV1.maximumPackageBytes else {
-                throw CocoaError(.fileReadCorruptFile)
-            }
+            let data = try SecureRegularFileIO.read(
+                from: url,
+                maximumBytes: PasswordProtectedPairingPackageV1.maximumPackageBytes
+            )
             importedPackage = data
             importPassword = ""
             invitation = ""

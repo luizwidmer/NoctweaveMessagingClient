@@ -231,17 +231,10 @@ private final class VoiceRecorderController: NSObject, ObservableObject {
             try? securelyRemoveRecordingFile(at: url)
             recordingURL = nil
         }
-        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-        guard values.isRegularFile == true,
-              let fileSize = values.fileSize,
-              fileSize > 0,
-              fileSize <= AttachmentDescriptor.maximumTransportBytes else {
-            throw VoiceRecorderError.recordingTooLarge
-        }
-        let data = try Data(contentsOf: url)
-        guard data.count <= AttachmentDescriptor.maximumTransportBytes else {
-            throw VoiceRecorderError.recordingTooLarge
-        }
+        let data = try SecureRegularFileIO.read(
+            from: url,
+            maximumBytes: AttachmentDescriptor.maximumTransportBytes
+        )
         return (data, "voice.m4a", "audio/m4a")
     }
 

@@ -172,34 +172,26 @@ private final class ClientAttachmentStore {
         }
         let fileName = "\(attachmentId.uuidString).bin"
         let url = try attachmentURL(fileName: fileName)
-        guard let sealed = try? AES.GCM.seal(data, using: storageKey()),
+        guard let sealed = try? AES.GCM.seal(
+            data,
+            using: storageKey(),
+            authenticating: Self.authenticatedData(for: attachmentId)
+        ),
               var combined = sealed.combined else {
             throw ClientAttachmentStoreError.invalidPayload
         }
         defer { combined.secureWipeClientAttachment() }
         let envelope = try NoctweaveCoder.encode(
-            ClientAttachmentEnvelope(version: 1, sealed: combined)
+            ClientAttachmentEnvelope(version: 2, sealed: combined)
         )
         guard envelope.count <= Self.maximumStoredAttachmentBytes else {
             throw ClientAttachmentStoreError.fileTooLarge
         }
-        let parent = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(
-            at: parent,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
+        try SecureRegularFileIO.writePrivate(
+            envelope,
+            to: url,
+            maximumBytes: Self.maximumStoredAttachmentBytes
         )
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
-        #if os(iOS)
-        try envelope.write(to: url, options: [.atomic, .completeFileProtection])
-        #else
-        try envelope.write(to: url, options: [.atomic])
-        #endif
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        var resourceValues = URLResourceValues()
-        resourceValues.isExcludedFromBackup = true
-        var mutableURL = url
-        try mutableURL.setResourceValues(resourceValues)
         return fileName
     }
 
@@ -210,7 +202,10 @@ private final class ClientAttachmentStore {
     func existingFileName(attachmentId: UUID) -> String? {
         let fileName = "\(attachmentId.uuidString).bin"
         guard let url = try? attachmentURL(fileName: fileName),
-              FileManager.default.fileExists(atPath: url.path) else {
+              SecureRegularFileIO.privateRegularFileExists(
+                at: url,
+                maximumBytes: Self.maximumStoredAttachmentBytes
+              ) else {
             return nil
         }
         return fileName
@@ -218,35 +213,50 @@ private final class ClientAttachmentStore {
 
     func loadSanitizedAttachment(fileName: String) throws -> Data {
         let url = try attachmentURL(fileName: fileName)
-        let encoded = try Data(contentsOf: url, options: [.mappedIfSafe])
-        guard encoded.count <= Self.maximumStoredAttachmentBytes else {
-            throw ClientAttachmentStoreError.fileTooLarge
-        }
+        let attachmentId = try attachmentID(fileName: fileName)
+        let encoded = try SecureRegularFileIO.read(
+            from: url,
+            maximumBytes: Self.maximumStoredAttachmentBytes,
+            requirePrivateOwner: true
+        )
         let envelope = try NoctweaveCoder.decode(ClientAttachmentEnvelope.self, from: encoded)
-        guard envelope.version == 1,
+        guard (envelope.version == 1 || envelope.version == 2),
               let sealed = try? AES.GCM.SealedBox(combined: envelope.sealed) else {
             throw ClientAttachmentStoreError.invalidPayload
         }
-        let opened = try AES.GCM.open(sealed, using: storageKey())
+        let key = try storageKey()
+        let opened: Data
+        if envelope.version == 2 {
+            opened = try AES.GCM.open(
+                sealed,
+                using: key,
+                authenticating: Self.authenticatedData(for: attachmentId)
+            )
+        } else {
+            opened = try AES.GCM.open(sealed, using: key)
+        }
         guard !opened.isEmpty,
               opened.count <= AttachmentDescriptor.maximumTransportBytes else {
             throw ClientAttachmentStoreError.invalidPayload
+        }
+        if envelope.version == 1 {
+            _ = try saveSanitizedAttachment(opened, attachmentId: attachmentId)
         }
         return opened
     }
 
     func eraseAllLocalAttachments() throws {
-        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        do {
+            try SecureRegularFileIO.ensurePrivateDirectory(at: directory)
+        } catch SecureRegularFileIOError.notFound {
+            return
+        }
         let entries = try FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
             options: [.skipsHiddenFiles]
         )
         for entry in entries {
-            let values = try entry.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-            if values.isRegularFile == true, values.isSymbolicLink != true {
-                bestEffortOverwrite(entry)
-            }
             try FileManager.default.removeItem(at: entry)
         }
         try FileManager.default.removeItem(at: directory)
@@ -262,6 +272,20 @@ private final class ClientAttachmentStore {
         return directory.appendingPathComponent(trimmed, isDirectory: false)
     }
 
+    private func attachmentID(fileName: String) throws -> UUID {
+        let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == (trimmed as NSString).lastPathComponent,
+              trimmed.hasSuffix(".bin"),
+              let identifier = UUID(uuidString: String(trimmed.dropLast(4))) else {
+            throw ClientAttachmentStoreError.invalidFileName
+        }
+        return identifier
+    }
+
+    private static func authenticatedData(for attachmentId: UUID) -> Data {
+        Data("org.noctweave.client-attachment/v2\0\(attachmentId.uuidString.lowercased())".utf8)
+    }
+
     private func storageKey() throws -> SymmetricKey {
         try SecureStorageKeyProvider.shared.loadOrCreateKey(
             service: Self.keyService,
@@ -269,27 +293,6 @@ private final class ClientAttachmentStore {
         )
     }
 
-    private func bestEffortOverwrite(_ url: URL) {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let byteCount = (attributes[.size] as? NSNumber)?.uint64Value,
-              byteCount > 0,
-              let handle = try? FileHandle(forWritingTo: url) else {
-            return
-        }
-        defer { try? handle.close() }
-        let chunkSize = 64 * 1_024
-        let zeroChunk = Data(repeating: 0, count: chunkSize)
-        var remaining = byteCount
-        try? handle.seek(toOffset: 0)
-        while remaining > 0 {
-            let count = min(UInt64(chunkSize), remaining)
-            try? handle.write(contentsOf: count == UInt64(chunkSize)
-                ? zeroChunk
-                : Data(repeating: 0, count: Int(count)))
-            remaining -= count
-        }
-        try? handle.synchronize()
-    }
 }
 
 private struct ClientAttachmentEnvelope: Codable {
@@ -412,11 +415,7 @@ enum ClientAttachmentSanitizer {
         guard !data.isEmpty else { throw ClientAttachmentWorkflowError.unsupportedPayload }
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("NoctweaveAttachmentSanitize", isDirectory: true)
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
+        try SecureRegularFileIO.ensurePrivateDirectory(at: directory)
         let inputURL = directory.appendingPathComponent(UUID().uuidString)
             .appendingPathExtension(fileExtension.isEmpty ? "audio" : fileExtension)
         let outputURL = directory.appendingPathComponent(UUID().uuidString)
@@ -425,7 +424,12 @@ enum ClientAttachmentSanitizer {
             try? FileManager.default.removeItem(at: inputURL)
             try? FileManager.default.removeItem(at: outputURL)
         }
-        try data.write(to: inputURL, options: [.atomic])
+        try SecureRegularFileIO.writePrivate(
+            data,
+            to: inputURL,
+            maximumBytes: AttachmentDescriptor.maximumTransportBytes,
+            excludedFromBackup: false
+        )
         let asset = AVURLAsset(url: inputURL)
         guard !(try await asset.loadTracks(withMediaType: .audio)).isEmpty,
               let exporter = AVAssetExportSession(
@@ -440,8 +444,10 @@ enum ClientAttachmentSanitizer {
         } catch {
             throw ClientAttachmentWorkflowError.audioExportFailed
         }
-        let sanitized = try Data(contentsOf: outputURL)
-        guard !sanitized.isEmpty else { throw ClientAttachmentWorkflowError.audioExportFailed }
+        let sanitized = try SecureRegularFileIO.read(
+            from: outputURL,
+            maximumBytes: AttachmentDescriptor.maximumTransportBytes
+        )
         return ClientSanitizedAttachmentPayload(data: sanitized, mimeType: "audio/mp4")
     }
 }
@@ -2115,14 +2121,10 @@ final class ClientViewModel: ObservableObject {
             if accessGranted { url.stopAccessingSecurityScopedResource() }
         }
         do {
-            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-            guard values.isRegularFile == true,
-                  let byteCount = values.fileSize,
-                  byteCount > 0,
-                  byteCount <= AttachmentDescriptor.maximumTransportBytes else {
-                throw NoctweaveClientError.invalidAttachment
-            }
-            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+            let data = try SecureRegularFileIO.read(
+                from: url,
+                maximumBytes: AttachmentDescriptor.maximumTransportBytes
+            )
             let type = UTType(filenameExtension: url.pathExtension)
             let mimeType = type?.preferredMIMEType ?? "application/octet-stream"
             sendSanitizedDirectAttachment(
@@ -3560,21 +3562,27 @@ private final class UITestFileRollbackAnchorStore:
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        try NoctweaveCoder.encode(replacement, sortedKeys: true)
-            .write(to: fileURL, options: .atomic)
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: fileURL.path
+        try SecureRegularFileIO.writePrivate(
+            NoctweaveCoder.encode(replacement, sortedKeys: true),
+            to: fileURL,
+            maximumBytes: 64 * 1_024
         )
     }
 
     private func loadUnlocked() throws -> ClientStateRollbackAnchorRecord? {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        let data: Data
+        do {
+            data = try SecureRegularFileIO.read(
+                from: fileURL,
+                maximumBytes: 64 * 1_024,
+                requirePrivateOwner: true
+            )
+        } catch SecureRegularFileIOError.notFound {
             return nil
         }
         return try NoctweaveCoder.decode(
             ClientStateRollbackAnchorRecord.self,
-            from: Data(contentsOf: fileURL)
+            from: data
         )
     }
 }

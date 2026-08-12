@@ -30,6 +30,9 @@ enum AttachmentSanitizer {
     private static let maxOfficeUncompressedBytes = 64 * 1024 * 1024
     private static let maxOfficeInspectableXMLBytes = 8 * 1024 * 1024
     private static let maxPDFPages = 200
+    // Stay below Core Graphics' implementation-level page-size clamp so the
+    // check is observable before PDFKit renders attacker-controlled content.
+    private static let maxPDFDimension: CGFloat = 12_000
 
     static func sanitizeDocument(data: Data, fileName: String?, mimeType: String) throws -> SanitizedAttachmentPayload {
         let normalizedMime = normalizeMimeType(mimeType)
@@ -155,10 +158,19 @@ enum AttachmentSanitizer {
             }
             let bounds = page.bounds(for: .mediaBox)
             guard bounds.width > 0, bounds.height > 0,
-                  bounds.width.isFinite, bounds.height.isFinite else {
+                  bounds.width.isFinite, bounds.height.isFinite,
+                  bounds.width <= maxPDFDimension,
+                  bounds.height <= maxPDFDimension else {
                 throw AttachmentSanitizerError.invalidDocument
             }
-            context.beginPDFPage([kCGPDFContextMediaBox as String: bounds] as CFDictionary)
+            var mediaBox = bounds
+            let mediaBoxData = Data(
+                bytes: &mediaBox,
+                count: MemoryLayout<CGRect>.size
+            ) as CFData
+            context.beginPDFPage([
+                kCGPDFContextMediaBox as String: mediaBoxData
+            ] as CFDictionary)
             context.saveGState()
             context.setFillColor(CGColor(gray: 1, alpha: 1))
             context.fill(bounds)

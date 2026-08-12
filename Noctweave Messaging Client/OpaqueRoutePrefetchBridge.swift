@@ -83,11 +83,7 @@ enum OpaqueRoutePrefetchBridge {
             routes: routes
         )
         let directory = try sharedDirectory()
-        try FileManager.default.createDirectory(
-            at: directory,
-            withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
+        try SecureRegularFileIO.ensurePrivateDirectory(at: directory)
         let keyData = try loadOrCreateKeyData()
         let key = SymmetricKey(data: keyData)
         var plaintext = try NoctweaveCoder.encode(config, sortedKeys: true)
@@ -113,12 +109,11 @@ enum OpaqueRoutePrefetchBridge {
             throw PrefetchBridgeError.configTooLarge
         }
         let configURL = directory.appendingPathComponent("route-config-v1.bin")
-        #if os(iOS)
-        try encoded.write(to: configURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        #else
-        try encoded.write(to: configURL, options: .atomic)
-        #endif
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configURL.path)
+        try SecureRegularFileIO.writePrivate(
+            encoded,
+            to: configURL,
+            maximumBytes: maximumConfigBytes
+        )
 
         // The foreground client remains authoritative. Widget pulls never
         // commit relay cursors, so clearing its cache cannot lose a message.

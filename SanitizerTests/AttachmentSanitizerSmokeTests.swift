@@ -8,6 +8,7 @@ struct AttachmentSanitizerSmokeTests {
     static func main() throws {
         try testTextAttachmentIsNormalized()
         try testPDFIsRewritten()
+        try testPDFWithUnsafeDimensionsIsRejected()
         try testDocxMetadataIsDropped()
         try testXlsxIsAccepted()
         try testPptxIsAccepted()
@@ -43,6 +44,19 @@ struct AttachmentSanitizerSmokeTests {
             throw TestFailure("sanitized PDF should parse")
         }
         try assert(document.pageCount == 1, "sanitized PDF should preserve one page")
+        let bounds = document.page(at: 0)?.bounds(for: .mediaBox)
+        try assert(bounds?.width == 200 && bounds?.height == 200, "sanitized PDF should preserve safe page dimensions")
+    }
+
+    private static func testPDFWithUnsafeDimensionsIsRejected() throws {
+        let input = try makeSinglePagePDF(width: 12_001, height: 200)
+        try expectThrows("PDF dimensions above the rendering limit should be rejected") {
+            _ = try AttachmentSanitizer.sanitizeDocument(
+                data: input,
+                fileName: "oversized.pdf",
+                mimeType: "application/pdf"
+            )
+        }
     }
 
     private static func testDocxMetadataIsDropped() throws {
@@ -196,14 +210,19 @@ struct AttachmentSanitizerSmokeTests {
         }
     }
 
-    private static func makeSinglePagePDF() throws -> Data {
+    private static func makeSinglePagePDF(
+        width: CGFloat = 200,
+        height: CGFloat = 200
+    ) throws -> Data {
         let output = NSMutableData()
-        guard let consumer = CGDataConsumer(data: output),
-              let context = CGContext(consumer: consumer, mediaBox: nil, nil) else {
+        guard let consumer = CGDataConsumer(data: output) else {
             throw TestFailure("failed to create PDF context")
         }
-        let bounds = CGRect(x: 0, y: 0, width: 200, height: 200)
-        context.beginPDFPage([kCGPDFContextMediaBox as String: bounds] as CFDictionary)
+        var bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        guard let context = CGContext(consumer: consumer, mediaBox: &bounds, nil) else {
+            throw TestFailure("failed to create PDF context")
+        }
+        context.beginPDFPage(nil)
         context.setFillColor(CGColor(gray: 1, alpha: 1))
         context.fill(bounds)
         context.setFillColor(CGColor(gray: 0, alpha: 1))

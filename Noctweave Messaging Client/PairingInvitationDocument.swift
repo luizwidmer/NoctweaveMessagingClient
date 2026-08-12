@@ -55,11 +55,10 @@ final class PairingInvitationInbox: ObservableObject {
             if scoped { url.stopAccessingSecurityScopedResource() }
         }
         do {
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            guard !data.isEmpty,
-                  data.count <= PasswordProtectedPairingPackageV1.maximumPackageBytes else {
-                throw CocoaError(.fileReadCorruptFile)
-            }
+            let data = try SecureRegularFileIO.read(
+                from: url,
+                maximumBytes: PasswordProtectedPairingPackageV1.maximumPackageBytes
+            )
             pendingPackage = data
             pendingError = nil
         } catch {
