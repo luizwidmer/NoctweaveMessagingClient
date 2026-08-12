@@ -1,5 +1,6 @@
 import AppIntents
 import CryptoKit
+import Darwin
 import Foundation
 import NoctweaveCore
 import Security
@@ -83,19 +84,11 @@ private struct OpaqueRouteWidgetStore {
     }
 
     func loadConfig() throws -> OpaqueRoutePrefetchConfigV1? {
-        guard FileManager.default.fileExists(atPath: configURL.path) else { return nil }
-        let values = try configURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-        guard values.isRegularFile == true,
-              let size = values.fileSize,
-              size >= 0,
-              size <= Self.maximumConfigBytes else {
-            throw OpaqueRouteWidgetError.configTooLarge
-        }
-        var stored = try Data(contentsOf: configURL)
+        guard var stored = try readBoundedPrivateConfig(
+            from: configURL,
+            maximumBytes: Self.maximumConfigBytes
+        ) else { return nil }
         defer { stored.wipeWidgetBytes() }
-        guard stored.count <= Self.maximumConfigBytes else {
-            throw OpaqueRouteWidgetError.configTooLarge
-        }
         let envelope = try NoctweaveCoder.decode(
             OpaqueRoutePrefetchSealedFileV1.self,
             from: stored
@@ -198,6 +191,97 @@ private struct OpaqueRouteWidgetStore {
         guard let data = try? JSONEncoder().encode(snapshot) else { return }
         UserDefaults(suiteName: appGroupIdentifier)?.set(data, forKey: snapshotKey)
         WidgetCenter.shared.reloadTimelines(ofKind: "NoctweaveSyncDashboardWidget")
+    }
+
+    private func readBoundedPrivateConfig(
+        from url: URL,
+        maximumBytes: Int
+    ) throws -> Data? {
+        guard maximumBytes >= 0, maximumBytes < Int.max else {
+            throw OpaqueRouteWidgetError.configTooLarge
+        }
+        let directory: Int32 = url.deletingLastPathComponent()
+            .withUnsafeFileSystemRepresentation { path in
+                guard let path else { return -1 }
+                return Darwin.open(
+                    path,
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+                )
+            }
+        if directory < 0, errno == ENOENT { return nil }
+        guard directory >= 0 else {
+            throw OpaqueRouteWidgetError.invalidConfig
+        }
+        defer { _ = Darwin.close(directory) }
+        let name = url.lastPathComponent
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
+            throw OpaqueRouteWidgetError.invalidConfig
+        }
+        let descriptor: Int32 = name.withCString { filename in
+            Darwin.openat(
+                directory,
+                filename,
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+            )
+        }
+        if descriptor < 0, errno == ENOENT { return nil }
+        guard descriptor >= 0 else {
+            throw OpaqueRouteWidgetError.invalidConfig
+        }
+        defer { _ = Darwin.close(descriptor) }
+
+        var before = stat()
+        guard Darwin.fstat(descriptor, &before) == 0,
+              (before.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              before.st_uid == geteuid(),
+              (before.st_mode & mode_t(0o077)) == 0,
+              before.st_size > 0 else {
+            throw OpaqueRouteWidgetError.invalidConfig
+        }
+        guard UInt64(before.st_size) <= UInt64(maximumBytes) else {
+            throw OpaqueRouteWidgetError.configTooLarge
+        }
+
+        var data = Data()
+        data.reserveCapacity(Int(before.st_size))
+        var buffer = [UInt8](
+            repeating: 0,
+            count: min(64 * 1_024, maximumBytes + 1)
+        )
+        while true {
+            let remaining = maximumBytes + 1 - data.count
+            guard remaining > 0 else {
+                throw OpaqueRouteWidgetError.configTooLarge
+            }
+            let requested = min(buffer.count, remaining)
+            let count = buffer.withUnsafeMutableBytes { raw -> Int in
+                guard let base = raw.baseAddress else { return 0 }
+                return Darwin.read(descriptor, base, requested)
+            }
+            if count < 0, errno == EINTR { continue }
+            guard count >= 0 else {
+                throw OpaqueRouteWidgetError.invalidConfig
+            }
+            if count == 0 { break }
+            data.append(contentsOf: buffer[0..<count])
+            guard data.count <= maximumBytes else {
+                throw OpaqueRouteWidgetError.configTooLarge
+            }
+        }
+
+        var after = stat()
+        guard Darwin.fstat(descriptor, &after) == 0,
+              before.st_dev == after.st_dev,
+              before.st_ino == after.st_ino,
+              before.st_size == after.st_size,
+              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec,
+              data.count == Int(after.st_size) else {
+            throw OpaqueRouteWidgetError.invalidConfig
+        }
+        return data
     }
 }
 

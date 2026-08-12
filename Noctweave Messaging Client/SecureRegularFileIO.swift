@@ -20,6 +20,9 @@ enum SecureRegularFileIO {
         allowEmpty: Bool = false,
         requirePrivateOwner: Bool = false
     ) throws -> Data {
+        guard maximumBytes >= 0, maximumBytes < Int.max else {
+            throw SecureRegularFileIOError.tooLarge
+        }
         let descriptor: Int32 = url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return -1 }
             return open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
@@ -103,7 +106,7 @@ enum SecureRegularFileIO {
         maximumBytes: Int,
         excludedFromBackup: Bool = true
     ) throws {
-        guard !data.isEmpty, data.count <= maximumBytes else {
+        guard maximumBytes >= 0, !data.isEmpty, data.count <= maximumBytes else {
             throw SecureRegularFileIOError.tooLarge
         }
         let directoryURL = fileURL.deletingLastPathComponent()
@@ -140,6 +143,13 @@ enum SecureRegularFileIO {
         guard fchmod(descriptor, mode_t(0o600)) == 0 else {
             throw SecureRegularFileIOError.inaccessible
         }
+        #if os(iOS) && !targetEnvironment(simulator)
+        // Darwin content-protection class C is
+        // NSFileProtectionCompleteUntilFirstUserAuthentication.
+        guard fcntl(descriptor, F_SETPROTECTIONCLASS, 3) == 0 else {
+            throw SecureRegularFileIOError.inaccessible
+        }
+        #endif
         try data.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             var written = 0
@@ -154,40 +164,99 @@ enum SecureRegularFileIO {
                 written += result
             }
         }
-        guard fsync(descriptor) == 0, close(descriptor) == 0 else {
-            descriptorIsOpen = false
+        guard fsync(descriptor) == 0 else {
             throw SecureRegularFileIOError.inaccessible
         }
-        descriptorIsOpen = false
+        var committedStatus = stat()
+        guard fstat(descriptor, &committedStatus) == 0 else {
+            throw SecureRegularFileIOError.inaccessible
+        }
         let result = temporaryName.withCString { temporary in
             name.withCString { destination in
                 renameat(directory, temporary, directory, destination)
             }
         }
-        guard result == 0, fsync(directory) == 0 else {
+        guard result == 0 else {
             throw SecureRegularFileIOError.inaccessible
         }
         temporaryExists = false
 
-        do {
-            #if os(iOS)
-            try FileManager.default.setAttributes(
-                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-                ofItemAtPath: fileURL.path
+        if excludedFromBackup {
+            try setExcludedFromBackup(
+                at: fileURL,
+                directory: directory,
+                name: name,
+                expected: committedStatus
             )
-            #endif
-            if excludedFromBackup {
-                var values = URLResourceValues()
-                values.isExcludedFromBackup = true
-                var mutableURL = fileURL
-                try mutableURL.setResourceValues(values)
-            }
-        } catch {
-            fileURL.withUnsafeFileSystemRepresentation { path in
-                if let path { _ = unlink(path) }
-            }
+        }
+        guard fsync(descriptor) == 0, fsync(directory) == 0 else {
             throw SecureRegularFileIOError.inaccessible
         }
+        guard close(descriptor) == 0 else {
+            descriptorIsOpen = false
+            throw SecureRegularFileIOError.inaccessible
+        }
+        descriptorIsOpen = false
+    }
+
+    /// Backup exclusion is exposed by Foundation as a path API. Retain the
+    /// committed file descriptor and verify the inode through both the public
+    /// path and the anchored directory descriptor around that call.
+    private static func setExcludedFromBackup(
+        at url: URL,
+        directory: Int32,
+        name: String,
+        expected: stat
+    ) throws {
+        guard try pathIdentity(at: url).map({ sameFileIdentity($0, expected) }) == true else {
+            throw SecureRegularFileIOError.inaccessible
+        }
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableURL = url
+        do {
+            try mutableURL.setResourceValues(values)
+            let applied = try mutableURL.resourceValues(
+                forKeys: [.isExcludedFromBackupKey]
+            )
+            guard applied.isExcludedFromBackup == true else {
+                throw SecureRegularFileIOError.inaccessible
+            }
+        } catch let error as SecureRegularFileIOError {
+            throw error
+        } catch {
+            throw SecureRegularFileIOError.inaccessible
+        }
+        guard try pathIdentity(at: url).map({ sameFileIdentity($0, expected) }) == true else {
+            throw SecureRegularFileIOError.inaccessible
+        }
+
+        let verificationDescriptor: Int32 = name.withCString { filename in
+            openat(directory, filename, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        }
+        guard verificationDescriptor >= 0 else {
+            throw SecureRegularFileIOError.inaccessible
+        }
+        defer { _ = close(verificationDescriptor) }
+        var verified = stat()
+        guard fstat(verificationDescriptor, &verified) == 0,
+              sameFileIdentity(verified, expected),
+              (verified.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              verified.st_uid == geteuid(),
+              (verified.st_mode & mode_t(0o077)) == 0 else {
+            throw SecureRegularFileIOError.inaccessible
+        }
+    }
+
+    private static func pathIdentity(at url: URL) throws -> stat? {
+        var status = stat()
+        let result: Int32 = url.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return -1 }
+            return lstat(path, &status)
+        }
+        if result == 0 { return status }
+        if errno == ENOENT { return nil }
+        throw SecureRegularFileIOError.inaccessible
     }
 
     private static func validate(
@@ -218,10 +287,15 @@ enum SecureRegularFileIO {
     }
 
     private static func sameFileAndVersion(_ lhs: stat, _ rhs: stat) -> Bool {
-        lhs.st_dev == rhs.st_dev
-            && lhs.st_ino == rhs.st_ino
+        sameFileIdentity(lhs, rhs)
             && lhs.st_size == rhs.st_size
             && lhs.st_mtimespec.tv_sec == rhs.st_mtimespec.tv_sec
             && lhs.st_mtimespec.tv_nsec == rhs.st_mtimespec.tv_nsec
+            && lhs.st_ctimespec.tv_sec == rhs.st_ctimespec.tv_sec
+            && lhs.st_ctimespec.tv_nsec == rhs.st_ctimespec.tv_nsec
+    }
+
+    private static func sameFileIdentity(_ lhs: stat, _ rhs: stat) -> Bool {
+        lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino
     }
 }
