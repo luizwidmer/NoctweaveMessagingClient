@@ -1037,13 +1037,9 @@ struct MaturePairingSheet: View {
     }
 
     private func copyToPasteboard(_ value: String) {
-        #if os(macOS)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-        #elseif os(iOS)
-        UIPasteboard.general.string = value
-        #endif
-        transferFeedback = "Invitation copied."
+        transferFeedback = SensitiveInvitationPasteboard.copy(value)
+            ? "Invitation copied for two minutes."
+            : "The invitation could not be copied."
     }
 
     private func removeTemporaryShareFile() {

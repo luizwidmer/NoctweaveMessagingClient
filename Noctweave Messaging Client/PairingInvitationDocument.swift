@@ -3,11 +3,63 @@ import NoctweaveCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+#if os(macOS)
+import AppKit
+#elseif os(iOS)
+import UIKit
+#endif
+
 extension UTType {
     static let noctweavePairingInvitation = UTType(
         exportedAs: "org.noctweave.pairing-invitation",
         conformingTo: .data
     )
+}
+
+@MainActor
+enum SensitiveInvitationPasteboard {
+    private static let lifetime: Duration = .seconds(120)
+
+    @discardableResult
+    static func copy(_ value: String) -> Bool {
+        guard !value.isEmpty else { return false }
+
+        #if os(macOS)
+        let pasteboard = NSPasteboard.general
+        let item = NSPasteboardItem()
+        guard item.setString(value, forType: .string),
+              item.setString(
+                  "",
+                  forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
+              ),
+              item.setString(
+                  "",
+                  forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
+              ) else {
+            return false
+        }
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects([item]) else { return false }
+        let changeCount = pasteboard.changeCount
+        Task { @MainActor in
+            try? await Task.sleep(for: lifetime)
+            guard NSPasteboard.general.changeCount == changeCount else { return }
+            NSPasteboard.general.clearContents()
+        }
+        return true
+        #elseif os(iOS)
+        UIPasteboard.general.setItems(
+            [[UTType.plainText.identifier: value]],
+            options: [
+                .localOnly: true,
+                .expirationDate: Date().addingTimeInterval(120)
+            ]
+        )
+        return true
+        #else
+        return false
+        #endif
+    }
 }
 
 struct PairingInvitationDocument: FileDocument {

@@ -1746,12 +1746,7 @@ private struct MatureMyCodeView: View {
     }
 
     private func copy(_ value: String) {
-        #if os(macOS)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-        #else
-        UIPasteboard.general.string = value
-        #endif
+        SensitiveInvitationPasteboard.copy(value)
     }
 }
 
@@ -2493,12 +2488,7 @@ private struct MatureGroupAdmissionSheet: View {
     }
 
     private func copy(_ value: String) {
-        #if os(macOS)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-        #else
-        UIPasteboard.general.string = value
-        #endif
+        SensitiveInvitationPasteboard.copy(value)
     }
 }
 
