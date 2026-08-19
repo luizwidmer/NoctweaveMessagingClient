@@ -489,6 +489,16 @@ enum PairingRelayCheckState: Equatable {
     }
 }
 
+enum PairingLobbyClientPhase: Equatable {
+    case idle
+    case working
+    case visible
+    case browsing
+    case requesting
+
+    var isActive: Bool { self != .idle }
+}
+
 private enum NoctweaveClientError: Error, LocalizedError {
     case invalidPairingLink
     case invalidGroupIdentifier
@@ -633,6 +643,12 @@ final class ClientViewModel: ObservableObject {
     @Published private(set) var isPairingProcessing = false
     @Published private(set) var directPairingPayload: String?
     @Published private(set) var directPairingCanFinish = false
+    @Published private(set) var pairingLobbyPhase: PairingLobbyClientPhase = .idle
+    @Published private(set) var pairingLobbyStatus = ""
+    @Published private(set) var pairingLobbyBadge: PairingLobbyBadgeV1?
+    @Published private(set) var pairingLobbyPeerBadge: PairingLobbyBadgeV1?
+    @Published private(set) var pairingLobbyListings: [PairingLobbyListingV1] = []
+    @Published private(set) var pairingLobbyRequests: [PairingLobbyPendingRequestV1] = []
 
     @Published private(set) var groupExchangeLink: String?
     @Published private(set) var groupExchangeStatus = ""
@@ -657,6 +673,15 @@ final class ClientViewModel: ObservableObject {
     private var pairingTask: Task<Void, Never>?
     private var pairingRelayCheckTask: Task<Void, Never>?
     private var pairingRelayCheckID = UUID()
+    private var pairingLobbyTask: Task<Void, Never>?
+    private var pairingLobbyRelay: RelayClient?
+    private var pairingLobbyHost: PairingLobbyHostSessionV1?
+    private var pairingLobbyRequester: PairingLobbyRequesterSessionV1?
+    private var pairingLobbySubscription: RealtimeRouteSubscriptionV1?
+    private var pairingLobbyCursor: UInt64 = 0
+    private var pairingLobbyRelayText = ""
+    private var pairingLobbyRelayPassword = ""
+    private var pairingLobbyPseudonym = ""
     private var directOffererPending: DirectPairingOffererPendingContext?
     private var directOffererFlow: ContactPairingOffererFlowV2?
     private var directResponderFlow: ContactPairingResponderFlowV2?
@@ -941,6 +966,7 @@ final class ClientViewModel: ObservableObject {
         lastError = nil
         statusMessage = "Erasing local encrypted state…"
         pairingTask?.cancel()
+        pairingLobbyTask?.cancel()
         pairingRelayCheckTask?.cancel()
         onboardingRelayCheckTask?.cancel()
         relayManagementTask?.cancel()
@@ -964,6 +990,17 @@ final class ClientViewModel: ObservableObject {
             receivedAttachmentFileNames = [:]
             attachmentDownloadsInFlight.removeAll()
             pairingLink = nil
+            pairingLobbyTask = nil
+            pairingLobbyRelay = nil
+            pairingLobbyHost = nil
+            pairingLobbyRequester = nil
+            pairingLobbySubscription = nil
+            pairingLobbyPhase = .idle
+            pairingLobbyStatus = ""
+            pairingLobbyBadge = nil
+            pairingLobbyPeerBadge = nil
+            pairingLobbyListings = []
+            pairingLobbyRequests = []
             directPairingPayload = nil
             directPairingCanFinish = false
             groupExchangeLink = nil
@@ -1909,6 +1946,143 @@ final class ClientViewModel: ObservableObject {
         pairingStatus = ""
         resetDirectPairingState()
         resetPairingRelayCheck()
+    }
+
+    var isPairingLobbyActive: Bool { pairingLobbyPhase.isActive }
+
+    func startPairingLobbyVisibility(
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String = ""
+    ) {
+        guard !isPairing, pairingLobbyPhase == .idle else { return }
+        pairingLobbyPhase = .working
+        pairingLobbyStatus = "Enabling a private two-minute visibility window…"
+        pairingLobbyListings = []
+        pairingLobbyRequests = []
+        pairingLobbyBadge = nil
+        pairingLobbyPeerBadge = nil
+        lastError = nil
+        pairingLobbyTask = Task { [weak self] in
+            await self?.runPairingLobbyVisibility(
+                relayText: relayText,
+                pseudonym: pseudonym,
+                relayPassword: relayPassword
+            )
+        }
+    }
+
+    func findPairingLobbyPeers(
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String = ""
+    ) {
+        guard !isPairing, pairingLobbyPhase == .idle else { return }
+        pairingLobbyPhase = .working
+        pairingLobbyStatus = "Looking for temporary pairing badges on this relay…"
+        pairingLobbyListings = []
+        pairingLobbyRequests = []
+        pairingLobbyBadge = nil
+        pairingLobbyPeerBadge = nil
+        lastError = nil
+        pairingLobbyTask = Task { [weak self] in
+            await self?.runPairingLobbyFind(
+                relayText: relayText,
+                pseudonym: pseudonym,
+                relayPassword: relayPassword
+            )
+        }
+    }
+
+    func requestPairingLobbyPeer(_ listing: PairingLobbyListingV1) {
+        guard !isPairing,
+              pairingLobbyPhase == .browsing,
+              let relay = pairingLobbyRelay else { return }
+        pairingLobbyPhase = .working
+        pairingLobbyStatus = "Creating an encrypted approval request…"
+        pairingLobbyListings = []
+        pairingLobbyTask = Task { [weak self] in
+            await self?.runPairingLobbyRequest(listing: listing, relay: relay)
+        }
+    }
+
+    func approvePairingLobbyRequest(_ requestID: UUID) {
+        guard !isPairing,
+              pairingLobbyPhase == .visible,
+              let pending = pairingLobbyRequests.first(where: { $0.id == requestID }),
+              let host = pairingLobbyHost,
+              let relay = pairingLobbyRelay else { return }
+        pairingLobbyTask?.cancel()
+        pairingLobbyTask = nil
+        isPairing = true
+        isPairingProcessing = true
+        pairingLink = nil
+        pairingStatus = "Preparing the encrypted one-use invitation…"
+        pairingLobbyStatus = "Approved (pending.requesterBadge.displayText). Delivering privately through the relay…"
+        lastError = nil
+        let relayText = pairingLobbyRelayText
+        let relayPassword = pairingLobbyRelayPassword
+        let pseudonym = pairingLobbyPseudonym
+        pairingTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runOffererPairing(
+                relayText: relayText,
+                pseudonym: pseudonym,
+                relayPassword: relayPassword,
+                pairingLinkDelivery: { [weak self] link in
+                    guard let self else { throw NoctweaveClientError.unavailable }
+                    let append = try host.decisionAppendRequest(
+                        for: pending,
+                        decision: .accepted,
+                        pairingLink: link
+                    )
+                    try self.requireRealtimeAppend(
+                        await relay.send(.appendRealtimeRouteV1(append))
+                    )
+                    self.pairingLobbyStatus =
+                        "Invitation delivered. Both devices are finishing the encrypted rendezvous automatically."
+                    await self.closePairingLobbyResources()
+                }
+            )
+        }
+    }
+
+    func declinePairingLobbyRequest(_ requestID: UUID) {
+        guard pairingLobbyPhase == .visible,
+              let pending = pairingLobbyRequests.first(where: { $0.id == requestID }),
+              let host = pairingLobbyHost,
+              let relay = pairingLobbyRelay else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let append = try host.decisionAppendRequest(
+                    for: pending,
+                    decision: .rejected
+                )
+                try self.requireRealtimeAppend(
+                    await relay.send(.appendRealtimeRouteV1(append))
+                )
+                self.pairingLobbyRequests.removeAll { $0.id == requestID }
+                self.pairingLobbyStatus =
+                    "Request declined. Your temporary badge remains visible until this window ends."
+            } catch {
+                self.lastError = self.describe(error)
+                self.pairingLobbyStatus = "The decline could not be delivered: \(self.describe(error))"
+            }
+        }
+    }
+
+    func stopPairingLobby() {
+        guard pairingLobbyPhase != .idle || pairingLobbyRelay != nil else { return }
+        pairingLobbyTask?.cancel()
+        pairingLobbyTask = nil
+        pairingLobbyStatus = "Stopping same-relay pairing…"
+        Task { [weak self] in
+            guard let self else { return }
+            await self.closePairingLobbyResources()
+            self.pairingLobbyStatus =
+                "Same-relay pairing stopped. Disposable relay routes expire automatically."
+        }
     }
 
     // MARK: - Conversation and group maintenance
@@ -2883,10 +3057,330 @@ final class ClientViewModel: ObservableObject {
         return relayPreferenceID
     }
 
-    private func runOffererPairing(
+    private func preparePairingLobbyRelay(
         relayText: String,
         pseudonym: String,
         relayPassword: String
+    ) async throws -> RelayClient {
+        guard let client else { throw NoctweaveClientError.unavailable }
+        let endpoint = try RelayEndpointParser.parse(relayText)
+        let accessPassword = relayAccessPassword(
+            for: endpoint,
+            supplied: relayPassword
+        )
+        let relay = RelayClient(endpoint: endpoint, authToken: accessPassword)
+        let readiness = try await RelayPairingPreflight.check(
+            client: relay,
+            requirement: .pairingLobby,
+            performRuntimeProbe: false
+        )
+        _ = try await rememberRelay(
+            readiness,
+            accessPassword: accessPassword,
+            client: client
+        )
+        pairingLobbyRelayText = relayText
+        pairingLobbyRelayPassword = relayPassword
+        pairingLobbyPseudonym = try validatedPseudonym(pseudonym)
+        pairingLobbyRelay = relay
+        return relay
+    }
+
+    private func runPairingLobbyVisibility(
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String
+    ) async {
+        do {
+            let relay = try await preparePairingLobbyRelay(
+                relayText: relayText,
+                pseudonym: pseudonym,
+                relayPassword: relayPassword
+            )
+            var host = try PairingLobbyHostSessionV1.create()
+            pairingLobbyHost = host
+            _ = try requireRealtimeRouteCreated(
+                await relay.send(.createRealtimeRouteV1(host.requestRouteCreateRequest))
+            )
+            _ = try requirePairingLobbyLease(
+                await relay.send(.acquirePairingLobbyV1(host.leaseAcquireRequest))
+            )
+            let subscription = try requireRealtimeSubscription(
+                await relay.send(.subscribeRealtimeRouteV1(
+                    host.requestRouteSubscribeRequest()
+                ))
+            )
+            pairingLobbySubscription = subscription
+            pairingLobbyCursor = 0
+            pairingLobbyBadge = host.badge
+            pairingLobbyPhase = .visible
+            pairingLobbyStatus =
+                "Visible as \(host.badge.displayText) for two minutes. Compare the entire badge before approving."
+
+            while !Task.isCancelled, Date() < host.announcement.expiresAt {
+                let batch = try requireRealtimeBatch(
+                    await relay.send(.syncRealtimeRouteV1(
+                        RealtimeRouteSyncRequestV1(
+                            routeCapability: host.announcement.requestRouteCapability,
+                            subscriptionCapability: subscription.subscriptionCapability,
+                            afterSequence: pairingLobbyCursor,
+                            maxRecords: 32
+                        )
+                    ))
+                )
+                pairingLobbyCursor = batch.nextSequence
+                for record in batch.records {
+                    guard let pending = try? host.openRequest(record.payload),
+                          !pairingLobbyRequests.contains(where: { $0.id == pending.id }) else {
+                        continue
+                    }
+                    pairingLobbyRequests.append(pending)
+                }
+                pairingLobbyHost = host
+                if !pairingLobbyRequests.isEmpty {
+                    pairingLobbyStatus =
+                        "Pairing request received. Compare the entire badge on both devices before approving."
+                }
+                try await Task.sleep(nanoseconds: 750_000_000)
+            }
+            if !Task.isCancelled {
+                await closePairingLobbyResources()
+                pairingLobbyStatus = "The two-minute visibility window expired. Start a fresh one to continue."
+            }
+        } catch is CancellationError {
+            // Explicit approval or stop owns cleanup and the next state.
+        } catch {
+            lastError = describe(error)
+            await closePairingLobbyResources()
+            pairingLobbyStatus = "Same-relay visibility stopped: \(describe(error))"
+        }
+        pairingLobbyTask = nil
+    }
+
+    private func runPairingLobbyFind(
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String
+    ) async {
+        defer { pairingLobbyTask = nil }
+        do {
+            let relay = try await preparePairingLobbyRelay(
+                relayText: relayText,
+                pseudonym: pseudonym,
+                relayPassword: relayPassword
+            )
+            let leases = try requirePairingLobbyListings(
+                await relay.send(.listPairingLobbyV1())
+            )
+            pairingLobbyListings = leases.compactMap {
+                try? PairingLobbyListingV1.verified($0)
+            }
+            pairingLobbyPhase = .browsing
+            pairingLobbyStatus = pairingLobbyListings.isEmpty
+                ? "No one is visible on this relay right now."
+                : "Choose the badge shown on the other device, then compare it in full."
+        } catch {
+            lastError = describe(error)
+            await closePairingLobbyResources()
+            pairingLobbyStatus = "Could not list same-relay pairing badges: \(describe(error))"
+        }
+    }
+
+    private func runPairingLobbyRequest(
+        listing: PairingLobbyListingV1,
+        relay: RelayClient
+    ) async {
+        do {
+            var requester = try PairingLobbyRequesterSessionV1.create(for: listing)
+            pairingLobbyRequester = requester
+            _ = try requireRealtimeRouteCreated(
+                await relay.send(.createRealtimeRouteV1(
+                    requester.responseRouteCreateRequest
+                ))
+            )
+            let subscription = try requireRealtimeSubscription(
+                await relay.send(.subscribeRealtimeRouteV1(
+                    requester.responseRouteSubscribeRequest()
+                ))
+            )
+            try requireRealtimeAppend(
+                await relay.send(.appendRealtimeRouteV1(
+                    requester.requestAppendRequest
+                ))
+            )
+            pairingLobbySubscription = subscription
+            pairingLobbyCursor = 0
+            pairingLobbyBadge = requester.requesterBadge
+            pairingLobbyPeerBadge = requester.hostBadge
+            pairingLobbyPhase = .requesting
+            pairingLobbyStatus =
+                "Request sent to \(requester.hostBadge.displayText). Waiting for approval on that device."
+
+            while !Task.isCancelled, Date() < requester.request.expiresAt {
+                let batch = try requireRealtimeBatch(
+                    await relay.send(.syncRealtimeRouteV1(
+                        RealtimeRouteSyncRequestV1(
+                            routeCapability: requester.request.responseRouteCapability,
+                            subscriptionCapability: subscription.subscriptionCapability,
+                            afterSequence: pairingLobbyCursor,
+                            maxRecords: 8
+                        )
+                    ))
+                )
+                pairingLobbyCursor = batch.nextSequence
+                if let record = batch.records.first {
+                    let response = try requester.openResponse(record.payload)
+                    pairingLobbyRequester = requester
+                    let relayPassword = pairingLobbyRelayPassword
+                    let pseudonym = pairingLobbyPseudonym
+                    await closePairingLobbyResources()
+                    if response.decision == .rejected {
+                        pairingLobbyStatus = "The other device declined this request."
+                        return
+                    }
+                    pairingLobbyStatus = "Approved. Starting the encrypted one-use rendezvous…"
+                    startAcceptingPairing(
+                        link: response.pairingLink,
+                        pseudonym: pseudonym,
+                        relayPassword: relayPassword
+                    )
+                    return
+                }
+                try await Task.sleep(nanoseconds: 750_000_000)
+            }
+            if !Task.isCancelled {
+                await closePairingLobbyResources()
+                pairingLobbyStatus = "The approval request expired. Start a fresh one to continue."
+            }
+        } catch is CancellationError {
+            // Explicit stop owns cleanup.
+        } catch {
+            lastError = describe(error)
+            await closePairingLobbyResources()
+            pairingLobbyStatus = "Same-relay request stopped: \(describe(error))"
+        }
+        pairingLobbyTask = nil
+    }
+
+    private func closePairingLobbyResources() async {
+        pairingLobbyTask?.cancel()
+        pairingLobbyTask = nil
+        let relay = pairingLobbyRelay
+        let host = pairingLobbyHost
+        let requester = pairingLobbyRequester
+        let subscription = pairingLobbySubscription
+
+        pairingLobbyRelay = nil
+        pairingLobbyHost = nil
+        pairingLobbyRequester = nil
+        pairingLobbySubscription = nil
+        pairingLobbyCursor = 0
+        pairingLobbyPhase = .idle
+        pairingLobbyBadge = nil
+        pairingLobbyPeerBadge = nil
+        pairingLobbyListings = []
+        pairingLobbyRequests = []
+        pairingLobbyRelayText = ""
+        pairingLobbyRelayPassword = ""
+        pairingLobbyPseudonym = ""
+
+        guard let relay else { return }
+        if let host {
+            _ = try? await relay.send(.releasePairingLobbyV1(
+                host.leaseReleaseRequest
+            ))
+            if let subscription {
+                _ = try? await relay.send(.unsubscribeRealtimeRouteV1(
+                    RealtimeRouteUnsubscribeRequestV1(
+                        routeCapability: host.announcement.requestRouteCapability,
+                        subscriptionCapability: subscription.subscriptionCapability
+                    )
+                ))
+            }
+        } else if let requester, let subscription {
+            _ = try? await relay.send(.unsubscribeRealtimeRouteV1(
+                RealtimeRouteUnsubscribeRequestV1(
+                    routeCapability: requester.request.responseRouteCapability,
+                    subscriptionCapability: subscription.subscriptionCapability
+                )
+            ))
+        }
+    }
+
+    private func requireRealtimeRouteCreated(
+        _ response: RelayResponse
+    ) throws -> RealtimeRouteCreatedV1 {
+        guard response.status == .success,
+              case .realtimeRouteCreated(let route)? = response.successBody else {
+            throw NoctweaveClientError.relayRejected(
+                response.error?.message ?? "The relay rejected the disposable pairing route."
+            )
+        }
+        return route
+    }
+
+    private func requireRealtimeSubscription(
+        _ response: RelayResponse
+    ) throws -> RealtimeRouteSubscriptionV1 {
+        guard response.status == .success,
+              case .realtimeRouteSubscription(let subscription)? = response.successBody else {
+            throw NoctweaveClientError.relayRejected(
+                response.error?.message ?? "The relay rejected the pairing route subscription."
+            )
+        }
+        return subscription
+    }
+
+    private func requireRealtimeAppend(_ response: RelayResponse) throws {
+        guard response.status == .success,
+              case .realtimeRouteAppend(_)? = response.successBody else {
+            throw NoctweaveClientError.relayRejected(
+                response.error?.message ?? "The relay rejected the encrypted pairing record."
+            )
+        }
+    }
+
+    private func requireRealtimeBatch(
+        _ response: RelayResponse
+    ) throws -> OpaqueRelaySyncBatchV1 {
+        guard response.status == .success,
+              case .realtimeRouteSync(let batch)? = response.successBody else {
+            throw NoctweaveClientError.relayRejected(
+                response.error?.message ?? "The relay rejected the pairing route sync."
+            )
+        }
+        return batch
+    }
+
+    private func requirePairingLobbyLease(
+        _ response: RelayResponse
+    ) throws -> PairingLobbyLeaseV1 {
+        guard response.status == .success,
+              case .pairingLobbyLease(let listing)? = response.successBody else {
+            throw NoctweaveClientError.relayRejected(
+                response.error?.message ?? "The relay rejected the temporary pairing listing."
+            )
+        }
+        return listing
+    }
+
+    private func requirePairingLobbyListings(
+        _ response: RelayResponse
+    ) throws -> [PairingLobbyLeaseV1] {
+        guard response.status == .success,
+              case .pairingLobbyListings(let listings)? = response.successBody else {
+            throw NoctweaveClientError.relayRejected(
+                response.error?.message ?? "The relay rejected the pairing lobby list."
+            )
+        }
+        return listings
+    }
+
+    private func runOffererPairing(
+        relayText: String,
+        pseudonym: String,
+        relayPassword: String,
+        pairingLinkDelivery: ((String) async throws -> Void)? = nil
     ) async {
         var cleanup: (RelayClient, RendezvousRelayAdapterV2)?
         var temporaryParticipant: PreparedContactParticipantV2?
@@ -2932,11 +3426,19 @@ final class ClientViewModel: ObservableObject {
             )
             let participant = try await client.activateContactParticipant(pendingParticipant)
             temporaryParticipant = participant
-            pairingLink = try NoctweavePairingLinkV1(
+            let preparedPairingLink = try NoctweavePairingLinkV1(
                 relay: endpoint,
                 invitation: offer.invitation
             ).encoded()
-            pairingStatus = "Share this one-use invitation privately. Waiting for the responder…"
+            if let pairingLinkDelivery {
+                pairingStatus = "Delivering the one-use invitation through the encrypted approval route…"
+                try await pairingLinkDelivery(preparedPairingLink)
+                pairingLink = nil
+                pairingStatus = "Invitation delivered privately. Waiting for the responder…"
+            } else {
+                pairingLink = preparedPairingLink
+                pairingStatus = "Share this one-use invitation privately. Waiting for the responder…"
+            }
 
             let inbound = try await waitForFrames(
                 relay: relay,
@@ -3013,6 +3515,9 @@ final class ClientViewModel: ObservableObject {
             pairingStatus = "A fresh unlinkable relationship is ready."
             try await refresh()
         } catch {
+            if pairingLinkDelivery != nil {
+                await closePairingLobbyResources()
+            }
             if let cleanup {
                 await deleteTemporaryLanes(relay: cleanup.0, adapter: cleanup.1)
             }

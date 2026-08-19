@@ -65,13 +65,14 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertTrue(button.waitForExistence(timeout: 5))
         button.tap()
 
-        XCTAssertTrue(app.buttons["pairing.method.qr"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["pairing.method.nearby"].exists)
-        XCTAssertTrue(app.buttons["pairing.method.file"].exists)
-        XCTAssertTrue(app.buttons["pairing.method.link"].exists)
-
         XCTAssertTrue(app.buttons["pairing.mode.relay"].exists)
         XCTAssertTrue(app.buttons["pairing.mode.direct"].exists)
+        XCTAssertTrue(app.buttons["pairing.lobby.visible"].exists)
+        XCTAssertTrue(app.buttons["pairing.lobby.find"].exists)
+        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.qr"]))
+        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.nearby"]))
+        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.file"]))
+        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.link"]))
         XCTAssertFalse(app.staticTexts["Relationship-local presentation"].exists)
         XCTAssertFalse(app.staticTexts["Temporary rendezvous relay"].exists)
     }
@@ -171,6 +172,15 @@ final class NoctweaveUITests: XCTestCase {
         guard !app.windows.firstMatch.waitForExistence(timeout: 1) else { return }
         app.typeKey("n", modifierFlags: .command)
         XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 3))
+    }
+
+    private func revealByScrolling(_ element: XCUIElement, attempts: Int = 4) -> Bool {
+        if element.exists { return true }
+        for _ in 0..<attempts {
+            app.swipeUp()
+            if element.waitForExistence(timeout: 0.5) { return true }
+        }
+        return false
     }
 
     private func waitUntilEnabled(_ element: XCUIElement, timeout: TimeInterval = 2) -> Bool {

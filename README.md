@@ -5,7 +5,7 @@ Noctweave Messaging Client is the native SwiftUI client for the Noctweave privat
 ## What it includes
 
 - Local personas and relationship-scoped identities
-- Post-quantum pairing and encrypted direct messaging
+- Fast one-use relay pairing, offline pairing, and encrypted direct messaging
 - Experimental encrypted group conversations
 - Encrypted image, document, audio, and voice-message attachments
 - QR-based exchange flows, relay selection, and route prefetching
@@ -13,6 +13,31 @@ Noctweave Messaging Client is the native SwiftUI client for the Noctweave privat
 - A companion iOS sync activity widget
 
 Noctweave has no protocol accounts, global public identity, hosted inbox, recovery authority, or managed relay service. Relays route and retain ciphertext; they cannot decrypt message or attachment contents. Relay operators and network observers can still infer transport metadata such as IP addresses, timing, availability, destination relay, and traffic volume.
+
+## Pairing and group exchange
+
+Use **Add Contact > Fast via Relay** for the normal path. The inviter creates a
+one-use invitation and shares its QR code, protected file, or remote link. The
+recipient enters the name they want the other person to see, then scans, opens,
+or chooses **Paste and Pair**. Keep both clients open until the verified
+relationship appears; there is no separate final approval step.
+
+When the selected relay advertises its operator-enabled pairing lobby, choose
+**Be Visible** on one device and **Find People** on the other. Compare the
+two-word/six-digit badge in full, send the request, and approve it on the visible
+device. The app transfers the one-use link inside a fresh PQ-encrypted route
+and continues the same rendezvous automatically. Visibility expires within two
+minutes and publishes no persona name. QR, AirDrop/share, protected file, and
+paste remain available when the relay has the lobby disabled.
+
+The five-stage offline flow remains available for environments without a relay.
+It deliberately stays explicit because every stage must cross the offline
+channel without silently mixing either participant's private state.
+
+Group access requests and welcome packages use bounded `.noctgroup` files by
+default. Exchange them over an authenticated private channel and delete them
+after the member joins. Raw paste remains an advanced fallback for debugging or
+channels that cannot transfer files.
 
 ## Requirements
 

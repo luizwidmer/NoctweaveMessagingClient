@@ -20,8 +20,9 @@ struct MaturePairingSheet: View {
     @State private var pairingMode = PairingMode.relay
     @State private var direction = PairingDirection.share
     @State private var method = PairingTransferMethod.qr
-    @State private var contactName = "My relationship name"
+    @State private var contactName = ""
     @State private var invitation = ""
+    @State private var showingManualLinkEntry = false
     @State private var relayPassword = ""
     @State private var revealInvitation = false
     @State private var qrCollector = QRChunkCollector()
@@ -51,6 +52,9 @@ struct MaturePairingSheet: View {
                     pairingExplanation
                     directionPicker
                     contactNameCard
+                    if pairingMode == .relay {
+                        sameRelayPairingCard
+                    }
                     methodPicker
                     relayOptions
                     relayReadiness
@@ -74,9 +78,13 @@ struct MaturePairingSheet: View {
                             model.finishDirectPairing()
                             dismiss()
                         }
-                    } else if model.isPairing {
+                    } else if model.isPairing || model.isPairingLobbyActive {
                         Button("Cancel", role: .destructive) {
-                            model.cancelPairing()
+                            if model.isPairing {
+                                model.cancelPairing()
+                            } else {
+                                model.stopPairingLobby()
+                            }
                         }
                     } else {
                         Button("Done") { dismiss() }
@@ -89,7 +97,7 @@ struct MaturePairingSheet: View {
         #endif
         .noctweaveSheetBackground()
         .noctweaveSheetPresentation()
-        .interactiveDismissDisabled(model.isPairing)
+        .interactiveDismissDisabled(model.isPairing || model.isPairingLobbyActive)
         .fileExporter(
             isPresented: $showingFileExporter,
             document: exportedDocument,
@@ -129,10 +137,14 @@ struct MaturePairingSheet: View {
             consumePendingFile()
         }
         .onAppear {
+            if contactName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                contactName = model.activePersona?.displayName ?? ""
+            }
             consumePendingFile()
             checkRelayReadiness()
         }
         .onDisappear {
+            model.stopPairingLobby()
             removeTemporaryShareFile()
         }
         #if os(iOS)
@@ -155,12 +167,12 @@ struct MaturePairingSheet: View {
         HStack(spacing: 4) {
             pairingModeButton(
                 .relay,
-                title: "Relay",
+                title: "Fast via Relay",
                 systemImage: "antenna.radiowaves.left.and.right"
             )
             pairingModeButton(
                 .direct,
-                title: "Direct / Offline",
+                title: "Offline · 5 Stages",
                 systemImage: "arrow.left.arrow.right"
             )
         }
@@ -173,9 +185,10 @@ struct MaturePairingSheet: View {
         .disabled(model.isPairing)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Pairing path")
-        .accessibilityValue(pairingMode == .relay ? "Relay" : "Direct / Offline")
+        .accessibilityValue(pairingMode == .relay ? "Fast via Relay" : "Offline, five stages")
         .onChange(of: pairingMode) { _, _ in
             method = .qr
+            model.stopPairingLobby()
             model.clearPairingLink()
             resetInboundTransfer()
             updateOutboundFrames(nil)
@@ -217,11 +230,11 @@ struct MaturePairingSheet: View {
                 .background(Color.accentColor.opacity(0.14), in: Circle())
             VStack(alignment: .leading, spacing: 5) {
                 Text(pairingMode == .relay
-                     ? "Pair through a relay"
+                     ? "Fast pairing through a relay"
                      : "Pair directly between devices")
                     .font(.headline)
                 Text(pairingMode == .relay
-                     ? "One device creates a one-use invitation and the other accepts it. The selected relay carries only the encrypted, expiring handshake frames."
+                     ? "Recommended. If both devices use this relay, exchange short random badges and approve in a few taps. Otherwise share one expiring invitation as a fallback."
                      : "QR or protected files carry every authenticated handshake stage directly. No relay stores the pairing transcript, although each device still contacts its own relay once to create its private message route.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -234,8 +247,8 @@ struct MaturePairingSheet: View {
 
     private var directionPicker: some View {
         Picker("Pairing direction", selection: directionSelection) {
-            Text("Share Invitation").tag(PairingDirection.share)
-            Text("Receive Invitation").tag(PairingDirection.receive)
+            Text("Invite Someone").tag(PairingDirection.share)
+            Text("I Have an Invitation").tag(PairingDirection.receive)
         }
         .pickerStyle(.segmented)
         .disabled(model.isPairing)
@@ -244,15 +257,154 @@ struct MaturePairingSheet: View {
 
     private var contactNameCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Your relationship name").font(.headline)
-            TextField("Name the other person will see", text: $contactName)
+            Text("Your name to them").font(.headline)
+            TextField("The name the other person will see", text: $contactName)
                 .noctweaveInputField()
                 .disabled(model.isPairing)
-            Text("This pseudonym exists only inside the new relationship. It is never published as an account or global identity.")
+            Text("Enter your name, not theirs. This encrypted pseudonym exists only inside the new relationship and is never a global identity.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .uniformGlassCard(cornerRadius: 20, padding: 16)
+    }
+
+    @ViewBuilder
+    private var sameRelayPairingCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Pair on this relay", systemImage: "person.2.wave.2.fill")
+                .font(.headline)
+            Text("No file or long link. Become visible for two minutes, or find the temporary badge shown on the other device. Compare the entire badge before approval.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            switch model.pairingLobbyPhase {
+            case .idle:
+                HStack(spacing: 10) {
+                    Button("Be Visible") {
+                        model.startPairingLobbyVisibility(
+                            relayText: preferredRelay,
+                            pseudonym: contactName,
+                            relayPassword: relayPassword
+                        )
+                    }
+                    .glassButton(prominent: true)
+                    .accessibilityIdentifier("pairing.lobby.visible")
+                    Button("Find People") {
+                        model.findPairingLobbyPeers(
+                            relayText: preferredRelay,
+                            pseudonym: contactName,
+                            relayPassword: relayPassword
+                        )
+                    }
+                    .glassButton()
+                    .accessibilityIdentifier("pairing.lobby.find")
+                }
+                .disabled(
+                    model.isPairing
+                        || contactName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || preferredRelay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+
+            case .working:
+                ProgressView("Preparing private pairing window…")
+
+            case .visible:
+                if let badge = model.pairingLobbyBadge {
+                    pairingBadgeView(
+                        badge,
+                        detail: "Your temporary badge · visible only for this window"
+                    )
+                }
+                ForEach(model.pairingLobbyRequests) { pending in
+                    VStack(alignment: .leading, spacing: 9) {
+                        pairingBadgeView(
+                            pending.requesterBadge,
+                            detail: "Pairing request · compare the full badge"
+                        )
+                        HStack(spacing: 10) {
+                            Button("Approve") {
+                                model.approvePairingLobbyRequest(pending.id)
+                            }
+                            .glassButton(prominent: true)
+                            Button("Decline", role: .destructive) {
+                                model.declinePairingLobbyRequest(pending.id)
+                            }
+                            .glassButton()
+                        }
+                    }
+                    .padding(12)
+                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 15))
+                }
+
+            case .browsing:
+                if model.pairingLobbyListings.isEmpty {
+                    Text("No temporary badges are visible right now.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.pairingLobbyListings) { listing in
+                        HStack(spacing: 12) {
+                            pairingBadgeView(
+                                listing.badge,
+                                detail: "Visible until \(listing.expiresAt.formatted(date: .omitted, time: .standard))"
+                            )
+                            Spacer(minLength: 8)
+                            Button("Request") {
+                                model.requestPairingLobbyPeer(listing)
+                            }
+                            .glassButton(prominent: true)
+                        }
+                        .padding(12)
+                        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 15))
+                    }
+                }
+
+            case .requesting:
+                if let peer = model.pairingLobbyPeerBadge {
+                    pairingBadgeView(peer, detail: "Waiting for approval on that device")
+                }
+                if let own = model.pairingLobbyBadge {
+                    pairingBadgeView(own, detail: "Your temporary badge")
+                }
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            if model.isPairingLobbyActive {
+                Button("Stop Same-Relay Pairing", role: .cancel) {
+                    model.stopPairingLobby()
+                }
+                .buttonStyle(.borderless)
+            }
+            if !model.pairingLobbyStatus.isEmpty {
+                Text(model.pairingLobbyStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("The relay operator must explicitly enable this default-off lobby. Listings contain fresh session keys and random capabilities, never persona names.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .uniformGlassCard(cornerRadius: 22, padding: 16)
+    }
+
+    private func pairingBadgeView(
+        _ badge: PairingLobbyBadgeV1,
+        detail: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(badge.displayText)
+                .font(.system(.headline, design: .rounded).weight(.bold))
+                .textSelection(.enabled)
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Pairing badge \(badge.words), code \(badge.comparisonCode)")
     }
 
     private var methodPicker: some View {
@@ -264,11 +416,18 @@ struct MaturePairingSheet: View {
                     methodCards
                 }
             } else {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 190), spacing: 12)],
-                    spacing: 12
-                ) {
-                    methodCards
+                let methods = availableMethods
+                Grid(horizontalSpacing: 12, verticalSpacing: 12) {
+                    ForEach(Array(stride(from: 0, to: methods.count, by: 2)), id: \.self) { index in
+                        GridRow {
+                            methodCard(methods[index])
+                            if methods.indices.contains(index + 1) {
+                                methodCard(methods[index + 1])
+                            } else {
+                                Color.clear.accessibilityHidden(true)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -278,12 +437,16 @@ struct MaturePairingSheet: View {
     @ViewBuilder
     private var methodCards: some View {
         ForEach(availableMethods) { option in
-            PairingMethodCard(
-                option: option,
-                selected: method == option.method
-            ) {
-                selectMethod(option.method)
-            }
+            methodCard(option)
+        }
+    }
+
+    private func methodCard(_ option: PairingMethodOption) -> some View {
+        PairingMethodCard(
+            option: option,
+            selected: method == option.method
+        ) {
+            selectMethod(option.method)
         }
     }
 
@@ -524,8 +687,16 @@ struct MaturePairingSheet: View {
                 }
                 .glassButton()
                 Button("Copy Link") { copyToPasteboard(link) }
-                    .glassButton(prominent: true)
+                    .glassButton()
             }
+            ShareLink(
+                item: link,
+                subject: Text("Noctweave one-use invitation"),
+                message: Text("Open Noctweave, choose I Have an Invitation, and paste this link. It expires in ten minutes.")
+            ) {
+                Label("Share Link", systemImage: "square.and.arrow.up")
+            }
+            .glassButton(prominent: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .uniformGlassCard(cornerRadius: 22, padding: 18)
@@ -613,18 +784,34 @@ struct MaturePairingSheet: View {
 
     private var pasteLinkPanel: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Paste invitation link", systemImage: "doc.on.clipboard")
+            Label("Pair from clipboard", systemImage: "doc.on.clipboard")
                 .font(.headline)
-            TextEditor(text: $invitation)
-                .font(.system(.caption, design: .monospaced))
-                .frame(minHeight: 130)
-                .noctweaveInputField()
-            if !invitation.isEmpty, !looksLikePairingPayload(invitation) {
-                Text("This does not look like the expected Noctweave pairing data.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+            Text("One tap reads the invitation, verifies its relay, and starts the encrypted rendezvous.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Button("Paste and Pair") { pasteAndStartRelayPairing() }
+                .glassButton(prominent: true)
+                .disabled(
+                    model.isPairing
+                        || contactName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+                .accessibilityIdentifier("pairing.pasteAndPair")
+            DisclosureGroup("Enter invitation manually", isExpanded: $showingManualLinkEntry) {
+                VStack(alignment: .leading, spacing: 10) {
+                    TextEditor(text: $invitation)
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(minHeight: 110, maxHeight: 170)
+                        .noctweaveInputField()
+                    if !invitation.isEmpty, !looksLikePairingPayload(invitation) {
+                        Text("This does not look like the expected Noctweave pairing data.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    acceptInvitationButton
+                }
+                .padding(.top, 8)
             }
-            acceptInvitationButton
+            transferFeedbackView
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .uniformGlassCard(cornerRadius: 22, padding: 18)
@@ -820,7 +1007,7 @@ struct MaturePairingSheet: View {
             methods.append(PairingMethodOption(
                 method: .link,
                 title: "Paste Link",
-                subtitle: "Use a link received through a trusted channel",
+                subtitle: "Paste and pair in one tap",
                 icon: "doc.on.clipboard"
             ))
         }
@@ -1040,6 +1227,29 @@ struct MaturePairingSheet: View {
         transferFeedback = SensitiveInvitationPasteboard.copy(value)
             ? "Invitation copied for two minutes."
             : "The invitation could not be copied."
+    }
+
+    private func pasteAndStartRelayPairing() {
+        fileError = ""
+        transferFeedback = ""
+        guard let pasted = SensitiveInvitationPasteboard.read(
+            maximumCharacters: QRCodeTransfer.maximumAssembledCharacters
+        ) else {
+            fileError = "The clipboard does not contain a supported Noctweave invitation."
+            return
+        }
+        let normalized = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard looksLikePairingPayload(normalized) else {
+            fileError = "The clipboard does not contain a supported Noctweave invitation."
+            return
+        }
+        invitation = normalized
+        transferFeedback = "Invitation captured. Verifying its relay and pairing now…"
+        model.startAcceptingPairing(
+            link: normalized,
+            pseudonym: contactName,
+            relayPassword: relayPassword
+        )
     }
 
     private func removeTemporaryShareFile() {

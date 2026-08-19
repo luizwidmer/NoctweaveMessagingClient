@@ -67,25 +67,28 @@ final class NoctweaveUITests_iOS: XCTestCase {
         XCTAssertTrue(button.waitForExistence(timeout: 5))
         button.tap()
 
-        XCTAssertTrue(app.buttons["pairing.method.qr"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.buttons["pairing.method.nearby"].exists)
-        XCTAssertTrue(app.buttons["pairing.method.file"].exists)
-        XCTAssertTrue(app.staticTexts["AirDrop or Share"].exists)
-        XCTAssertTrue(app.staticTexts["Protected File"].exists)
+        XCTAssertTrue(app.buttons["pairing.lobby.visible"].exists)
+        XCTAssertTrue(app.buttons["pairing.lobby.find"].exists)
+        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.qr"]))
+        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.nearby"]))
+        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.file"]))
+        XCTAssertTrue(revealByScrolling(app.staticTexts["AirDrop or Share"]))
+        XCTAssertTrue(revealByScrolling(app.staticTexts["Protected File"]))
 
         let remoteLink = app.buttons["pairing.method.link"]
-        if !remoteLink.exists { app.swipeUp() }
-        XCTAssertTrue(remoteLink.waitForExistence(timeout: 2))
+        XCTAssertTrue(revealByScrolling(remoteLink))
 
         app.swipeDown()
         app.swipeDown()
-        let receive = app.buttons["Receive Invitation"]
+        let receive = app.buttons["I Have an Invitation"]
         XCTAssertTrue(receive.waitForExistence(timeout: 2))
         receive.tap()
 
         XCTAssertTrue(app.staticTexts["Scan QR"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.staticTexts["Open Protected File"].exists)
         XCTAssertTrue(app.staticTexts["Paste Link"].exists)
+        app.buttons["pairing.method.link"].tap()
+        XCTAssertTrue(app.buttons["pairing.pasteAndPair"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.staticTexts["Relationship-local presentation"].exists)
     }
 
@@ -101,6 +104,15 @@ final class NoctweaveUITests_iOS: XCTestCase {
 
         app.buttons["Settings"].tap()
         XCTAssertTrue(app.staticTexts["App Security"].waitForExistence(timeout: 3))
+    }
+
+    private func revealByScrolling(_ element: XCUIElement, attempts: Int = 5) -> Bool {
+        if element.exists { return true }
+        for _ in 0..<attempts {
+            app.swipeUp()
+            if element.waitForExistence(timeout: 0.5) { return true }
+        }
+        return false
     }
 
     func testShellFitsPortraitAndLandscape() {
