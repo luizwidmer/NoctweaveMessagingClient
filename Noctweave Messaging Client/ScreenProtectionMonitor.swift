@@ -11,7 +11,7 @@ import CoreGraphics
 final class ScreenProtectionMonitor: ObservableObject {
     @Published private(set) var isCaptureActive = false
     @Published private(set) var isSensitiveHidden = false
-    private let isUITesting = ProcessInfo.processInfo.arguments.contains("UI_TESTING")
+    private let isUITesting = NoctweaveUITestRuntime.isEnabled
     #if os(macOS)
     @Published private(set) var isAppInFocus = true
     private var hideWhenUnfocusedEnabled = true

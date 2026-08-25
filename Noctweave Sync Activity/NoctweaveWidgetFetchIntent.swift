@@ -160,7 +160,7 @@ private struct OpaqueRouteWidgetStore {
     }
 
     private func loadKeyData() throws -> Data {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.keychainService,
             kSecAttrAccount as String: Self.keychainAccount,
@@ -169,6 +169,9 @@ private struct OpaqueRouteWidgetStore {
             kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
             kSecAttrAccessGroup as String: Self.keychainAccessGroup
         ]
+        // An AppIntent can execute unattended. Missing or stale Keychain ACLs
+        // must fail the fetch rather than displaying authentication UI.
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess,

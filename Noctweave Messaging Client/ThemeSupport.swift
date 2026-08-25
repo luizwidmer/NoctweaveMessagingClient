@@ -201,6 +201,11 @@ extension EnvironmentValues {
 struct GlassBackground: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
+    let extendsIntoSafeArea: Bool
+
+    init(extendsIntoSafeArea: Bool = true) {
+        self.extendsIntoSafeArea = extendsIntoSafeArea
+    }
 
     private var isDarkMode: Bool {
         colorScheme == .dark
@@ -512,7 +517,9 @@ struct GlassBackground: View {
             .frame(width: proxy.size.width, height: proxy.size.height)
             .compositingGroup()
         }
-        .ignoresSafeArea()
+        .applyIf(extendsIntoSafeArea) { background in
+            background.ignoresSafeArea()
+        }
     }
 }
 

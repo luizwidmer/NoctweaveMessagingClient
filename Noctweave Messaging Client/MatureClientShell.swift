@@ -195,7 +195,7 @@ struct MatureClientShell: View {
     }
 
     private var shouldHideSensitiveContent: Bool {
-        if ProcessInfo.processInfo.arguments.contains("UI_TESTING") {
+        if NoctweaveUITestRuntime.isEnabled {
             return false
         }
         guard model.privacySettings.hideSensitiveWhenUnfocused else { return false }
@@ -316,9 +316,16 @@ struct MatureClientShell: View {
                 Circle()
                     .fill(model.lastError == nil ? Color.green : Color.orange)
                     .frame(width: 7, height: 7)
-                Text(model.isWorking ? "Synchronizing…" : "Ready")
+                Text(
+                    model.isWorking
+                        ? model.statusMessage
+                        : (model.lastError ?? "Ready")
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .help(model.lastError ?? model.statusMessage)
+                    .accessibilityIdentifier("client.status")
                 Spacer()
                 Button { model.syncAll() } label: {
                     Image(systemName: "arrow.triangle.2.circlepath")
@@ -836,50 +843,54 @@ private struct MatureConversationView: View {
                 .disabled(model.isWorking)
             }
 
-            ZStack {
-                chatWallpaper
-                if model.selectedEvents.isEmpty {
-                    VStack(spacing: 10) {
-                        Image(systemName: "lock.shield")
-                            .font(.system(size: 30))
-                            .foregroundStyle(theme.accent)
-                        Text("Messages stay between you")
-                            .font(.headline)
-                        Text("Send the first message when you are ready.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            LazyVStack(spacing: 8) {
-                                ForEach(model.selectedEvents) { event in
-                                    MatureMessageBubble(
-                                        model: model,
-                                        event: event,
-                                        outgoing: model.isOutgoing(
-                                            event,
-                                            relationshipID: relationship.id
-                                        ),
-                                        onOpen: openAttachment,
-                                        onDownload: downloadAndOpen
-                                    )
-                                    .id(event.id)
-                                }
-                            }
-                            .padding(.horizontal, compact ? 12 : 20)
-                            .padding(.vertical, 18)
+            GeometryReader { viewport in
+                ZStack {
+                    chatWallpaper
+                    if model.selectedEvents.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "lock.shield")
+                                .font(.system(size: 30))
+                                .foregroundStyle(theme.accent)
+                            Text("Messages stay between you")
+                                .font(.headline)
+                            Text("Send the first message when you are ready.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                         }
-                        .scrollDismissesKeyboard(.interactively)
-                        .onChange(of: model.selectedEvents.count) { _, _ in
-                            if let id = model.selectedEvents.last?.id {
-                                withAnimation(.easeOut(duration: 0.2)) {
-                                    proxy.scrollTo(id, anchor: .bottom)
+                    } else {
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                LazyVStack(spacing: 8) {
+                                    ForEach(model.selectedEvents) { event in
+                                        MatureMessageBubble(
+                                            model: model,
+                                            event: event,
+                                            outgoing: model.isOutgoing(
+                                                event,
+                                                relationshipID: relationship.id
+                                            ),
+                                            onOpen: openAttachment,
+                                            onDownload: downloadAndOpen
+                                        )
+                                        .id(event.id)
+                                    }
+                                }
+                                .padding(.horizontal, compact ? 12 : 20)
+                                .padding(.vertical, 18)
+                            }
+                            .scrollDismissesKeyboard(.interactively)
+                            .onChange(of: model.selectedEvents.count) { _, _ in
+                                if let id = model.selectedEvents.last?.id {
+                                    withAnimation(.easeOut(duration: 0.2)) {
+                                        proxy.scrollTo(id, anchor: .bottom)
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                .frame(width: viewport.size.width, height: viewport.size.height)
+                .clipped()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -926,7 +937,12 @@ private struct MatureConversationView: View {
                 )
             }
             .padding(.horizontal, 12)
+            #if os(macOS)
+            .padding(.top, 8)
+            .padding(.bottom, 16)
+            #else
             .padding(.vertical, 10)
+            #endif
             .background(.ultraThinMaterial)
         }
         .fileImporter(
@@ -1015,7 +1031,7 @@ private struct MatureConversationView: View {
 
     @ViewBuilder
     private var chatWallpaper: some View {
-        GlassBackground()
+        GlassBackground(extendsIntoSafeArea: false)
         #if os(iOS)
         Image(compact ? "ChatDoodlesPhoneDark" : "ChatDoodlesTabletDark")
             .resizable(resizingMode: .tile)
@@ -1295,38 +1311,42 @@ private struct MatureGroupConversationView: View {
                 .glassCircleButton(diameter: 38)
             }
 
-            ZStack {
-                GlassBackground()
-                Image(compact ? "ChatDoodlesPhoneDark" : "ChatDoodlesTabletDark")
-                    .resizable(resizingMode: .tile)
-                    .opacity(0.08)
-                    .allowsHitTesting(false)
-                if model.selectedGroupEvents.isEmpty {
-                    VStack(spacing: 10) {
-                        Image(systemName: "person.3.fill")
-                            .font(.system(size: 30))
-                            .foregroundStyle(theme.accent)
-                        Text("The group is ready")
-                            .font(.headline)
-                        Text("Messages use credentials created only for this group.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    ScrollView {
-                        LazyVStack(spacing: 8) {
-                            ForEach(model.selectedGroupEvents) { event in
-                                MatureGroupBubble(
-                                    text: model.displayText(for: event),
-                                    outgoing: model.isOutgoing(event),
-                                    timestamp: event.createdAt
-                                )
-                            }
+            GeometryReader { viewport in
+                ZStack {
+                    GlassBackground(extendsIntoSafeArea: false)
+                    Image(compact ? "ChatDoodlesPhoneDark" : "ChatDoodlesTabletDark")
+                        .resizable(resizingMode: .tile)
+                        .opacity(0.08)
+                        .allowsHitTesting(false)
+                    if model.selectedGroupEvents.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "person.3.fill")
+                                .font(.system(size: 30))
+                                .foregroundStyle(theme.accent)
+                            Text("The group is ready")
+                                .font(.headline)
+                            Text("Messages use credentials created only for this group.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                         }
-                        .padding(compact ? 12 : 20)
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 8) {
+                                ForEach(model.selectedGroupEvents) { event in
+                                    MatureGroupBubble(
+                                        text: model.displayText(for: event),
+                                        outgoing: model.isOutgoing(event),
+                                        timestamp: event.createdAt
+                                    )
+                                }
+                            }
+                            .padding(compact ? 12 : 20)
+                        }
+                        .scrollDismissesKeyboard(.interactively)
                     }
-                    .scrollDismissesKeyboard(.interactively)
                 }
+                .frame(width: viewport.size.width, height: viewport.size.height)
+                .clipped()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -1344,7 +1364,12 @@ private struct MatureGroupConversationView: View {
                 .disabled(model.groupDraftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isWorking)
             }
             .padding(.horizontal, 12)
+            #if os(macOS)
+            .padding(.top, 8)
+            .padding(.bottom, 16)
+            #else
             .padding(.vertical, 10)
+            #endif
             .background(.ultraThinMaterial)
         }
         .sheet(isPresented: $showingSettings) {
@@ -2348,6 +2373,13 @@ private struct MatureGroupAdmissionSheet: View {
     @State private var groupID = ""
     @State private var importedArtifact = ""
     @State private var showingAdvanced = false
+    @State private var showingRawInput = false
+    @State private var showingRawOutput = false
+    @State private var showingArtifactImporter = false
+    @State private var showingArtifactExporter = false
+    @State private var exportedArtifact = GroupExchangeDocument()
+    @State private var artifactFeedback = ""
+    @State private var artifactError = ""
 
     var body: some View {
         NavigationStack {
@@ -2390,10 +2422,37 @@ private struct MatureGroupAdmissionSheet: View {
                         VStack(alignment: .leading, spacing: 10) {
                             Text(step == 1 ? "Member access request" : "Group invitation package")
                                 .font(.headline)
-                            TextEditor(text: $importedArtifact)
-                                .font(.system(.caption, design: .monospaced))
-                                .frame(minHeight: 150)
-                                .noctweaveInputField()
+                            Text("Open the exact .noctgroup file you received. This avoids truncation and paste failures with large post-quantum packages.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 10) {
+                                Button("Open Package File") {
+                                    showingArtifactImporter = true
+                                }
+                                .glassButton(prominent: true)
+                                Button("Paste Fallback") { pasteArtifact() }
+                                    .glassButton()
+                            }
+                            if inputArtifactIsReady {
+                                Label(
+                                    "Package ready · \(formattedArtifactSize(importedArtifact))",
+                                    systemImage: "checkmark.seal.fill"
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.green)
+                            }
+                            DisclosureGroup("Paste or inspect raw package", isExpanded: $showingRawInput) {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    TextEditor(text: $importedArtifact)
+                                        .font(.system(.caption, design: .monospaced))
+                                        .frame(minHeight: 110, maxHeight: 180)
+                                        .noctweaveInputField()
+                                    Text("\(importedArtifact.utf8.count) bytes")
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.top, 8)
+                            }
                             Button(step == 1 ? "Prepare Invitation" : "Join Group") {
                                 if step == 1 {
                                     model.prepareGroupMemberResponse(requestLink: importedArtifact)
@@ -2402,7 +2461,7 @@ private struct MatureGroupAdmissionSheet: View {
                                 }
                             }
                             .glassButton(prominent: true)
-                            .disabled(model.isWorking || importedArtifact.isEmpty)
+                            .disabled(model.isWorking || !inputArtifactIsReady)
                         }
                         .uniformGlassCard(cornerRadius: 20, padding: 16)
                     }
@@ -2414,15 +2473,30 @@ private struct MatureGroupAdmissionSheet: View {
                             Text("Send this one-use package through an authenticated private channel.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            TextEditor(text: .constant(artifact))
-                                .font(.system(.caption2, design: .monospaced))
-                                .frame(minHeight: 120)
-                                .noctweaveInputField()
-                            Button("Copy Package") { copy(artifact) }
-                                .glassButton(prominent: true)
+                            Text("\(formattedArtifactSize(artifact)). File transfer preserves every byte and is the recommended path for post-quantum Welcome packages.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            HStack(spacing: 10) {
+                                Button("Save Package File") { exportArtifact(artifact) }
+                                    .glassButton(prominent: true)
+                                Button("Copy Fallback") { copy(artifact) }
+                                    .glassButton()
+                            }
+                            DisclosureGroup("Show raw package", isExpanded: $showingRawOutput) {
+                                TextEditor(text: .constant(artifact))
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .frame(minHeight: 100, maxHeight: 170)
+                                    .noctweaveInputField()
+                                    .padding(.top, 8)
+                            }
+                            Text("The exported file contains sensitive one-use group material. Delete transferred copies after the recipient joins.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .uniformGlassCard(cornerRadius: 20, padding: 16)
                     }
+
+                    artifactTransferStatus
 
                     DisclosureGroup("Advanced Relay Options", isExpanded: $showingAdvanced) {
                         TextField("Relay URL", text: $preferredRelay)
@@ -2458,6 +2532,35 @@ private struct MatureGroupAdmissionSheet: View {
         .noctweaveSheetBackground()
         .noctweaveSheetPresentation()
         .interactiveDismissDisabled(model.isWorking)
+        .fileImporter(
+            isPresented: $showingArtifactImporter,
+            allowedContentTypes: [.noctweaveGroupExchange],
+            allowsMultipleSelection: false,
+            onCompletion: importArtifact
+        )
+        .fileExporter(
+            isPresented: $showingArtifactExporter,
+            document: exportedArtifact,
+            contentType: .noctweaveGroupExchange,
+            defaultFilename: exportedArtifactFilename
+        ) { result in
+            switch result {
+            case .success:
+                artifactError = ""
+                artifactFeedback = "Package file saved. Send it privately and delete the transferred copy after use."
+            case .failure(let error):
+                artifactError = error.localizedDescription
+                artifactFeedback = ""
+            }
+        }
+        .onChange(of: step) { _, _ in
+            importedArtifact = ""
+            showingRawInput = false
+            showingRawOutput = false
+            artifactError = ""
+            artifactFeedback = ""
+            model.clearGroupExchangeLink()
+        }
     }
 
     private var stepTitle: String {
@@ -2481,14 +2584,111 @@ private struct MatureGroupAdmissionSheet: View {
         case 0:
             "Create a one-use access request using the group ID supplied by a member."
         case 1:
-            "Paste a member's request. Noctweave will prepare credentials that work only inside this group."
+            "Open a member's request. Noctweave will prepare credentials that work only inside this group."
         default:
-            "Paste the invitation package you received to verify it and enter the group."
+            "Open the invitation package you received to verify it and enter the group."
         }
     }
 
+    private var expectedInputPrefix: String {
+        step == 1
+            ? NoctweaveGroupAdmissionRequestLinkV1.prefix
+            : NoctweaveGroupAdmissionResponseLinkV1.prefix
+    }
+
+    private var inputArtifactIsReady: Bool {
+        (try? GroupExchangeArtifactTransfer.normalize(
+            importedArtifact,
+            expectedPrefix: expectedInputPrefix
+        )) != nil
+    }
+
+    private var exportedArtifactFilename: String {
+        guard let artifact = model.groupExchangeLink else { return "Noctweave Group Exchange" }
+        return artifact.hasPrefix(NoctweaveGroupAdmissionRequestLinkV1.prefix)
+            ? "Noctweave Group Request"
+            : "Noctweave Group Welcome"
+    }
+
+    @ViewBuilder
+    private var artifactTransferStatus: some View {
+        if !artifactError.isEmpty {
+            Label(artifactError, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        } else if !artifactFeedback.isEmpty {
+            Label(artifactFeedback, systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func importArtifact(_ result: Result<[URL], Error>) {
+        do {
+            guard let url = try result.get().first else { return }
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer {
+                if scoped { url.stopAccessingSecurityScopedResource() }
+            }
+            importedArtifact = try GroupExchangeArtifactTransfer.read(
+                from: url,
+                expectedPrefix: expectedInputPrefix
+            )
+            artifactError = ""
+            artifactFeedback = "Package loaded exactly from \(url.lastPathComponent)."
+        } catch {
+            importedArtifact = ""
+            artifactError = error.localizedDescription
+            artifactFeedback = ""
+        }
+    }
+
+    private func pasteArtifact() {
+        artifactError = ""
+        artifactFeedback = ""
+        guard let value = SensitiveInvitationPasteboard.read(
+            maximumCharacters: GroupExchangeArtifactTransfer.maximumBytes
+        ) else {
+            artifactError = "The clipboard does not contain a supported group package."
+            return
+        }
+        do {
+            importedArtifact = try GroupExchangeArtifactTransfer.normalize(
+                value,
+                expectedPrefix: expectedInputPrefix
+            )
+            artifactFeedback = "Package pasted and checked for the expected artifact type."
+        } catch {
+            importedArtifact = ""
+            artifactError = error.localizedDescription
+        }
+    }
+
+    private func exportArtifact(_ artifact: String) {
+        do {
+            exportedArtifact = try GroupExchangeDocument(validating: artifact)
+            artifactError = ""
+            artifactFeedback = ""
+            showingArtifactExporter = true
+        } catch {
+            artifactError = error.localizedDescription
+        }
+    }
+
+    private func formattedArtifactSize(_ artifact: String) -> String {
+        let bytes = artifact.utf8.count
+        if bytes < 1_024 { return "\(bytes) B" }
+        if bytes < 1_024 * 1_024 {
+            return String(format: "%.1f KiB", Double(bytes) / 1_024)
+        }
+        return String(format: "%.1f MiB", Double(bytes) / (1_024 * 1_024))
+    }
+
     private func copy(_ value: String) {
-        SensitiveInvitationPasteboard.copy(value)
+        artifactError = ""
+        artifactFeedback = SensitiveInvitationPasteboard.copy(value)
+            ? "Package copied for two minutes. Prefer the file path for large groups."
+            : "The package could not be copied."
     }
 }
 

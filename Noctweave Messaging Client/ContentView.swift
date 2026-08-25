@@ -113,8 +113,8 @@ struct ContentView: View {
     @ViewBuilder
     private var protectedClientShell: some View {
         #if os(iOS)
-        if ProcessInfo.processInfo.arguments.contains("UI_TESTING")
-            && !ProcessInfo.processInfo.arguments.contains("SECURE_RENDERING_TEST") {
+        if NoctweaveUITestRuntime.isEnabled
+            && !NoctweaveUITestRuntime.contains(.secureRendering) {
             MatureClientShell(model: model)
         } else {
             MatureClientShell(model: model)

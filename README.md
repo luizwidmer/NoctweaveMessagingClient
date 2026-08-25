@@ -68,6 +68,13 @@ xcodebuild \
   build
 ```
 
+For UI tests, use the root-level `scripts/run-native-app-tests.sh client`
+command. It signs only with Xcode's local ad-hoc identity and reuses an existing
+iPhone simulator, keeping its disposable container and Keychain separate from
+the Mac login Keychain. It does not create or reset a simulator and does not
+read, delete, or replace production client/widget Keychain records. Set
+`NOCTWEAVE_IOS_TEST_DEVICE_ID` to select a different existing iPhone.
+
 ## License
 
 This project is free software licensed under the GNU Affero General Public License, version 3 or, at your option, any later version (`AGPL-3.0-or-later`). See [LICENSE](LICENSE).

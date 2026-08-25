@@ -58,8 +58,15 @@ enum OpaqueRoutePrefetchBridge {
     private static let keychainService = "com.noctweave.opaque-route-prefetch"
     private static let keychainAccount = "route-prefetch-key-v1"
     private static let keychainAccessGroup = "9MY7SXN56X.com.noctweave.prefetch"
+    private static var isUITesting: Bool {
+        NoctweaveUITestRuntime.isEnabled
+    }
 
     static func update(from state: ClientState) throws {
+        // UI tests use disposable encrypted state outside the app group. Do
+        // not let that fixture overwrite the production widget configuration
+        // or touch its Keychain ACL.
+        guard !isUITesting else { return }
         guard let persona = state.personas.first(where: { $0.id == state.activePersonaID }) else {
             throw PrefetchBridgeError.invalidState
         }
@@ -125,19 +132,22 @@ enum OpaqueRoutePrefetchBridge {
     }
 
     static func eraseAllLocalState() throws {
+        // UI_TESTING_RESET_STATE must only erase its disposable fixture.
+        guard !isUITesting else { return }
         if let directory = try? sharedDirectory(),
            FileManager.default.fileExists(atPath: directory.path) {
             try FileManager.default.removeItem(at: directory)
         }
         UserDefaults(suiteName: appGroupIdentifier)?.removeObject(forKey: snapshotKey)
 
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: keychainAccount,
             kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
             kSecAttrAccessGroup as String: keychainAccessGroup
         ]
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw PrefetchBridgeError.keychainFailure(status)
@@ -198,7 +208,7 @@ enum OpaqueRoutePrefetchBridge {
     }
 
     private static func loadKeyData() throws -> Data? {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: keychainAccount,
@@ -207,6 +217,7 @@ enum OpaqueRoutePrefetchBridge {
             kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
             kSecAttrAccessGroup as String: keychainAccessGroup
         ]
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound { return nil }

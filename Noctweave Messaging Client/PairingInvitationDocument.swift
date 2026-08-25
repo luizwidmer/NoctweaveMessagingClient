@@ -60,6 +60,29 @@ enum SensitiveInvitationPasteboard {
         return false
         #endif
     }
+
+    /// Reads only after a user-initiated paste action. The caller still owns
+    /// protocol validation and must not retain rejected bearer material.
+    static func read(maximumCharacters: Int) -> String? {
+        guard maximumCharacters > 0 else { return nil }
+        #if os(macOS)
+        guard let value = NSPasteboard.general.string(forType: .string),
+              !value.isEmpty,
+              value.count <= maximumCharacters else {
+            return nil
+        }
+        return value
+        #elseif os(iOS)
+        guard let value = UIPasteboard.general.string,
+              !value.isEmpty,
+              value.count <= maximumCharacters else {
+            return nil
+        }
+        return value
+        #else
+        return nil
+        #endif
+    }
 }
 
 struct PairingInvitationDocument: FileDocument {

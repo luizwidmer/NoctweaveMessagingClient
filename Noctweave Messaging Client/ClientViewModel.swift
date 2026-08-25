@@ -160,9 +160,11 @@ private final class ClientAttachmentStore {
     private static let keyService = "com.noctweave.securestorage"
     private static let keyAccount = "attachment-vault-v1"
     private let directory: URL
+    private let suppliedEncryptionKey: SymmetricKey?
 
-    init(directory: URL) {
+    init(directory: URL, encryptionKey: SymmetricKey? = nil) {
         self.directory = directory
+        suppliedEncryptionKey = encryptionKey
     }
 
     func saveSanitizedAttachment(_ data: Data, attachmentId: UUID) throws -> String {
@@ -287,7 +289,10 @@ private final class ClientAttachmentStore {
     }
 
     private func storageKey() throws -> SymmetricKey {
-        try SecureStorageKeyProvider.shared.loadOrCreateKey(
+        if let suppliedEncryptionKey {
+            return suppliedEncryptionKey
+        }
+        return try SecureStorageKeyProvider.shared.loadOrCreateKey(
             service: Self.keyService,
             account: Self.keyAccount
         )
@@ -710,44 +715,78 @@ final class ClientViewModel: ObservableObject {
     init() {
         let storageLocation = ClientStorageLocationResolver.resolve()
         let support = storageLocation.supportDirectory
-        let isUITest = ProcessInfo.processInfo.arguments.contains("UI_TESTING")
-        self.isUITest = isUITest
-        isUITestReadyState = ProcessInfo.processInfo.arguments.contains("UI_TESTING_READY_STATE")
-            && isUITest
-        isUITestProductFixture = ProcessInfo.processInfo.arguments.contains("UI_TESTING_PRODUCT_FIXTURE")
-            && isUITest
-        let testRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("NoctweaveCleanV1UITests", isDirectory: true)
+        #if DEBUG
+        let isUITest = NoctweaveUITestRuntime.isEnabled
+        isUITestReadyState = NoctweaveUITestRuntime.contains(.readyState)
+        isUITestProductFixture = NoctweaveUITestRuntime.contains(.productFixture)
+        let externalUITestStateURL = NoctweaveUITestRuntime.value(after: .plaintextState)
+            .map { URL(fileURLWithPath: $0, isDirectory: false).standardizedFileURL }
+        let testRoot = externalUITestStateURL?.deletingLastPathComponent()
+            ?? FileManager.default.temporaryDirectory
+                .appendingPathComponent("NoctweaveCleanV1UITests", isDirectory: true)
         let stateURL = isUITest
-            ? testRoot.appendingPathComponent("client-state-v1.nwstate")
+            ? externalUITestStateURL
+                ?? testRoot.appendingPathComponent("client-state-v1.nwstate")
             : support.appendingPathComponent("client-state-v1.nwstate")
         if isUITest {
-            if ProcessInfo.processInfo.arguments.contains("UI_TESTING_RESET_STATE") {
+            if NoctweaveUITestRuntime.contains(.resetState),
+               externalUITestStateURL == nil {
                 try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent())
             }
-            stateStore = ClientStateStore(
-                fileURL: stateURL,
-                protection: .encrypted,
-                encryptionKey: SymmetricKey(data: Data(repeating: 0x4E, count: 32)),
-                rollbackAnchorStore: UITestFileRollbackAnchorStore(
-                    fileURL: testRoot.appendingPathComponent("rollback-anchor-v1.json")
-                ),
-                storageScopeIdentifier: ClientStorageLocationResolver.primaryScopeIdentifier
-            )
+            if externalUITestStateURL != nil {
+                // Real-world UI scenarios seed two independent CLI states and
+                // launch two app processes against them. Keep this explicitly
+                // test-only so production state never loses encryption or its
+                // rollback anchor.
+                stateStore = ClientStateStore(
+                    fileURL: stateURL,
+                    protection: .insecurePlaintextForTesting
+                )
+            } else {
+                stateStore = ClientStateStore(
+                    fileURL: stateURL,
+                    protection: .encrypted,
+                    encryptionKey: SymmetricKey(data: Data(repeating: 0x4E, count: 32)),
+                    rollbackAnchorStore: UITestFileRollbackAnchorStore(
+                        fileURL: testRoot.appendingPathComponent("rollback-anchor-v1.json")
+                    ),
+                    storageScopeIdentifier: ClientStorageLocationResolver.primaryScopeIdentifier
+                )
+            }
         } else {
             stateStore = ClientStateStore(
                 fileURL: stateURL,
                 storageScopeIdentifier: storageLocation.scopeIdentifier
             )
         }
+        let uiTestAttachmentKey = isUITest
+            ? SymmetricKey(data: Data(repeating: 0x41, count: 32))
+            : nil
+        let attachmentDirectory = (isUITest ? testRoot : support)
+            .appendingPathComponent("attachments", isDirectory: true)
+        #else
+        let isUITest = false
+        isUITestReadyState = false
+        isUITestProductFixture = false
+        let stateURL = support.appendingPathComponent("client-state-v1.nwstate")
+        stateStore = ClientStateStore(
+            fileURL: stateURL,
+            storageScopeIdentifier: storageLocation.scopeIdentifier
+        )
+        let uiTestAttachmentKey: SymmetricKey? = nil
+        let attachmentDirectory = support
+            .appendingPathComponent("attachments", isDirectory: true)
+        #endif
+        self.isUITest = isUITest
         attachmentStore = ClientAttachmentStore(
-            directory: (isUITest ? testRoot : support)
-                .appendingPathComponent("attachments", isDirectory: true)
+            directory: attachmentDirectory,
+            encryptionKey: uiTestAttachmentKey
         )
         onboardingStorageProtectionAcknowledged = isUITest
             || UserDefaults.standard.bool(forKey: onboardingStorageKey)
         Task {
-            if isUITest {
+            #if DEBUG
+            if isUITest && externalUITestStateURL == nil {
                 // UI-test fixtures created before the durable file anchor used
                 // a process-local anchor. Authenticate and adopt that one
                 // legacy ciphertext once instead of presenting a false
@@ -755,6 +794,7 @@ final class ClientViewModel: ObservableObject {
                 try? await stateStore
                     .adoptUnanchoredEncryptedStateForTesting()
             }
+            #endif
             await open()
         }
     }
@@ -976,7 +1016,7 @@ final class ClientViewModel: ObservableObject {
             try attachmentStore.eraseAllLocalAttachments()
             try? OpaqueRoutePrefetchBridge.eraseAllLocalState()
 
-            if let bundleIdentifier = Bundle.main.bundleIdentifier {
+            if !isUITest, let bundleIdentifier = Bundle.main.bundleIdentifier {
                 UserDefaults.standard.removePersistentDomain(forName: bundleIdentifier)
             }
 
@@ -1099,7 +1139,9 @@ final class ClientViewModel: ObservableObject {
                 persona.displayName = name
             }
             self.onboardingPersonaNameSaved = true
-            UserDefaults.standard.set(true, forKey: self.onboardingPersonaKey)
+            if !self.isUITest {
+                UserDefaults.standard.set(true, forKey: self.onboardingPersonaKey)
+            }
         }
     }
 
@@ -1145,7 +1187,9 @@ final class ClientViewModel: ObservableObject {
             guard let self else { return }
             do {
                 try await stateStore.warmUpKeychain()
-                UserDefaults.standard.set(true, forKey: onboardingStorageKey)
+                if !isUITest {
+                    UserDefaults.standard.set(true, forKey: onboardingStorageKey)
+                }
                 onboardingStorageProtectionAcknowledged = true
                 statusMessage = "Encrypted local storage is ready."
             } catch {
@@ -1157,7 +1201,9 @@ final class ClientViewModel: ObservableObject {
     func completeOnboardingPrivacy(_ settings: PrivacySettings) async -> Bool {
         guard await savePrivacy(settings) else { return false }
         onboardingPrivacyCompleted = true
-        UserDefaults.standard.set(true, forKey: onboardingPrivacyKey)
+        if !isUITest {
+            UserDefaults.standard.set(true, forKey: onboardingPrivacyKey)
+        }
         return true
     }
 
@@ -1418,6 +1464,10 @@ final class ClientViewModel: ObservableObject {
     func syncAll() {
         // Automatic synchronization is best effort. It must never occupy the
         // single queued-action slot ahead of an explicit user operation.
+        // The product UI fixture intentionally uses non-routable endpoints;
+        // suppress background transport there so interactive message and file
+        // controls remain testable without touching a real relay or Keychain.
+        guard !isUITestProductFixture else { return }
         guard bootState == .ready, isOnboardingComplete, !isLocked, !isWorking else { return }
         runOperation(label: "Maintaining routes and synchronizing…") { client in
             var errors: [Error] = []
@@ -2018,7 +2068,7 @@ final class ClientViewModel: ObservableObject {
         isPairingProcessing = true
         pairingLink = nil
         pairingStatus = "Preparing the encrypted one-use invitation…"
-        pairingLobbyStatus = "Approved (pending.requesterBadge.displayText). Delivering privately through the relay…"
+        pairingLobbyStatus = "Approved \(pending.requesterBadge.displayText). Delivering privately through the relay…"
         lastError = nil
         let relayText = pairingLobbyRelayText
         let relayPassword = pairingLobbyRelayPassword
@@ -2821,7 +2871,10 @@ final class ClientViewModel: ObservableObject {
     }
 
     private static func makeProductFixtureState() throws -> ClientState {
-        let now = Date(timeIntervalSince1970: 1_900_000_000)
+        // Pairwise routes enforce both issued-at and expiry bounds. A fixed
+        // future timestamp eventually makes this interactive fixture reject
+        // every message and attachment before transport is even attempted.
+        let now = NoctweaveRendezvousV2.canonicalTimestamp(Date())
         var state = try ClientState(
             displayName: "Fixture Persona",
             hasCompletedOnboarding: true,
@@ -4034,6 +4087,7 @@ final class ClientViewModel: ObservableObject {
     }
 }
 
+#if DEBUG
 /// UI-test state intentionally survives app-process restarts so simulator and
 /// desktop interoperability scenarios can exercise durable recovery. This
 /// file-backed anchor is scoped to the disposable UI-test directory and is
@@ -4091,3 +4145,4 @@ private final class UITestFileRollbackAnchorStore:
         )
     }
 }
+#endif

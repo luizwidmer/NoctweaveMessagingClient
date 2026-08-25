@@ -8,9 +8,9 @@ import Combine
 final class AppWindowController: ObservableObject {
     @Published private(set) var isWindowKey: Bool = true
     @Published private(set) var isAppActive: Bool = true
-    @Published private(set) var isWindowCaptureBlocked: Bool = !ProcessInfo.processInfo.arguments.contains("UI_TESTING")
+    @Published private(set) var isWindowCaptureBlocked: Bool = !NoctweaveUITestRuntime.isEnabled
 
-    private let isUITesting = ProcessInfo.processInfo.arguments.contains("UI_TESTING")
+    private let isUITesting = NoctweaveUITestRuntime.isEnabled
 
     weak var window: NSWindow? {
         didSet {

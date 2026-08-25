@@ -36,6 +36,23 @@
 				</array>
 			</dict>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Noctweave Group Exchange</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.noctweave.group-exchange</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>noctgroup</string>
+				</array>
+			</dict>
+		</dict>
 	</array>
 </dict>
 </plist>
