@@ -29,7 +29,7 @@ final class NoctweaveUITests_iOS: XCTestCase {
         XCTAssertTrue(welcomeCard.exists)
         XCTAssertEqual(welcomeCard.frame.midX, welcomeRegion.frame.midX, accuracy: 2)
         XCTAssertEqual(welcomeCard.frame.midY, welcomeRegion.frame.midY, accuracy: 2)
-        for title in ["Chats", "Contacts", "Code", "Relays", "Identity", "Settings"] {
+        for title in ["Chats", "People", "You"] {
             XCTAssertTrue(app.buttons[title].exists, "Missing bottom navigation item: \(title)")
             assertFitsScreen(app.buttons[title])
         }
@@ -50,13 +50,13 @@ final class NoctweaveUITests_iOS: XCTestCase {
         let chats = app.buttons["tab.chats"]
         XCTAssertTrue(chats.waitForExistence(timeout: 5))
         XCTAssertEqual(app.buttons.matching(identifier: "tab.chats").count, 1)
-        XCTAssertEqual(app.buttons.matching(identifier: "tab.contacts").count, 1)
-        XCTAssertEqual(app.buttons.matching(identifier: "tab.code").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.people").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.you").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "chats.files").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "tab.files").count, 0)
-        XCTAssertEqual(app.buttons.matching(identifier: "tab.relays").count, 1)
-        XCTAssertEqual(app.buttons.matching(identifier: "tab.identity").count, 1)
-        XCTAssertEqual(app.buttons.matching(identifier: "tab.settings").count, 1)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.relays").count, 0)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.identity").count, 0)
+        XCTAssertEqual(app.buttons.matching(identifier: "tab.settings").count, 0)
         XCTAssertTrue(chats.isHittable)
         assertFitsScreen(chats)
         XCTAssertFalse(app.staticTexts["Screenshot detected"].isHittable)
@@ -93,16 +93,19 @@ final class NoctweaveUITests_iOS: XCTestCase {
     }
 
     func testPrimaryTabsOpenExpectedDestinations() {
-        app.buttons["Contacts"].tap()
-        XCTAssertTrue(app.staticTexts["People you trust"].waitForExistence(timeout: 3))
+        app.buttons["People"].tap()
+        XCTAssertTrue(app.staticTexts["Secure relationships and invitations"].waitForExistence(timeout: 3))
 
-        app.buttons["Relays"].tap()
+        app.buttons["You"].tap()
+        app.buttons["you.relays"].tap()
         XCTAssertTrue(app.staticTexts["Choose a relay"].waitForExistence(timeout: 3))
+        app.buttons["Back"].tap()
 
-        app.buttons["Identity"].tap()
+        app.buttons["you.persona"].tap()
         XCTAssertTrue(app.staticTexts["Identity Book"].waitForExistence(timeout: 3))
+        app.buttons["Back"].tap()
 
-        app.buttons["Settings"].tap()
+        app.buttons["you.settings"].tap()
         XCTAssertTrue(app.staticTexts["App Security"].waitForExistence(timeout: 3))
     }
 
@@ -123,11 +126,12 @@ final class NoctweaveUITests_iOS: XCTestCase {
         XCUIDevice.shared.orientation = .landscapeLeft
         XCTAssertTrue(chats.waitForExistence(timeout: 3))
         assertFitsScreen(chats)
-        assertFitsScreen(app.buttons["Settings"])
+        assertFitsScreen(app.buttons["You"])
     }
 
     func testSettingsRowsNavigateAndAppSecuritySetupOpens() {
-        app.buttons["Settings"].tap()
+        app.buttons["You"].tap()
+        app.buttons["you.settings"].tap()
 
         let appearance = app.buttons["settings.appearance"]
         XCTAssertTrue(appearance.waitForExistence(timeout: 3))

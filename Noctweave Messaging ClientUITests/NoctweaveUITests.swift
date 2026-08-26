@@ -28,13 +28,10 @@ final class NoctweaveUITests: XCTestCase {
 
     func testMatureShellRestoresProductNavigation() {
         XCTAssertTrue(app.staticTexts["Noctweave"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Post-quantum chat"].exists)
-        XCTAssertTrue(app.buttons["Contact Book"].exists)
-        XCTAssertTrue(app.buttons["My Code"].exists)
-        XCTAssertTrue(app.buttons["Files"].exists)
-        XCTAssertTrue(app.buttons["Relays"].exists)
-        XCTAssertTrue(app.buttons["Identity Management"].exists)
-        XCTAssertTrue(app.buttons["Settings"].exists)
+        XCTAssertTrue(app.staticTexts["Secure chat"].exists)
+        XCTAssertTrue(app.buttons["People"].exists)
+        XCTAssertTrue(app.buttons["You"].exists)
+        XCTAssertFalse(app.buttons["Identity Management"].exists)
         XCTAssertFalse(app.staticTexts["Local organization only"].exists)
     }
 
@@ -78,18 +75,22 @@ final class NoctweaveUITests: XCTestCase {
     }
 
     func testLibraryDestinationsOpenFromSidebar() {
-        app.buttons["Relays"].tap()
+        app.buttons["You"].tap()
+        app.buttons["you.relays"].tap()
         XCTAssertTrue(app.staticTexts["Choose a relay"].waitForExistence(timeout: 3))
+        app.buttons["Back"].tap()
 
-        app.buttons["Identity Management"].tap()
+        app.buttons["you.persona"].tap()
         XCTAssertTrue(app.staticTexts["Identity Book"].waitForExistence(timeout: 3))
+        app.buttons["Back"].tap()
 
-        app.buttons["Settings"].tap()
+        app.buttons["you.settings"].tap()
         XCTAssertTrue(app.buttons["settings.appSecurity"].waitForExistence(timeout: 3))
     }
 
     func testSettingsRowsNavigateAndAppSecuritySetupOpens() {
-        app.buttons["Settings"].tap()
+        app.buttons["You"].tap()
+        app.buttons["you.settings"].tap()
 
         let appearance = app.buttons["settings.appearance"]
         XCTAssertTrue(appearance.waitForExistence(timeout: 3))

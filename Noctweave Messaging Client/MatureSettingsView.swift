@@ -13,6 +13,7 @@ struct MatureSettingsView: View {
     @ObservedObject var model: ClientViewModel
     @Binding var selectedPalette: String
     let onLock: () -> Void
+    let onBack: () -> Void
 
     @Environment(\.appTheme) private var theme
     @State private var destination: MatureSettingsDestination?
@@ -50,7 +51,7 @@ struct MatureSettingsView: View {
             MatureTopBar(
                 title: "Settings",
                 subtitle: "Appearance, privacy, and app security",
-                backAction: nil
+                backAction: onBack
             ) { EmptyView() }
 
             ScrollView {

@@ -12,7 +12,8 @@ import UIKit
 
 private enum ClientDestination: String, CaseIterable, Identifiable {
     case chats
-    case contacts
+    case people
+    case you
     case code
     case files
     case relays
@@ -24,7 +25,8 @@ private enum ClientDestination: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .chats: "Chats"
-        case .contacts: "Contact Book"
+        case .people: "People"
+        case .you: "You"
         case .code: "My Code"
         case .files: "Files"
         case .relays: "Relays"
@@ -36,7 +38,8 @@ private enum ClientDestination: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .chats: "bubble.left.and.bubble.right"
-        case .contacts: "book.closed"
+        case .people: "person.2"
+        case .you: "person.crop.circle"
         case .code: "qrcode"
         case .files: "rectangle.stack"
         case .relays: "antenna.radiowaves.left.and.right"
@@ -54,12 +57,12 @@ private enum ClientDestination: String, CaseIterable, Identifiable {
         }
         switch value.lowercased() {
         case "chats": return .chats
-        case "contacts", "contactbook": return .contacts
+        case "contacts", "contactbook", "people": return .people
         case "code", "mycode": return .code
         case "files", "attachments": return .files
         case "relays": return .relays
         case "identity": return .identity
-        case "settings": return .settings
+        case "settings", "you": return .you
         default: return .chats
         }
     }
@@ -151,7 +154,7 @@ struct MatureClientShell: View {
                 model.selectedRelationshipID = nil
                 model.selectedGroupID = nil
                 model.burnPersona(replacementName: "New Identity")
-                destination = .identity
+                destination = .you
             }
         } message: {
             Text("All contacts and groups inside this identity are replaced without a continuity link. This cannot be undone.")
@@ -249,7 +252,7 @@ struct MatureClientShell: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Noctweave")
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
-                    Text("Post-quantum chat")
+                    Text("Secure chat")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -298,13 +301,9 @@ struct MatureClientShell: View {
                         }
                     }
 
-                    sidebarSection("Library") {
-                        sidebarDestination(.contacts)
-                        sidebarDestination(.code)
-                        sidebarDestination(.files)
-                        sidebarDestination(.relays)
-                        sidebarDestination(.identity)
-                        sidebarDestination(.settings)
+                    sidebarSection("Explore") {
+                        sidebarDestination(.people)
+                        sidebarDestination(.you)
                     }
                 }
                 .padding(.horizontal, 10)
@@ -312,31 +311,28 @@ struct MatureClientShell: View {
             }
             .scrollIndicators(.hidden)
 
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(model.lastError == nil ? Color.green : Color.orange)
-                    .frame(width: 7, height: 7)
-                Text(
-                    model.isWorking
-                        ? model.statusMessage
-                        : (model.lastError ?? "Ready")
-                )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .help(model.lastError ?? model.statusMessage)
-                    .accessibilityIdentifier("client.status")
-                Spacer()
-                Button { model.syncAll() } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.system(size: 14, weight: .medium))
+            if model.isWorking || model.lastError != nil {
+                HStack(spacing: 8) {
+                    if model.isWorking {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Circle().fill(Color.orange).frame(width: 7, height: 7)
+                    }
+                    Text(model.isWorking ? model.statusMessage : (model.lastError ?? ""))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .help(model.lastError ?? model.statusMessage)
+                        .accessibilityIdentifier("client.status")
+                    Spacer()
+                    if model.lastError != nil && !model.isWorking {
+                        Button("Retry") { model.syncAll() }
+                            .buttonStyle(.plain)
+                    }
                 }
-                .buttonStyle(.plain)
-                .disabled(model.isWorking)
-                .help("Sync now")
+                .padding(.horizontal, 18)
+                .padding(.vertical, 14)
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
         }
         .noctweaveNavigationSurface(edge: .trailing)
     }
@@ -370,15 +366,15 @@ struct MatureClientShell: View {
                     .font(.subheadline.weight(.medium))
                 Spacer()
             }
-            .foregroundStyle(destination == item ? Color.primary : Color.secondary)
+            .foregroundStyle(isPrimarySelection(item) ? Color.primary : Color.secondary)
             .padding(.horizontal, 11)
             .padding(.vertical, 9)
             .background(
-                destination == item ? theme.accent.opacity(0.14) : Color.clear,
+                isPrimarySelection(item) ? theme.accent.opacity(0.14) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 11, style: .continuous)
             )
             .overlay {
-                if destination == item {
+                if isPrimarySelection(item) {
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
                         .stroke(theme.accent.opacity(0.22), lineWidth: 0.7)
                 }
@@ -387,6 +383,14 @@ struct MatureClientShell: View {
         }
         .buttonStyle(.plain)
     }
+
+    private func isPrimarySelection(_ item: ClientDestination) -> Bool {
+        switch item {
+        case .people: destination == .people || destination == .code
+        case .you: destination == .you || destination == .relays || destination == .identity || destination == .settings
+        default: destination == item
+        }
+    }
     #endif
 
     #if os(iOS)
@@ -394,8 +398,10 @@ struct MatureClientShell: View {
         VStack(spacing: 0) {
             destinationView(compact: true)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            MatureBottomBar(selection: $destination) {
-                compactRoute = nil
+            if compactRoute == nil {
+                MatureBottomBar(selection: $destination) {
+                    compactRoute = nil
+                }
             }
         }
     }
@@ -427,7 +433,10 @@ struct MatureClientShell: View {
                             relationship: relationship,
                             compact: compact,
                             onBack: { self.compactRoute = nil },
-                            onOpenFiles: { destination = .files },
+                            onOpenFiles: {
+                                self.compactRoute = nil
+                                destination = .files
+                            },
                             onJoinGroup: { showingGroupAdmission = true }
                         )
                     } else {
@@ -470,10 +479,11 @@ struct MatureClientShell: View {
             } else {
                 chatHome(compact: compact)
             }
-        case .contacts:
+        case .people:
             MatureContactsView(
                 model: model,
                 onAdd: { showingPairing = true },
+                onShowCode: { destination = .code },
                 onOpen: { relationship in
                     select(relationship: relationship)
                     if compact { compactRoute = .relationship(relationship.id) }
@@ -482,26 +492,37 @@ struct MatureClientShell: View {
         case .code:
             MatureMyCodeView(
                 model: model,
-                onCreate: { showingPairing = true }
+                onCreate: { showingPairing = true },
+                onBack: { destination = .people }
             )
         case .files:
             MatureFilesView(model: model)
         case .relays:
             MatureRelaysView(
                 model: model,
-                onEdit: { showingRelayEditor = true }
+                onEdit: { showingRelayEditor = true },
+                onBack: { destination = .you }
             )
         case .identity:
             MatureIdentityView(
                 model: model,
                 onDetails: { identityDetailsPersonaID = $0 },
-                onMaintain: { model.maintainAllTransport() }
+                onMaintain: { model.maintainAllTransport() },
+                onBack: { destination = .you }
             )
         case .settings:
             MatureSettingsView(
                 model: model,
                 selectedPalette: $paletteRaw,
-                onLock: { model.lockNow() }
+                onLock: { model.lockNow() },
+                onBack: { destination = .you }
+            )
+        case .you:
+            MatureYouView(
+                model: model,
+                onIdentity: { destination = .identity },
+                onRelays: { destination = .relays },
+                onSettings: { destination = .settings }
             )
         }
     }
@@ -732,7 +753,7 @@ private struct MatureChatsHome: View {
             Text("Welcome to Noctweave")
                 .font(.system(size: compact ? 25 : 30, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
-            Text("Start with a contact invitation. Every conversation receives its own post-quantum identity and encryption state.")
+            Text("Start with a one-use contact invitation. Every conversation receives its own secure relationship authority and encryption state.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -831,16 +852,25 @@ private struct MatureConversationView: View {
                 subtitle: relationship.localPolicy.consent == .accepted ? "Secure conversation" : "Approval pending",
                 backAction: onBack
             ) {
-                Button(action: onJoinGroup) {
-                    Image(systemName: "person.badge.plus")
+                if model.isWorking {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Syncing")
+                } else if model.lastError != nil {
+                    Button { model.syncAll() } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .glassCircleButton(diameter: 38)
+                    .accessibilityLabel("Retry Sync")
+                }
+                Menu {
+                    Button("Join Group", systemImage: "person.badge.plus", action: onJoinGroup)
+                    Button("File Gallery", systemImage: "rectangle.stack", action: onOpenFiles)
+                } label: {
+                    Image(systemName: "ellipsis")
                 }
                 .glassCircleButton(diameter: 38)
-                .accessibilityLabel("Join Group")
-                Button { model.syncAll() } label: {
-                    Image(systemName: "arrow.triangle.2.circlepath")
-                }
-                .glassCircleButton(diameter: 38)
-                .disabled(model.isWorking)
+                .accessibilityLabel("Conversation Actions")
             }
 
             GeometryReader { viewport in
@@ -1634,12 +1664,16 @@ private struct MatureGroupBubble: View {
 private struct MatureContactsView: View {
     @ObservedObject var model: ClientViewModel
     let onAdd: () -> Void
+    let onShowCode: () -> Void
     let onOpen: (PairwiseRelationshipV2) -> Void
     @State private var contactToDelete: PairwiseRelationshipV2?
 
     var body: some View {
         VStack(spacing: 0) {
-            MatureTopBar(title: "Contact Book", subtitle: "People you trust", backAction: nil) {
+            MatureTopBar(title: "People", subtitle: "Secure relationships and invitations", backAction: nil) {
+                Button(action: onShowCode) { Image(systemName: "qrcode") }
+                    .glassCircleButton(diameter: 38)
+                    .accessibilityLabel("My Code")
                 if !model.relationships.isEmpty {
                     Button(action: onAdd) { Image(systemName: "person.badge.plus") }
                         .glassCircleButton(prominent: true, diameter: 38)
@@ -1666,7 +1700,7 @@ private struct MatureContactsView: View {
                                         VStack(alignment: .leading, spacing: 4) {
                                             Text(relationship.peerIdentity.relationshipPseudonym)
                                                 .font(.headline)
-                                            Label("Post-quantum relationship", systemImage: "checkmark.shield")
+                                            Label("Secure relationship", systemImage: "checkmark.shield")
                                                 .font(.caption)
                                                 .foregroundStyle(.secondary)
                                         }
@@ -1720,10 +1754,11 @@ private struct MatureContactsView: View {
 private struct MatureMyCodeView: View {
     @ObservedObject var model: ClientViewModel
     let onCreate: () -> Void
+    let onBack: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            MatureTopBar(title: "My Code", subtitle: "Share a one-use invitation", backAction: nil) {
+            MatureTopBar(title: "My Code", subtitle: "Share a one-use invitation", backAction: onBack) {
                 if model.pairingLink != nil {
                     Button(action: onCreate) { Image(systemName: "plus") }
                         .glassCircleButton(prominent: true, diameter: 38)
@@ -1922,16 +1957,92 @@ private struct MatureFilesView: View {
     }
 }
 
+private struct MatureYouView: View {
+    @ObservedObject var model: ClientViewModel
+    let onIdentity: () -> Void
+    let onRelays: () -> Void
+    let onSettings: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            MatureTopBar(
+                title: "You",
+                subtitle: model.activePersona.map { "Active persona: \($0.displayName)" } ?? "Persona and app controls",
+                backAction: nil
+            ) { EmptyView() }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    destinationCard(
+                        icon: "person.badge.shield.checkmark",
+                        title: "Persona",
+                        subtitle: "Identity compartments, contacts, and secure-route diagnostics",
+                        action: onIdentity
+                    )
+                    destinationCard(
+                        icon: "antenna.radiowaves.left.and.right",
+                        title: "Relays",
+                        subtitle: "Relay choices for new relationships",
+                        action: onRelays
+                    )
+                    destinationCard(
+                        icon: "gearshape",
+                        title: "Settings",
+                        subtitle: "Appearance, privacy, app security, and storage",
+                        action: onSettings
+                    )
+                }
+                .padding(16)
+                .frame(maxWidth: 820)
+                .frame(maxWidth: .infinity)
+            }
+            .scrollIndicators(.hidden)
+        }
+    }
+
+    private func destinationCard(
+        icon: String,
+        title: String,
+        subtitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: icon)
+                    .font(.title2)
+                    .foregroundStyle(.tint)
+                    .frame(width: 46, height: 46)
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.headline)
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(16)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("you.\(title.lowercased())")
+        .uniformGlassCard(cornerRadius: 21, padding: 0, minHeight: 82)
+    }
+}
+
 private struct MatureRelaysView: View {
     @ObservedObject var model: ClientViewModel
     let onEdit: () -> Void
+    let onBack: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             MatureTopBar(
                 title: "Relays",
-                subtitle: "\(preferences.count) saved · independent relationship routes",
-                backAction: nil
+                subtitle: "\(preferences.count) saved for new secure relationships",
+                backAction: onBack
             ) {
                 if !preferences.isEmpty {
                     Button(action: onEdit) { Image(systemName: "plus") }
@@ -2021,13 +2132,13 @@ private struct MatureRelaysView: View {
 
                     relayCheckStatus
 
-                    Text("Relay privacy")
-                        .font(.headline)
-                        .padding(.top, 6)
-                    Text("Relays store and route encrypted envelopes. They never receive plaintext or a reusable global identity. Changing this preference affects new relationships; existing contacts retain their own routes.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .uniformGlassCard(cornerRadius: 20, padding: 16)
+                    DisclosureGroup("How relay privacy works") {
+                        Text("Relays store and route encrypted envelopes. They never receive plaintext or a reusable global identity. Changes affect new relationships; existing contacts retain their own routes.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 8)
+                    }
+                    .uniformGlassCard(cornerRadius: 20, padding: 16)
                 }
                 .padding(16)
                 .frame(maxWidth: 820)
@@ -2097,6 +2208,7 @@ private struct MatureIdentityView: View {
     @ObservedObject var model: ClientViewModel
     let onDetails: (UUID) -> Void
     let onMaintain: () -> Void
+    let onBack: () -> Void
     @State private var showingCreatePersona = false
     @State private var newPersonaName = ""
 
@@ -2105,7 +2217,7 @@ private struct MatureIdentityView: View {
             MatureTopBar(
                 title: "Identity Management",
                 subtitle: "Personas, contacts, and relay choices",
-                backAction: nil
+                backAction: onBack
             ) {
                 Button { showingCreatePersona = true } label: {
                     Image(systemName: "plus")
@@ -2162,14 +2274,22 @@ private struct MatureIdentityView: View {
                         .uniformGlassCard(cornerRadius: 22, padding: 0, minHeight: 98)
                     }
 
-                    Text("Transport").font(.headline).padding(.top, 4)
-                    MatureActionCard(
-                        icon: "arrow.triangle.2.circlepath",
-                        title: "Refresh Secure Routes",
-                        message: "Renew expiring routes and retry durable encrypted delivery for the active persona.",
-                        destructive: false,
-                        action: onMaintain
-                    )
+                    if model.lastError != nil {
+                        MatureActionCard(
+                            icon: "arrow.triangle.2.circlepath",
+                            title: "Repair Secure Routes",
+                            message: "Retry route renewal and durable encrypted delivery after the reported failure.",
+                            destructive: false,
+                            action: onMaintain
+                        )
+                    } else {
+                        DisclosureGroup("Transport diagnostics") {
+                            Button("Refresh Secure Routes", systemImage: "arrow.triangle.2.circlepath", action: onMaintain)
+                                .glassButton()
+                                .padding(.top, 8)
+                        }
+                        .uniformGlassCard(cornerRadius: 20, padding: 16)
+                    }
                 }
                 .padding(16)
                 .frame(maxWidth: 820)
@@ -2921,10 +3041,7 @@ private struct MatureBottomBar: View {
     @Binding var selection: ClientDestination
     let didSelect: () -> Void
 
-    // Files remain available from the Chats header and attachment menu. Keeping
-    // the primary dock to six destinations preserves readable labels and touch
-    // targets on compact phones instead of shrinking seven tabs into the width.
-    private let items: [ClientDestination] = [.chats, .contacts, .code, .relays, .identity, .settings]
+    private let items: [ClientDestination] = [.chats, .people, .you]
 
     var body: some View {
         HStack(spacing: 3) {
@@ -2935,16 +3052,16 @@ private struct MatureBottomBar: View {
                 } label: {
                     VStack(spacing: 4) {
                         Image(systemName: item.icon)
-                            .font(.system(size: 18, weight: selection == item ? .semibold : .medium))
-                        Text(bottomTitle(item))
-                            .font(.system(size: 10, weight: selection == item ? .semibold : .medium))
+                            .font(.system(size: 18, weight: isSelected(item) ? .semibold : .medium))
+                        Text(item.title)
+                            .font(.system(size: 10, weight: isSelected(item) ? .semibold : .medium))
                             .lineLimit(1)
                             .minimumScaleFactor(0.82)
                     }
-                    .foregroundStyle(selection == item ? theme.accent : Color.secondary)
+                    .foregroundStyle(isSelected(item) ? theme.accent : Color.secondary)
                     .frame(maxWidth: .infinity, minHeight: 52)
                     .background(
-                        selection == item ? theme.accent.opacity(0.16) : Color.clear,
+                        isSelected(item) ? theme.accent.opacity(0.16) : Color.clear,
                         in: RoundedRectangle(cornerRadius: 14, style: .continuous)
                     )
                     .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -2959,12 +3076,12 @@ private struct MatureBottomBar: View {
         .noctweaveNavigationSurface(edge: .top)
     }
 
-    private func bottomTitle(_ item: ClientDestination) -> String {
+    private func isSelected(_ item: ClientDestination) -> Bool {
         switch item {
-        case .contacts: "Contacts"
-        case .code: "Code"
-        case .identity: "Identity"
-        default: item.title
+        case .chats: selection == .chats || selection == .files
+        case .people: selection == .people || selection == .code
+        case .you: selection == .you || selection == .relays || selection == .identity || selection == .settings
+        default: false
         }
     }
 }
@@ -2981,22 +3098,22 @@ private struct MatureSideRail: View {
                 .scaledToFit()
                 .frame(width: 44, height: 44)
                 .padding(.bottom, 8)
-            ForEach(ClientDestination.allCases) { item in
+            ForEach([ClientDestination.chats, .people, .you]) { item in
                 Button {
                     selection = item
                     didSelect()
                 } label: {
                     VStack(spacing: 5) {
                         Image(systemName: item.icon).font(.title3)
-                        Text(item == .contacts ? "Contacts" : item == .identity ? "Identity" : item.title)
+                        Text(item.title)
                             .font(.caption2.weight(.medium))
                             .lineLimit(1)
                     }
-                    .foregroundStyle(selection == item ? theme.accent : Color.secondary)
+                    .foregroundStyle(isSelected(item) ? theme.accent : Color.secondary)
                     .frame(width: 86, height: 60)
-                    .background(selection == item ? theme.accent.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .background(isSelected(item) ? theme.accent.opacity(0.15) : Color.clear, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .overlay {
-                        if selection == item {
+                        if isSelected(item) {
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
                                 .stroke(theme.accent.opacity(0.22), lineWidth: 0.7)
                         }
@@ -3009,6 +3126,15 @@ private struct MatureSideRail: View {
         .padding(.top, 16)
         .padding(.horizontal, 8)
         .noctweaveNavigationSurface(edge: .trailing)
+    }
+
+    private func isSelected(_ item: ClientDestination) -> Bool {
+        switch item {
+        case .chats: selection == .chats || selection == .files
+        case .people: selection == .people || selection == .code
+        case .you: selection == .you || selection == .relays || selection == .identity || selection == .settings
+        default: false
+        }
     }
 }
 #endif
