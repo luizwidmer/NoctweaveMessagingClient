@@ -21,6 +21,10 @@ struct MaturePairingSheet: View {
     @State private var direction = PairingDirection.share
     @State private var method = PairingTransferMethod.qr
     @State private var contactName = ""
+    @State private var showingNameEditor = false
+    @State private var showingRelaySettings = false
+    @State private var showingAdvancedOptions = false
+    @State private var showingSameRelayPairing = false
     @State private var invitation = ""
     @State private var showingManualLinkEntry = false
     @State private var relayPassword = ""
@@ -47,22 +51,21 @@ struct MaturePairingSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
-                    pairingModePicker
-                    pairingExplanation
+                VStack(spacing: 14) {
                     directionPicker
                     contactNameCard
-                    if pairingMode == .relay {
-                        sameRelayPairingCard
+                    if shouldShowMethodPicker {
+                        methodPicker
                     }
-                    methodPicker
-                    relayOptions
-                    relayReadiness
+                    if shouldShowRelaySettings {
+                        relaySettingsDisclosure
+                    }
                     if pairingMode == .relay {
                         transferPanel
                     } else {
                         directTransferPanel
                     }
+                    advancedPairingOptions
                     pairingStatus
                 }
                 .frame(maxWidth: 760)
@@ -133,6 +136,11 @@ struct MaturePairingSheet: View {
                 dismiss()
             }
         }
+        .onChange(of: model.pairingRelayCheckState) { _, state in
+            if case .failed = state {
+                showingRelaySettings = true
+            }
+        }
         .onChange(of: pairingInbox.revision) { _, _ in
             consumePendingFile()
         }
@@ -140,6 +148,8 @@ struct MaturePairingSheet: View {
             if contactName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 contactName = model.activePersona?.displayName ?? ""
             }
+            showingNameEditor = contactName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            showingRelaySettings = preferredRelay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             consumePendingFile()
             checkRelayReadiness()
         }
@@ -188,6 +198,9 @@ struct MaturePairingSheet: View {
         .accessibilityValue(pairingMode == .relay ? "Fast via Relay" : "Offline, five stages")
         .onChange(of: pairingMode) { _, _ in
             method = .qr
+            showingRelaySettings = preferredRelay
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
             model.stopPairingLobby()
             model.clearPairingLink()
             resetInboundTransfer()
@@ -221,34 +234,10 @@ struct MaturePairingSheet: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    private var pairingExplanation: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: "person.2.badge.key.fill")
-                .font(.system(size: 24, weight: .semibold))
-                .foregroundStyle(.tint)
-                .frame(width: 42, height: 42)
-                .background(Color.accentColor.opacity(0.14), in: Circle())
-            VStack(alignment: .leading, spacing: 5) {
-                Text(pairingMode == .relay
-                     ? "Fast pairing through a relay"
-                     : "Pair directly between devices")
-                    .font(.headline)
-                Text(pairingMode == .relay
-                     ? "Recommended. If both devices use this relay, exchange short random badges and approve in a few taps. Otherwise share one expiring invitation as a fallback."
-                     : "QR or protected files carry every authenticated handshake stage directly. No relay stores the pairing transcript, although each device still contacts its own relay once to create its private message route.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .uniformGlassCard(cornerRadius: 22, padding: 16)
-    }
-
     private var directionPicker: some View {
         Picker("Pairing direction", selection: directionSelection) {
-            Text("Invite Someone").tag(PairingDirection.share)
-            Text("I Have an Invitation").tag(PairingDirection.receive)
+            Text("Invite").tag(PairingDirection.share)
+            Text("Join").tag(PairingDirection.receive)
         }
         .pickerStyle(.segmented)
         .disabled(model.isPairing)
@@ -257,15 +246,111 @@ struct MaturePairingSheet: View {
 
     private var contactNameCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Your name to them").font(.headline)
-            TextField("The name the other person will see", text: $contactName)
-                .noctweaveInputField()
-                .disabled(model.isPairing)
-            Text("Enter your name, not theirs. This encrypted pseudonym exists only inside the new relationship and is never a global identity.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showingNameEditor.toggle()
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.tint)
+                        .frame(width: 34, height: 34)
+                        .background(Color.accentColor.opacity(0.12), in: Circle())
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Name they'll see")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(contactName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                             ? "Add a name"
+                             : contactName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    Text(showingNameEditor ? "Hide" : "Change")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.tint)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("pairing.name.toggle")
+
+            if showingNameEditor {
+                TextField("Name for this contact", text: $contactName)
+                    .noctweaveInputField()
+                    .disabled(model.isPairing)
+                Text("Private to this relationship. This is your name, not theirs.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
-        .uniformGlassCard(cornerRadius: 20, padding: 16)
+        .uniformGlassCard(cornerRadius: 18, padding: 14)
+    }
+
+    private var advancedPairingOptions: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showingAdvancedOptions.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Label("Advanced options", systemImage: "slider.horizontal.3")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 8)
+                    Image(systemName: showingAdvancedOptions ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("pairing.advanced.disclosure")
+            .accessibilityValue(showingAdvancedOptions ? "Expanded" : "Collapsed")
+
+            if showingAdvancedOptions {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Relay invitations are the simple default. Use offline pairing only when the devices must exchange every stage directly.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    pairingModePicker
+
+                    if pairingMode == .relay {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                showingSameRelayPairing.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Label("Same-relay discovery", systemImage: "person.2.wave.2")
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer(minLength: 8)
+                                Image(systemName: showingSameRelayPairing ? "chevron.up" : "chevron.down")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("pairing.lobby.disclosure")
+                        .accessibilityValue(showingSameRelayPairing ? "Expanded" : "Collapsed")
+
+                        if showingSameRelayPairing {
+                            sameRelayPairingCard
+                                .padding(.top, 10)
+                        }
+                    }
+                }
+                .padding(.top, 10)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .uniformGlassCard(cornerRadius: 18, padding: 14)
     }
 
     @ViewBuilder
@@ -409,29 +494,24 @@ struct MaturePairingSheet: View {
 
     private var methodPicker: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(direction == .share ? "How will you share it?" : "How did you receive it?")
+            Text(direction == .share ? "Invite with" : "Join with")
                 .font(.headline)
-            if horizontalSizeClass == .compact {
-                VStack(spacing: 10) {
+
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
                     methodCards
                 }
-            } else {
-                let methods = availableMethods
-                Grid(horizontalSpacing: 12, verticalSpacing: 12) {
-                    ForEach(Array(stride(from: 0, to: methods.count, by: 2)), id: \.self) { index in
-                        GridRow {
-                            methodCard(methods[index])
-                            if methods.indices.contains(index + 1) {
-                                methodCard(methods[index + 1])
-                            } else {
-                                Color.clear.accessibilityHidden(true)
-                            }
-                        }
-                    }
-                }
+            }
+            .scrollIndicators(.hidden)
+
+            if let selected = availableMethods.first(where: { $0.method == method }) {
+                Text(selected.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .uniformGlassCard(cornerRadius: 22, padding: 16)
+        .uniformGlassCard(cornerRadius: 18, padding: 14)
     }
 
     @ViewBuilder
@@ -579,12 +659,12 @@ struct MaturePairingSheet: View {
             }
         } else {
             VStack(alignment: .leading, spacing: 12) {
-                Label("Fresh for one person", systemImage: "sparkles")
+                Label("Create a private invitation", systemImage: "person.crop.circle.badge.plus")
                     .font(.headline)
-                Text("Creating an invitation mints temporary rendezvous material. It expires after 10 minutes and cannot be reused.")
+                Text("It works once, expires after 10 minutes, and opens as a QR code you can share another way if needed.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                Button("Create One-Use Invitation") {
+                Button("Create Invitation") {
                     model.startOfferingPairing(
                         relayText: preferredRelay,
                         pseudonym: contactName,
@@ -692,7 +772,7 @@ struct MaturePairingSheet: View {
             ShareLink(
                 item: link,
                 subject: Text("Noctweave one-use invitation"),
-                message: Text("Open Noctweave, choose I Have an Invitation, and paste this link. It expires in ten minutes.")
+                message: Text("Open Noctweave, choose Join, and paste this link. It expires in ten minutes.")
             ) {
                 Label("Share Link", systemImage: "square.and.arrow.up")
             }
@@ -861,10 +941,53 @@ struct MaturePairingSheet: View {
         )
     }
 
+    private var shouldShowRelaySettings: Bool {
+        pairingMode == .direct
+            || direction == .share
+            || !invitation.isEmpty
+            || showingSameRelayPairing
+    }
+
+    private var shouldShowMethodPicker: Bool {
+        direction == .receive
+            || model.pairingLink != nil
+            || model.directPairingPayload != nil
+    }
+
+    private var relaySettingsDisclosure: some View {
+        DisclosureGroup(isExpanded: $showingRelaySettings) {
+            VStack(spacing: 10) {
+                relayOptions
+                if !preferredRelay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !invitation.isEmpty {
+                    relayReadiness
+                }
+            }
+            .padding(.top, 10)
+        } label: {
+            HStack(spacing: 12) {
+                relayReadinessIcon
+                    .frame(width: 24, height: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(compactRelayTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(compactRelayDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            .accessibilityIdentifier("pairing.relay.settings")
+        }
+        .tint(.primary)
+        .uniformGlassCard(cornerRadius: 18, padding: 14)
+    }
+
     private var relayOptions: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label(
-                pairingMode == .relay ? "Pairing relay" : "Your message relay",
+                "Relay",
                 systemImage: "network"
             )
             .font(.headline)
@@ -883,12 +1006,11 @@ struct MaturePairingSheet: View {
                 .noctweaveInputField()
                 .disabled(model.isPairing)
             Text(pairingMode == .relay
-                 ? "This relay must support one-use rendezvous and opaque relationship routes. It is checked before pairing starts."
-                 : "The direct transcript never enters this relay. Only your private relationship route is provisioned here.")
+                 ? "Used to exchange the one-use invitation and create the private message route."
+                 : "Used only to create your private message route; the offline pairing stages stay between devices.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        .uniformGlassCard(cornerRadius: 18, padding: 14)
         .onChange(of: preferredRelay) { _, _ in
             guard !model.isPairing else { return }
             model.resetPairingRelayCheck()
@@ -896,6 +1018,31 @@ struct MaturePairingSheet: View {
         .onChange(of: relayPassword) { _, _ in
             guard !model.isPairing else { return }
             model.resetPairingRelayCheck()
+        }
+    }
+
+    private var compactRelayTitle: String {
+        if preferredRelay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           pairingMode == .direct || direction == .share {
+            return "Choose a relay"
+        }
+        return relayReadinessTitle
+    }
+
+    private var compactRelayDetail: String {
+        if preferredRelay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           pairingMode == .direct || direction == .share {
+            return "Needed to create this contact's private message route."
+        }
+        switch model.pairingRelayCheckState {
+        case .ready:
+            return "Ready for encrypted pairing."
+        case .checking:
+            return "Checking compatibility…"
+        case .failed:
+            return "Open to review or change the relay."
+        case .idle:
+            return "Open to check or change the relay."
         }
     }
 
@@ -922,7 +1069,7 @@ struct MaturePairingSheet: View {
             )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .uniformGlassCard(cornerRadius: 18, padding: 14)
+        .padding(.top, 2)
     }
 
     @ViewBuilder
@@ -1026,12 +1173,20 @@ struct MaturePairingSheet: View {
                 guard newDirection != direction else { return }
                 direction = newDirection
                 method = .qr
+                if newDirection == .share,
+                   preferredRelay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    showingRelaySettings = true
+                }
                 filePassword = ""
                 filePasswordConfirmation = ""
                 revealInvitation = false
-                model.clearPairingLink()
                 resetInboundTransfer()
-                checkRelayReadiness()
+                Task { @MainActor in
+                    await Task.yield()
+                    guard direction == newDirection else { return }
+                    model.clearPairingLink()
+                    checkRelayReadiness()
+                }
             }
         )
     }
@@ -1321,6 +1476,10 @@ struct MaturePairingSheet: View {
                 relayPassword: relayPassword
             )
         } else {
+            guard !preferredRelay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                model.resetPairingRelayCheck()
+                return
+            }
             model.checkPairingRelay(
                 relayText: preferredRelay,
                 relayPassword: relayPassword,
@@ -1369,6 +1528,15 @@ private struct PairingMethodOption: Identifiable {
     let icon: String
 
     var id: String { method.rawValue }
+
+    var compactTitle: String {
+        switch method {
+        case .qr: "QR"
+        case .nearby: "Share"
+        case .file: "File"
+        case .link: "Link"
+        }
+    }
 }
 
 private struct PairingMethodCard: View {
@@ -1378,42 +1546,31 @@ private struct PairingMethodCard: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .top, spacing: 12) {
+            HStack(spacing: 8) {
                 Image(systemName: option.icon)
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                    .frame(width: 34, height: 34)
-                    .background(Color.accentColor.opacity(selected ? 0.18 : 0.08), in: Circle())
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(option.title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    Text(option.subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 4)
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary.opacity(0.55))
+                    .font(.system(size: 15, weight: .semibold))
+                Text(option.compactTitle)
+                    .font(.subheadline.weight(.semibold))
             }
-            .frame(maxWidth: .infinity, minHeight: 72, alignment: .topLeading)
-            .padding(13)
+            .foregroundStyle(selected ? Color.white : Color.primary.opacity(0.82))
+            .padding(.horizontal, 14)
+            .frame(minHeight: 40)
             .background(
-                Color.accentColor.opacity(selected ? 0.11 : 0.035),
-                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                selected ? Color.accentColor.opacity(0.88) : Color.primary.opacity(0.055),
+                in: Capsule()
             )
             .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                Capsule()
                     .stroke(
-                        selected ? Color.accentColor.opacity(0.65) : Color.primary.opacity(0.08),
-                        lineWidth: selected ? 1.4 : 1
+                        selected ? Color.accentColor.opacity(0.95) : Color.primary.opacity(0.1),
+                        lineWidth: 1
                     )
             }
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("pairing.method.\(option.method.rawValue)")
+        .accessibilityLabel("\(option.title). \(option.subtitle)")
         .accessibilityValue(selected ? "Selected" : "Not selected")
     }
 }

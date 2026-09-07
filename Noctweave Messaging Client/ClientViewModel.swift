@@ -806,8 +806,8 @@ final class ClientViewModel: ObservableObject {
 
     var relationships: [PairwiseRelationshipV2] {
         activePersona?.relationships.sorted {
-            let lhsDate = $0.events.last?.createdAt ?? $0.createdAt
-            let rhsDate = $1.events.last?.createdAt ?? $1.createdAt
+            let lhsDate = $0.events.last(where: { $0.kind != .receipt })?.createdAt ?? $0.createdAt
+            let rhsDate = $1.events.last(where: { $0.kind != .receipt })?.createdAt ?? $1.createdAt
             if lhsDate == rhsDate { return $0.id.uuidString < $1.id.uuidString }
             return lhsDate > rhsDate
         } ?? []
@@ -837,7 +837,7 @@ final class ClientViewModel: ObservableObject {
     }
 
     var selectedEvents: [ConversationEvent] {
-        selectedRelationship?.events.sorted {
+        selectedRelationship?.events.filter { $0.kind != .receipt }.sorted {
             if $0.createdAt == $1.createdAt {
                 return $0.id.uuidString < $1.id.uuidString
             }
@@ -2943,6 +2943,17 @@ final class ClientViewModel: ObservableObject {
         guard try relationshipWithEvent.appendEvent(event) else {
             throw HeadlessMessagingClientError.conflictingEnvelope
         }
+        guard let receiptContent = EncodedContent.deliveryReceipt(targetEventId: event.id) else {
+            throw HeadlessMessagingClientError.invalidState
+        }
+        let receipt = ConversationEvent(
+            conversationId: relationship.conversationID,
+            authorEndpointHandle: relationship.peerIdentity.sendRoutes.ownerEndpointHandle,
+            createdAt: now.addingTimeInterval(1),
+            kind: .receipt,
+            content: receiptContent
+        )
+        _ = try relationshipWithEvent.appendEvent(receipt)
         try state.updateActivePersona { persona in
             try persona.upsert(relationship: relationshipWithEvent)
         }

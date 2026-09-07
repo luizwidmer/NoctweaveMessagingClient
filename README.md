@@ -19,7 +19,7 @@ Noctweave has no protocol accounts, global public identity, hosted inbox, recove
 Use **Add Contact > Fast via Relay** for the normal path. The inviter creates a
 one-use invitation and shares its QR code, protected file, or remote link. The
 recipient enters the name they want the other person to see, then scans, opens,
-or chooses **Paste and Pair**. Keep both clients open until the verified
+or chooses **Join > Link > Paste and Pair**. Keep both clients open until the verified
 relationship appears; there is no separate final approval step.
 
 When the selected relay advertises its operator-enabled pairing lobby, choose

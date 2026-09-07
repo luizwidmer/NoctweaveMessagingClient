@@ -560,7 +560,7 @@ struct MatureClientShell: View {
     }
 
     private func lastPreview(for relationship: PairwiseRelationshipV2) -> String {
-        guard let event = relationship.events.last else { return "Private conversation" }
+        guard let event = relationship.events.last(where: { $0.kind != .receipt }) else { return "Private conversation" }
         if event.content.type == .text,
            let text = String(data: event.content.payload, encoding: .utf8) {
             return text.replacingOccurrences(of: "\n", with: " ")
@@ -631,6 +631,9 @@ private struct MatureSidebarConversationRow: View {
 }
 
 struct MatureTopBar<Trailing: View>: View {
+    @Environment(\.appTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
     let title: String
     let subtitle: String
     let backAction: (() -> Void)?
@@ -661,9 +664,39 @@ struct MatureTopBar<Trailing: View>: View {
             trailing()
                 .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 11)
-        .noctweaveNavigationSurface(edge: .bottom)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(theme.surface.opacity(colorScheme == .dark ? 0.62 : 0.38))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    theme.surfaceHighlight,
+                                    theme.surfaceBorder,
+                                    theme.accent.opacity(0.16)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.8
+                        )
+                )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: theme.surfaceShadow, radius: 8, x: 0, y: 3)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("navigation.header")
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
     }
 }
 
@@ -722,7 +755,7 @@ private struct MatureChatsHome: View {
                             MatureConversationListRow(
                                 title: relationship.peerIdentity.relationshipPseudonym,
                                 preview: preview(relationship),
-                                timestamp: relationship.events.last?.createdAt ?? relationship.createdAt,
+                                timestamp: relationship.events.last(where: { $0.kind != .receipt })?.createdAt ?? relationship.createdAt,
                                 icon: "person.crop.circle"
                             ) { onRelationship(relationship) }
                         }
@@ -777,7 +810,7 @@ private struct MatureChatsHome: View {
     }
 
     private func preview(_ relationship: PairwiseRelationshipV2) -> String {
-        guard let event = relationship.events.last else { return "No messages yet" }
+        guard let event = relationship.events.last(where: { $0.kind != .receipt }) else { return "No messages yet" }
         if event.content.type == .text,
            let value = String(data: event.content.payload, encoding: .utf8) {
             return value.replacingOccurrences(of: "\n", with: " ")
@@ -856,12 +889,13 @@ private struct MatureConversationView: View {
                     ProgressView()
                         .controlSize(.small)
                         .accessibilityLabel("Syncing")
-                } else if model.lastError != nil {
+                } else {
                     Button { model.syncAll() } label: {
                         Image(systemName: "arrow.clockwise")
                     }
                     .glassCircleButton(diameter: 38)
-                    .accessibilityLabel("Retry Sync")
+                    .accessibilityLabel(model.lastError == nil ? "Check for Messages" : "Retry Sync")
+                    .help("Check the relay for new messages")
                 }
                 Menu {
                     Button("Join Group", systemImage: "person.badge.plus", action: onJoinGroup)

@@ -35,6 +35,38 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Local organization only"].exists)
     }
 
+    func testTopHeaderIsInsetInsteadOfRenderingAsAFullWidthSlab() {
+        let header = app.descendants(matching: .any)
+            .matching(identifier: "navigation.header")
+            .firstMatch
+        XCTAssertTrue(header.waitForExistence(timeout: 5))
+
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.exists)
+        XCTAssertLessThanOrEqual(header.frame.maxX, window.frame.maxX - 8)
+    }
+
+    func testDeliveryReceiptsDoNotReplaceTheMessagePreviewOrCreateBubbles() {
+        app.terminate()
+        app.launchArguments += ["UI_TESTING_PRODUCT_FIXTURE"]
+        app.launch()
+        app.activate()
+        ensurePrimaryWindow()
+
+        let conversation = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Fixture message")).firstMatch
+        XCTAssertTrue(conversation.waitForExistence(timeout: 5))
+        conversation.tap()
+        let message = app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@ OR value CONTAINS %@", "Fixture message", "Fixture message"
+        )).firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@ OR value CONTAINS %@", "Secure message", "Secure message"
+        )).firstMatch.exists)
+        XCTAssertTrue(app.buttons["Check for Messages"].exists)
+        attachScreenshot(named: "macOS Conversation Receipts Hidden")
+    }
+
     func testEncryptedReadyStateSurvivesSignedRelaunch() {
         XCTAssertTrue(app.staticTexts["Noctweave"].waitForExistence(timeout: 5))
         app.terminate()
@@ -57,19 +89,36 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertFalse(app.buttons["boot.resetLocalData"].exists)
     }
 
-    func testPairingOffersRelayAndDirectOfflineFlows() {
+    func testPairingKeepsTheCommonInviteFlowSimple() {
         let button = app.buttons["Add Contact"].firstMatch
         XCTAssertTrue(button.waitForExistence(timeout: 5))
         button.tap()
 
-        XCTAssertTrue(app.buttons["pairing.mode.relay"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["pairing.name.toggle"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["pairing.relay.settings"].exists)
+        XCTAssertTrue(app.buttons["Create Invitation"].exists)
+        XCTAssertFalse(app.buttons["pairing.mode.relay"].exists)
+        XCTAssertFalse(app.buttons["pairing.mode.direct"].exists)
+        XCTAssertFalse(app.buttons["pairing.lobby.visible"].exists)
+        XCTAssertFalse(app.buttons["pairing.method.qr"].exists)
+
+        pairingDirection(named: "Join").tap()
+        XCTAssertTrue(app.buttons["pairing.method.qr"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.buttons["pairing.method.file"].exists)
+        XCTAssertTrue(app.buttons["pairing.method.link"].exists)
+        XCTAssertFalse(app.buttons["pairing.method.nearby"].exists)
+
+        let advanced = app.buttons["pairing.advanced.disclosure"]
+        XCTAssertTrue(revealHittableByScrolling(advanced))
+        advanced.tap()
+        XCTAssertTrue(app.buttons["pairing.mode.relay"].waitForExistence(timeout: 2))
         XCTAssertTrue(app.buttons["pairing.mode.direct"].exists)
-        XCTAssertTrue(app.buttons["pairing.lobby.visible"].exists)
+
+        let lobby = app.buttons["pairing.lobby.disclosure"]
+        XCTAssertTrue(revealHittableByScrolling(lobby))
+        lobby.tap()
+        XCTAssertTrue(revealByScrolling(app.buttons["pairing.lobby.visible"]))
         XCTAssertTrue(app.buttons["pairing.lobby.find"].exists)
-        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.qr"]))
-        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.nearby"]))
-        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.file"]))
-        XCTAssertTrue(revealByScrolling(app.buttons["pairing.method.link"]))
         XCTAssertFalse(app.staticTexts["Relationship-local presentation"].exists)
         XCTAssertFalse(app.staticTexts["Temporary rendezvous relay"].exists)
     }
@@ -178,10 +227,33 @@ final class NoctweaveUITests: XCTestCase {
     private func revealByScrolling(_ element: XCUIElement, attempts: Int = 4) -> Bool {
         if element.exists { return true }
         for _ in 0..<attempts {
-            app.swipeUp()
+            swipeUpInCurrentSurface()
             if element.waitForExistence(timeout: 0.5) { return true }
         }
         return false
+    }
+
+    private func revealHittableByScrolling(_ element: XCUIElement, attempts: Int = 4) -> Bool {
+        if element.exists, element.isHittable { return true }
+        for _ in 0..<attempts {
+            swipeUpInCurrentSurface()
+            if element.waitForExistence(timeout: 0.5), element.isHittable { return true }
+        }
+        return false
+    }
+
+    private func swipeUpInCurrentSurface() {
+        let sheetScrollView = app.sheets.firstMatch.scrollViews.firstMatch
+        if sheetScrollView.exists {
+            sheetScrollView.swipeUp()
+        } else {
+            app.swipeUp()
+        }
+    }
+
+    private func pairingDirection(named name: String) -> XCUIElement {
+        let radioButton = app.radioButtons[name]
+        return radioButton.exists ? radioButton : app.buttons[name]
     }
 
     private func waitUntilEnabled(_ element: XCUIElement, timeout: TimeInterval = 2) -> Bool {
