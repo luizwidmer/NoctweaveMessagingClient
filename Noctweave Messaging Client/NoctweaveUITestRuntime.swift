@@ -5,6 +5,7 @@ import Foundation
 /// behavior, even when launched with UI-test-looking arguments.
 enum NoctweaveUITestRuntime {
     enum Option {
+        case automatedProfile
         case readyState
         case productFixture
         case resetState
@@ -49,6 +50,8 @@ enum NoctweaveUITestRuntime {
     #if DEBUG
     private static func argumentName(for option: Option) -> String {
         switch option {
+        case .automatedProfile:
+            "UI_TESTING_AUTOMATED_PROFILE"
         case .readyState:
             "UI_TESTING_READY_STATE"
         case .productFixture:

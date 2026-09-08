@@ -97,9 +97,13 @@ struct ClientAttachmentStorageTests {
         try require(otherContentsAfterCacheClear == payload, "Erasure deleted another store's key")
         let legacyAfter = try SecureStorageKeyProvider.shared.loadOrCreateKey(service: service, account: "attachment-vault-v1")
         try require(legacyAfter.withUnsafeBytes { Data($0) } == legacyKey.withUnsafeBytes { Data($0) }, "Erasure deleted the shared legacy key")
-        try first.eraseAllLocalAttachments()
+        try first.finishKeyDestruction(preservingCiphertext: false)
         try require(!FileManager.default.fileExists(atPath: firstDirectory.path), "Wipe retained local attachments")
         try require(FileManager.default.fileExists(atPath: secondDirectory.appendingPathComponent(secondName).path), "Wipe affected another local store")
+        let fresh = ClientAttachmentStore(directory: firstDirectory, storageScopeIdentifier: "first", keyService: service, keyProvider: SecureStorageKeyProvider())
+        _ = try fresh.saveSanitizedAttachment(payload, attachmentId: UUID())
+        do { try first.finishKeyDestruction(preservingCiphertext: false); throw Failure.assertion("Retired cleanup erased fresh data") }
+        catch is ClientAttachmentStoreError { }
         print("Attachment storage checks passed: scoped round trip, v1/v2 migration, old-key rejection, key erasure, late-writer rejection, cross-store isolation, and file wipe.")
     }
 }

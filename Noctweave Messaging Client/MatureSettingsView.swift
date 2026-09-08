@@ -83,7 +83,7 @@ struct MatureSettingsView: View {
                         title: "App Security",
                         subtitle: model.appLockMode == .off
                             ? "App lock is off"
-                            : "Protected with \(model.appLockMode.displayName)",
+                            : "Protected with \(model.appLockMode.clientDisplayName)",
                         color: theme.accent
                     )
                     settingsRow(
@@ -371,7 +371,7 @@ private struct MatureAppSecuritySettings: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     SettingsStatusCard(
-                        title: model.appLockMode == .off ? "App lock is off" : model.appLockMode.displayName,
+                        title: model.appLockMode == .off ? "App lock is off" : model.appLockMode.clientDisplayName,
                         message: securitySummary,
                         symbol: model.appLockMode == .off ? "lock.open.fill" : "lock.shield.fill",
                         status: model.appLockMode == .off ? "Off" : "Active"
@@ -381,7 +381,7 @@ private struct MatureAppSecuritySettings: View {
                         SettingsActionLabel(
                             icon: "key.fill",
                             title: "Choose App Unlock Method",
-                            message: "Choose biometrics, a six-digit PIN, or a physical security key. Existing protection must be authenticated before any change."
+                            message: "Choose biometrics, an app \(ClientUnlockCredentialPolicy.name.lowercased()), or a physical security key. Existing protection must be authenticated before any change."
                         )
                     }
                     .buttonStyle(.plain)
@@ -596,7 +596,7 @@ private struct MatureAppLockSetupFlow: View {
                 message: "Changing the unlock method can expose encrypted local state. Authenticate with the protection already configured on this device."
             )
             if model.appLockMode.requiresSecurityKey {
-                if model.appLockMode.requiresPIN { SettingsPINPad(pin: $enteredPIN) }
+                if model.appLockMode.requiresPIN { currentUnlockInput }
                 SecurityKeyPrompt(busy: model.securityKeyBusy, title: "Verify Security Key",
                                   requiresUSB: model.appLockSettings.requireSecurityKeyPresence, cancel: model.cancelSecurityKeyOperation) { pin, transport in
                     if await model.authorizeAppLockChanges(pin: enteredPIN, keyPIN: pin, transport: transport) {
@@ -604,7 +604,7 @@ private struct MatureAppLockSetupFlow: View {
                         stage = .configure
                     }
                 }
-                .disabled(model.appLockMode.requiresPIN && enteredPIN.count != 6)
+                .disabled(model.appLockMode.requiresPIN && !validCurrentUnlockInput)
                 if model.appLockMode.requiresBiometrics {
                     Text("After the security key check, biometrics are required.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -619,15 +619,31 @@ private struct MatureAppLockSetupFlow: View {
                     .glassButton(prominent: true)
                 }
             } else {
-                SettingsPINPad(pin: $enteredPIN)
+                currentUnlockInput
                 Button(model.appLockMode == .biometricsAndPin ? "Continue to Biometrics" : "Continue") {
                     Task { await authorizeCurrentMethod() }
                 }
                 .glassButton(prominent: true)
-                .disabled(enteredPIN.count != 6)
+                .disabled(!validCurrentUnlockInput)
             }
             errorText
         }
+    }
+
+    @ViewBuilder
+    private var currentUnlockInput: some View {
+        if model.usesUnlockPassword {
+            SecureField("Password", text: $enteredPIN)
+                .noctweaveInputField()
+                .accessibilityIdentifier("security.currentPassword")
+                .onSubmit { Task { await authorizeCurrentMethod() } }
+        } else {
+            SettingsPINPad(pin: $enteredPIN)
+        }
+    }
+
+    private var validCurrentUnlockInput: Bool {
+        model.usesUnlockPassword ? AppLockDuressPassword.isValid(enteredPIN) : enteredPIN.count == 6
     }
 
     private var configurationStep: some View {
@@ -676,10 +692,10 @@ private struct MatureAppLockSetupFlow: View {
             .uniformGlassCard(cornerRadius: 20, padding: 0, minHeight: 84)
 
             if mode.requiresPIN {
-                Text("PIN SCREEN").settingsSectionLabel().padding(.top, 4)
+                Text("\(ClientUnlockCredentialPolicy.name.uppercased()) SCREEN").settingsSectionLabel().padding(.top, 4)
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Custom message").font(.headline)
-                    Text("Shown only on the PIN entry screen. Leave blank for the standard message.")
+                    Text("Shown only on the \(ClientUnlockCredentialPolicy.name.lowercased()) entry screen. Leave blank for the standard message.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     TextField("Optional lock-screen message", text: $message, axis: .vertical)
@@ -694,7 +710,7 @@ private struct MatureAppLockSetupFlow: View {
             }
 
             errorText
-            Button(mode.requiresPIN ? "Continue to PIN" : "Save Protection") {
+            Button(mode.requiresPIN ? "Continue to \(ClientUnlockCredentialPolicy.name)" : "Save Protection") {
                 if mode.requiresPIN {
                     enteredPIN = ""
                     localError = nil
@@ -712,18 +728,24 @@ private struct MatureAppLockSetupFlow: View {
     private func pinStep(confirming: Bool) -> some View {
         VStack(spacing: 18) {
             SettingsIntroCard(
-                icon: confirming ? "checkmark.shield.fill" : "number.square.fill",
-                title: confirming ? "Repeat your PIN" : "Create a six-digit PIN",
+                icon: confirming ? "checkmark.shield.fill" : ClientUnlockCredentialPolicy.icon,
+                title: confirming ? "Repeat your \(ClientUnlockCredentialPolicy.name.lowercased())" : ClientUnlockCredentialPolicy.creationTitle,
                 message: confirming
-                    ? "Enter the same PIN once more."
-                    : "Use six numbers you can remember. Noctweave stores only a salted, stretched verifier."
+                    ? "Enter the same \(ClientUnlockCredentialPolicy.name.lowercased()) once more."
+                    : ClientUnlockCredentialPolicy.rules + " Noctweave stores only a salted, stretched verifier."
             )
-            SettingsPINPad(pin: $enteredPIN)
+            if ClientUnlockCredentialPolicy.usesPassword {
+                SecureField(confirming ? "Repeat password" : "Password", text: $enteredPIN)
+                    .noctweaveInputField()
+                    .accessibilityIdentifier("security.setupPassword")
+            } else {
+                SettingsPINPad(pin: $enteredPIN)
+            }
             errorText
             Button(confirming ? "Save Protection" : "Continue") {
                 if confirming {
                     guard enteredPIN == firstPIN else {
-                        localError = "The PINs do not match. Start again."
+                        localError = "The entries do not match. Start again."
                         firstPIN = ""
                         enteredPIN = ""
                         stage = .newPIN
@@ -738,7 +760,7 @@ private struct MatureAppLockSetupFlow: View {
                 }
             }
             .glassButton(prominent: true)
-            .disabled(enteredPIN.count != 6 || model.isSavingSettings)
+            .disabled(!ClientUnlockCredentialPolicy.isValidNewCredential(enteredPIN) || model.isSavingSettings)
             Button("Back") {
                 enteredPIN = ""
                 localError = nil
@@ -800,8 +822,8 @@ private struct MatureAppLockSetupFlow: View {
         switch stage {
         case .authorize: "Authenticate"
         case .configure: "App Security"
-        case .newPIN: "Create PIN"
-        case .confirmPIN: "Confirm PIN"
+        case .newPIN: "Create \(ClientUnlockCredentialPolicy.name)"
+        case .confirmPIN: "Confirm \(ClientUnlockCredentialPolicy.name)"
         }
     }
 
@@ -809,7 +831,7 @@ private struct MatureAppLockSetupFlow: View {
         switch stage {
         case .authorize: "Current protection"
         case .configure: "Changes apply only after setup completes"
-        case .newPIN, .confirmPIN: "Six digits · numbers only"
+        case .newPIN, .confirmPIN: ClientUnlockCredentialPolicy.rules
         }
     }
 
@@ -847,7 +869,7 @@ private struct MatureAppLockSetupFlow: View {
         switch value {
         case .off: "lock.open.fill"
         case .biometrics: "faceid"
-        case .pinOnly: "number.square.fill"
+        case .pinOnly: ClientUnlockCredentialPolicy.icon
         case .biometricsAndPin: "person.badge.key.fill"
         case .securityKey, .securityKeyAndPin, .biometricsAndSecurityKey, .biometricsPinAndSecurityKey: "key.horizontal.fill"
         }
@@ -856,11 +878,11 @@ private struct MatureAppLockSetupFlow: View {
     private func methodName(_ value: AppLockMode) -> String {
         switch value {
         case .biometrics: model.biometricDisplayName
-        case .biometricsAndPin: "\(model.biometricDisplayName) + PIN"
-        case .securityKeyAndPin: "Key + PIN"
+        case .biometricsAndPin: "\(model.biometricDisplayName) + \(ClientUnlockCredentialPolicy.name)"
+        case .securityKeyAndPin: "Key + \(ClientUnlockCredentialPolicy.name)"
         case .biometricsAndSecurityKey: "\(model.biometricDisplayName) + Key"
-        case .biometricsPinAndSecurityKey: "\(model.biometricDisplayName) + PIN + Key"
-        default: value.displayName
+        case .biometricsPinAndSecurityKey: "\(model.biometricDisplayName) + \(ClientUnlockCredentialPolicy.name) + Key"
+        default: value.clientDisplayName
         }
     }
 
@@ -868,10 +890,10 @@ private struct MatureAppLockSetupFlow: View {
         switch value {
         case .off: "No additional app lock"
         case .biometrics: "Fast, with no password fallback"
-        case .pinOnly: "Six digits, entered in app"
+        case .pinOnly: ClientUnlockCredentialPolicy.rules
         case .biometricsAndPin: "Require both checks"
         case .securityKey: "Physical FIDO2 key with verification"
-        case .securityKeyAndPin: "Require your key and app PIN"
+        case .securityKeyAndPin: "Require your key and app \(ClientUnlockCredentialPolicy.name.lowercased())"
         case .biometricsAndSecurityKey: "Require biometrics and your key"
         case .biometricsPinAndSecurityKey: "Require all three checks"
         }

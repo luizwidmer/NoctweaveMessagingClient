@@ -8,7 +8,7 @@ final class NoctweaveUITests: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchArguments = [
-            "UI_TESTING",
+            "UI_TESTING", "UI_TESTING_AUTOMATED_PROFILE",
             "UI_TESTING_READY_STATE",
             "UI_TESTING_RESET_STATE",
             "-ApplePersistenceIgnoreState",
@@ -29,6 +29,7 @@ final class NoctweaveUITests: XCTestCase {
         }
         if name.contains("testConfigureDuress") {
             app.launchArguments += ["UI_TESTING_LOCK_FIXTURE", "pinOnly"]
+            if name.contains("SelectedChats") { app.launchArguments += ["UI_TESTING_PRODUCT_FIXTURE"] }
         }
         app.launch()
         app.activate()
@@ -72,11 +73,15 @@ final class NoctweaveUITests: XCTestCase {
 
     func testDuressDecoyRunsBeforeKeyAndBiometrics() {
         enterDuressPassword()
-        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.staticTexts["Fixture message"].exists)
+        XCTAssertTrue(app.buttons["You"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts.matching(identifier: "Fixture message").firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["Unselected message"].exists)
         XCTAssertFalse(app.buttons["Verify Security Key"].exists)
-        XCTAssertFalse(app.buttons["You"].exists)
-        attachScreenshot(named: "macOS Separate Local View")
+        attachScreenshot(named: "Usable retained chats")
+        relaunchAfterDuressAndUnlock()
+        XCTAssertTrue(app.buttons["You"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts.matching(identifier: "Fixture message").firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["Unselected message"].exists)
     }
 
     func testDuressKeyAttachmentReplacesPINUntilCancelled() {
@@ -90,12 +95,15 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertTrue(app.secureTextFields["unlock.pin"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.secureTextFields["securityKey.pin"].exists)
         enterDuressPassword()
-        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["You"].exists)
+        XCTAssertTrue(app.buttons["You"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts.matching(identifier: "Fixture message").firstMatch.exists)
     }
 
     func testDuressReadOnlyChatsRunBeforeKeyAndBiometrics() {
         enterDuressPassword()
+        XCTAssertTrue(app.buttons["Send"].waitForExistence(timeout: 20))
+        let chat = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Fixture local contact")).firstMatch
+        if chat.exists { chat.tap() }
         XCTAssertTrue(app.staticTexts.matching(identifier: "Fixture message").firstMatch.waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["You"].exists)
         XCTAssertFalse(app.buttons["Send"].isEnabled)
@@ -103,7 +111,11 @@ final class NoctweaveUITests: XCTestCase {
         attachScreenshot(named: "macOS Temporary Chat View")
     }
 
-    func testConfigureDuressPasswordAndUseAfterRelaunch() {
+    func testConfigureDuressPasswordAndUseAfterRelaunch() { configureAndUseDuress(retainChats: false) }
+
+    func testConfigureDuressSelectedChatsAndUseAfterRelaunch() { configureAndUseDuress(retainChats: true) }
+
+    private func configureAndUseDuress(retainChats: Bool) {
         XCTAssertTrue(app.secureTextFields["unlock.pin"].waitForExistence(timeout: 10))
         app.secureTextFields["unlock.pin"].tap()
         app.secureTextFields["unlock.pin"].typeText("123456")
@@ -114,44 +126,87 @@ final class NoctweaveUITests: XCTestCase {
         app.buttons["settings.appSecurity"].tap()
         app.buttons["settings.appSecurity.configure"].tap()
         XCTAssertTrue(app.staticTexts["Confirm it is you"].waitForExistence(timeout: 3))
-        enterSetupPIN()
+        enterSetupPassword("123456", current: true)
         app.buttons["Continue"].tap()
         let label = app.textFields["duress.label"]
         XCTAssertTrue(revealInsideSetup(label, attempts: 12))
         label.tap(); for character in "Test" { label.typeText(String(character)) }
+        if retainChats {
+            let disclosure = app.disclosureTriangles["Chats to keep (0)"]
+            XCTAssertTrue(revealInsideSetup(disclosure))
+            disclosure.tap()
+            // Bring the expanded region into view using its always-present next
+            // field before asking XCTest for a row in a scroll container.
+            let followingInput = app.secureTextFields["duress.password"]
+            XCTAssertTrue(revealInsideSetup(followingInput))
+            // The fixture's first choice is the retained conversation. Match its
+            // stable identifier: macOS exposes the compound toggle text through
+            // AXDescription rather than XCTest's label on this control.
+            let choice = app.checkBoxes.matching(NSPredicate(format: "identifier BEGINSWITH %@", "duress.chat.")).firstMatch
+            XCTAssertTrue(revealInsideSetup(choice))
+            choice.tap()
+            attachScreenshot(named: "Choose real chats to retain")
+        }
         let password = app.secureTextFields["duress.password"]
         XCTAssertTrue(revealInsideSetup(password))
-        password.tap(); for character in "876543" { password.typeText(String(character)) }
+        password.tap(); for character in "new test 876543" { password.typeText(String(character)) }
         let confirmation = app.secureTextFields["duress.confirmation"]
         XCTAssertTrue(revealInsideSetup(confirmation))
-        confirmation.tap(); for character in "876543" { confirmation.typeText(String(character)) }
+        confirmation.tap(); for character in "new test 876543" { confirmation.typeText(String(character)) }
+        let acknowledgment = app.checkBoxes["I understand that this action permanently erases data and replaces my unlock methods."]
+        XCTAssertTrue(revealInsideSetup(acknowledgment))
+        acknowledgment.tap()
         let add = app.buttons["duress.add"]
         XCTAssertTrue(revealInsideSetup(add))
         add.tap()
         XCTAssertTrue(app.staticTexts["Test"].waitForExistence(timeout: 5))
         attachScreenshot(named: "macOS Duress Plan Configuration")
-        let next = app.buttons["Continue to PIN"]
+        let next = app.buttons["Continue to Password"]
         XCTAssertTrue(revealInsideSetup(next, attempts: 12))
-        next.tap(); enterSetupPIN(); app.buttons["Continue"].tap()
-        enterSetupPIN(); app.buttons["Save Protection"].tap()
+        next.tap(); enterSetupPassword("ordinary pass 123"); app.buttons["Continue"].tap()
+        enterSetupPassword("ordinary pass 123"); app.buttons["Save Protection"].tap()
         XCTAssertTrue(app.staticTexts["Control access to local conversations"].waitForExistence(timeout: 8))
         app.terminate()
         app.launchArguments.removeAll { $0 == "UI_TESTING_RESET_STATE" }
         app.launch(); app.activate(); ensurePrimaryWindow()
         XCTAssertTrue(app.secureTextFields["unlock.pin"].waitForExistence(timeout: 10))
         app.secureTextFields["unlock.pin"].tap()
-        app.secureTextFields["unlock.pin"].typeText("876543")
+        app.secureTextFields["unlock.pin"].typeText("ordinary pass 123")
         app.buttons["unlock.submitPIN"].tap()
-        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["You"].exists)
+        XCTAssertTrue(app.buttons["You"].waitForExistence(timeout: 10))
+        app.terminate()
+        app.launch(); app.activate(); ensurePrimaryWindow()
+        XCTAssertTrue(app.secureTextFields["unlock.pin"].waitForExistence(timeout: 10))
+        XCTAssertEqual(app.secureTextFields["unlock.pin"].placeholderValue, "Password")
+        attachScreenshot(named: "macOS Password Unlock")
+        app.secureTextFields["unlock.pin"].tap()
+        app.secureTextFields["unlock.pin"].typeText("new test 876543")
+        app.buttons["unlock.submitPIN"].tap()
+        XCTAssertTrue(app.buttons["You"].waitForExistence(timeout: 20))
+        if retainChats {
+            XCTAssertTrue(app.staticTexts.matching(identifier: "Fixture message").firstMatch.exists)
+            XCTAssertFalse(app.staticTexts["Unselected message"].exists)
+        } else {
+            XCTAssertTrue(app.staticTexts["No conversations yet"].exists)
+        }
+        relaunchAfterDuressAndUnlock(password: "new test 876543", previousPassword: "ordinary pass 123")
+        XCTAssertTrue(app.buttons["You"].waitForExistence(timeout: 10))
+        app.buttons["You"].tap()
+        app.buttons["you.settings"].tap()
+        app.buttons["settings.appSecurity"].tap()
+        app.buttons["settings.appSecurity.configure"].tap()
+        let currentPassword = app.secureTextFields["security.currentPassword"]
+        XCTAssertTrue(currentPassword.waitForExistence(timeout: 5))
+        currentPassword.tap(); currentPassword.typeText("new test 876543")
+        app.buttons["Continue"].tap()
+        XCTAssertTrue(app.buttons["appLock.method.off"].waitForExistence(timeout: 5))
     }
 
-    private func enterSetupPIN() {
-        for digit in ["1", "2", "3", "4", "5", "6"] {
-            let button = app.buttons[digit]
-            XCTAssertTrue(revealInsideSetup(button))
-            button.tap()
-        }
+    private func enterSetupPassword(_ value: String, current: Bool = false) {
+        let input = app.secureTextFields[current ? "security.currentPassword" : "security.setupPassword"]
+        XCTAssertTrue(revealInsideSetup(input))
+        input.tap()
+        for character in value { input.typeText(String(character)) }
     }
 
     private func revealInsideSetup(_ element: XCUIElement, attempts: Int = 12) -> Bool {
@@ -172,16 +227,47 @@ final class NoctweaveUITests: XCTestCase {
 
     func testDuressWipeRunsBeforeKeyAndBiometrics() {
         enterDuressPassword()
-        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Finish your onboarding"].waitForExistence(timeout: 20))
         XCTAssertFalse(app.staticTexts["Fixture message"].exists)
         XCTAssertFalse(app.buttons["You"].exists)
+        XCTAssertEqual(app.staticTexts["onboarding.resume.title"].frame.midX, app.windows.firstMatch.frame.midX, accuracy: 2)
+        attachScreenshot(named: "Finish onboarding after erase")
+        app.buttons["onboarding.resume"].tap()
+        XCTAssertTrue(app.buttons["onboarding.legal.continue"].waitForExistence(timeout: 5))
+        relaunchAfterDuressAndUnlock()
+        XCTAssertTrue(app.staticTexts["Finish your onboarding"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Fixture message"].exists)
+        XCTAssertFalse(app.buttons["onboarding.lock.continue"].exists)
     }
 
     func testDuressDestroyKeysRunsBeforeKeyAndBiometrics() {
         enterDuressPassword()
-        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Finish your onboarding"].waitForExistence(timeout: 20))
         XCTAssertFalse(app.staticTexts["Fixture message"].exists)
         XCTAssertFalse(app.buttons["You"].exists)
+        XCTAssertEqual(app.staticTexts["onboarding.resume.title"].frame.midX, app.windows.firstMatch.frame.midX, accuracy: 2)
+        attachScreenshot(named: "Finish onboarding after erase")
+        app.buttons["onboarding.resume"].tap()
+        XCTAssertTrue(app.buttons["onboarding.legal.continue"].waitForExistence(timeout: 5))
+        relaunchAfterDuressAndUnlock()
+        XCTAssertTrue(app.staticTexts["Finish your onboarding"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Fixture message"].exists)
+        XCTAssertFalse(app.buttons["onboarding.lock.continue"].exists)
+    }
+
+    private func relaunchAfterDuressAndUnlock(password: String = "654321", previousPassword: String = "123456") {
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "UI_TESTING_RESET_STATE" }
+        app.launch(); app.activate(); ensurePrimaryWindow()
+        let input = app.secureTextFields["unlock.pin"]
+        XCTAssertTrue(input.waitForExistence(timeout: 15))
+        input.tap(); input.typeText(previousPassword)
+        app.buttons["unlock.submitPIN"].tap()
+        XCTAssertTrue(app.staticTexts["Unable to unlock. Try again."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Verify Security Key"].exists)
+        XCTAssertFalse(app.buttons["Verify Biometrics"].exists)
+        input.tap(); input.typeText(password)
+        app.buttons["unlock.submitPIN"].tap()
     }
 
     private func enterDuressPassword() {
@@ -243,7 +329,7 @@ final class NoctweaveUITests: XCTestCase {
 
         app = XCUIApplication()
         app.launchArguments = [
-            "UI_TESTING",
+            "UI_TESTING", "UI_TESTING_AUTOMATED_PROFILE",
             "UI_TESTING_READY_STATE",
             "-ApplePersistenceIgnoreState",
             "YES",
@@ -356,9 +442,9 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertTrue(app.secureTextFields["securityKey.pin"].exists)
         XCTAssertTrue(app.switches["securityKey.keepConnected"].exists || app.checkBoxes["securityKey.keepConnected"].exists)
         attachScreenshot(named: "macOS Security Key Setup")
-        for (mode, button) in [("securityKeyAndPin", "Continue to PIN"),
+        for (mode, button) in [("securityKeyAndPin", "Continue to Password"),
                                ("biometricsAndSecurityKey", "Save Protection"),
-                               ("biometricsPinAndSecurityKey", "Continue to PIN")] {
+                               ("biometricsPinAndSecurityKey", "Continue to Password")] {
             let choice = app.buttons["appLock.method.\(mode)"]
             XCTAssertTrue(choice.exists)
             if choice.isEnabled {
@@ -377,7 +463,7 @@ final class NoctweaveUITests: XCTestCase {
         app.terminate()
         app = XCUIApplication()
         app.launchArguments = [
-            "UI_TESTING",
+            "UI_TESTING", "UI_TESTING_AUTOMATED_PROFILE",
             "UI_TESTING_RESET_STATE",
             "-ApplePersistenceIgnoreState",
             "YES"
@@ -391,6 +477,20 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(identifier: "window.close").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "window.minimize").count, 1)
         XCTAssertEqual(app.buttons.matching(identifier: "window.zoom").count, 1)
+        XCTAssertFalse(app.buttons["onboarding.legal.continue"].exists)
+        app.buttons["onboarding.lock.method.pinOnly"].tap()
+        let password = app.secureTextFields["onboarding.lock.pin"]
+        password.tap(); password.typeText("first password 789")
+        let confirmation = app.secureTextFields["onboarding.lock.confirmation"]
+        confirmation.tap(); confirmation.typeText("first password 789")
+        let securityContinue = app.buttons["onboarding.lock.continue"]
+        for _ in 0..<8 where !securityContinue.isHittable {
+            app.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -250)
+        }
+        XCTAssertTrue(securityContinue.isHittable)
+        attachScreenshot(named: "Security first onboarding")
+        securityContinue.tap()
+        XCTAssertTrue(app.buttons["onboarding.legal.continue"].waitForExistence(timeout: 5))
         let legalContinue = app.buttons["onboarding.legal.continue"]
         XCTAssertTrue(legalContinue.exists)
         XCTAssertFalse(legalContinue.isEnabled)
@@ -407,6 +507,15 @@ final class NoctweaveUITests: XCTestCase {
         personaName.tap()
         personaName.typeText("Fresh Test")
         XCTAssertTrue(app.buttons["onboarding.persona.continue"].isEnabled)
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "UI_TESTING_RESET_STATE" }
+        app.launch(); app.activate(); ensurePrimaryWindow()
+        let unlock = app.secureTextFields["unlock.pin"]
+        XCTAssertTrue(unlock.waitForExistence(timeout: 10))
+        XCTAssertEqual(unlock.placeholderValue, "Password")
+        unlock.tap(); unlock.typeText("first password 789")
+        app.buttons["unlock.submitPIN"].tap()
+        XCTAssertTrue(app.buttons["onboarding.legal.continue"].waitForExistence(timeout: 10))
     }
 
     private func assertOnboardingIsHorizontallyCentered(

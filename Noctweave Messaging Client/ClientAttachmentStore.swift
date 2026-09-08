@@ -15,10 +15,16 @@ final class ClientAttachmentStore {
     private var suppliedEncryptionKey: SymmetricKey?
     private let usesSuppliedEncryptionKey: Bool
     private var encryptionMaterialDestroyed = false
+    private var destructionFinished = false
+    private var writesSuspended = false
+
+    func suspendWritesForLocalTransition() { writesSuspended = true }
+    private let keyProvider: SecureStorageKeyProvider
 
     init(directory: URL, storageScopeIdentifier: String, encryptionKey: SymmetricKey? = nil,
-         keyService: String = "com.noctweave.securestorage") {
+         keyService: String = "com.noctweave.securestorage", keyProvider: SecureStorageKeyProvider = .shared) {
         self.keyService = keyService
+        self.keyProvider = keyProvider
         self.directory = directory
         self.keyAccount = "attachment-vault-v2-" + Data(SHA256.hash(data: Data(storageScopeIdentifier.utf8))).base64EncodedString()
         suppliedEncryptionKey = encryptionKey
@@ -26,14 +32,20 @@ final class ClientAttachmentStore {
     }
 
     func destroyEncryptionMaterial() throws {
+        guard !encryptionMaterialDestroyed else { throw ClientAttachmentStoreError.invalidPayload }
         encryptionMaterialDestroyed = true
         suppliedEncryptionKey = nil
         if !usesSuppliedEncryptionKey {
-            try SecureStorageKeyProvider.shared.destroyKey(service: keyService, account: keyAccount)
+            try keyProvider.destroyKey(service: keyService, account: keyAccount)
         }
     }
 
     func saveSanitizedAttachment(_ data: Data, attachmentId: UUID) throws -> String {
+        guard !writesSuspended else { throw ClientAttachmentStoreError.invalidPayload }
+        return try writeSanitizedAttachment(data, attachmentId: attachmentId)
+    }
+
+    private func writeSanitizedAttachment(_ data: Data, attachmentId: UUID) throws -> String {
         guard !data.isEmpty,
               data.count <= AttachmentDescriptor.maximumTransportBytes else {
             throw ClientAttachmentStoreError.invalidPayload
@@ -82,11 +94,7 @@ final class ClientAttachmentStore {
     func loadSanitizedAttachment(fileName: String) throws -> Data {
         let url = try attachmentURL(fileName: fileName)
         let attachmentId = try attachmentID(fileName: fileName)
-        let encoded = try SecureRegularFileIO.read(
-            from: url,
-            maximumBytes: Self.maximumStoredAttachmentBytes,
-            requirePrivateOwner: true
-        )
+        let encoded = try readStableEnvelope(from: url)
         let envelope = try NoctweaveCoder.decode(ClientAttachmentEnvelope.self, from: encoded)
         guard (1...3).contains(envelope.version),
               let sealed = try? AES.GCM.SealedBox(combined: envelope.sealed) else {
@@ -113,9 +121,24 @@ final class ClientAttachmentStore {
             throw ClientAttachmentStoreError.invalidPayload
         }
         if envelope.version < 3 {
-            _ = try saveSanitizedAttachment(opened, attachmentId: attachmentId)
+            _ = try writeSanitizedAttachment(opened, attachmentId: attachmentId)
         }
         return opened
+    }
+
+    private func readStableEnvelope(from url: URL) throws -> Data {
+        for attempt in 0..<3 {
+            do {
+                return try SecureRegularFileIO.read(from: url,
+                    maximumBytes: Self.maximumStoredAttachmentBytes, requirePrivateOwner: true)
+            } catch SecureRegularFileIOError.changedDuringRead where attempt < 2 {
+                // Discard unstable bytes and reopen the file. Every attempt keeps
+                // the full descriptor, owner, size and version checks; decoding
+                // and AEAD authentication run only on a stable complete read.
+                continue
+            }
+        }
+        throw SecureRegularFileIOError.changedDuringRead
     }
 
     /// Required before enabling cryptographic erasure: every managed attachment
@@ -134,6 +157,31 @@ final class ClientAttachmentStore {
     }
 
     func eraseAllLocalAttachments() throws {
+        guard !encryptionMaterialDestroyed else { throw ClientAttachmentStoreError.invalidPayload }
+        try eraseAttachmentFiles()
+    }
+
+    /// Completes a duress transition while leaving the retired store unusable.
+    func finishKeyDestruction(preservingCiphertext: Bool) throws {
+        guard encryptionMaterialDestroyed, !destructionFinished else { throw ClientAttachmentStoreError.invalidPayload }
+        destructionFinished = true
+        let retired = directory.appendingPathExtension("retired")
+        if preservingCiphertext {
+            guard FileManager.default.fileExists(atPath: directory.path) else { return }
+            try SecureRegularFileIO.ensurePrivateDirectory(at: directory)
+            try SecureRegularFileIO.ensurePrivateDirectory(at: retired)
+            try FileManager.default.moveItem(at: directory,
+                to: retired.appendingPathComponent(UUID().uuidString, isDirectory: true))
+        } else {
+            try eraseAttachmentFiles()
+            if FileManager.default.fileExists(atPath: retired.path) {
+                try SecureRegularFileIO.ensurePrivateDirectory(at: retired)
+                try FileManager.default.removeItem(at: retired)
+            }
+        }
+    }
+
+    private func eraseAttachmentFiles() throws {
         do {
             try SecureRegularFileIO.ensurePrivateDirectory(at: directory)
         } catch SecureRegularFileIOError.notFound {
@@ -179,7 +227,7 @@ final class ClientAttachmentStore {
         if let suppliedEncryptionKey {
             return suppliedEncryptionKey
         }
-        return try SecureStorageKeyProvider.shared.loadOrCreateKey(
+        return try keyProvider.loadOrCreateKey(
             service: keyService,
             account: keyAccount
         )

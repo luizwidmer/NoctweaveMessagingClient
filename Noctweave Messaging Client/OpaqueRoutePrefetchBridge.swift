@@ -134,8 +134,12 @@ enum OpaqueRoutePrefetchBridge {
     static func eraseAllLocalState() throws {
         // UI_TESTING_RESET_STATE must only erase its disposable fixture.
         guard !isUITesting else { return }
-        if let directory = try? sharedDirectory(),
-           FileManager.default.fileExists(atPath: directory.path) {
+        // Only the iOS target owns this widget store and its access-group key.
+        // The macOS app has neither entitlement; querying it there can reject an
+        // otherwise completed local wipe with errSecMissingEntitlement.
+        #if os(iOS)
+        let directory = try sharedDirectory()
+        if FileManager.default.fileExists(atPath: directory.path) {
             try FileManager.default.removeItem(at: directory)
         }
         UserDefaults(suiteName: appGroupIdentifier)?.removeObject(forKey: snapshotKey)
@@ -152,6 +156,7 @@ enum OpaqueRoutePrefetchBridge {
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw PrefetchBridgeError.keychainFailure(status)
         }
+        #endif
     }
 
     private static func updateWidgetAppearance(_ palette: ThemePalette) {

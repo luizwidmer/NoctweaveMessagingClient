@@ -397,7 +397,7 @@ private enum NoctweaveClientError: Error, LocalizedError {
         case .biometricAuthenticationFailed:
             return "Biometric authentication did not complete."
         case .invalidAppLockPIN:
-            return "Enter exactly six digits and confirm the same PIN."
+            return ClientUnlockCredentialPolicy.rules + " Confirm the same value."
         case .invalidPersonaName:
             return "Enter a display name between 1 and 512 bytes."
         case .personaOperationInProgress:
@@ -520,6 +520,9 @@ final class ClientViewModel: ObservableObject {
     @Published private(set) var pendingHiddenUnlockFactors: Set<AppLockFactor> = []
     @Published private(set) var pendingDuressPlans: [AppLockDuressPlan] = []
     @Published private(set) var localSessionPreview: [LocalChatPreview]?
+    @Published private(set) var showsOnboardingResume = false
+    var onLocalWipeCompleted: (() -> Void)?
+    private var unlockAfterLocalWipe = false
     @Published private(set) var checkingUnlockInput = false
     private var duressActivated = false
     private var duressPresentationMode: AppLockMode = .pinOnly
@@ -538,8 +541,9 @@ final class ClientViewModel: ObservableObject {
     @Published private(set) var archivedPersonaIDs: Set<UUID> = []
     @Published private(set) var receivedAttachmentFileNames: [UUID: String] = [:]
 
-    private let stateStore: ClientStateStore
-    private let attachmentStore: ClientAttachmentStore
+    private let storageSession: ClientStorageSession
+    private var stateStore: ClientStateStore
+    private var attachmentStore: ClientAttachmentStore
     private var client: HeadlessMessagingClient?
     private var pairingTask: Task<Void, Never>?
     private var pairingRelayCheckTask: Task<Void, Never>?
@@ -590,9 +594,10 @@ final class ClientViewModel: ObservableObject {
     private let isUITestReadyState: Bool
     private let isUITestProductFixture: Bool
 
-    init() {
-        let storageLocation = ClientStorageLocationResolver.resolve()
-        let support = storageLocation.supportDirectory
+    init(afterLocalWipe: Bool = false) {
+        showsOnboardingResume = false
+        unlockAfterLocalWipe = afterLocalWipe
+        let location = ClientStorageLocationResolver.resolve()
         #if DEBUG
         let isUITest = NoctweaveUITestRuntime.isEnabled
         isUITestReadyState = NoctweaveUITestRuntime.contains(.readyState)
@@ -600,68 +605,32 @@ final class ClientViewModel: ObservableObject {
         let externalUITestStateURL = NoctweaveUITestRuntime.value(after: .plaintextState)
             .map { URL(fileURLWithPath: $0, isDirectory: false).standardizedFileURL }
         let testRoot = externalUITestStateURL?.deletingLastPathComponent()
-            ?? FileManager.default.temporaryDirectory
-                .appendingPathComponent(NoctweaveUITestRuntime.contains(.lockFixture)
-                    ? "NoctweaveLockVisibilityUITests" : "NoctweaveCleanV1UITests", isDirectory: true)
-        let stateURL = isUITest
-            ? externalUITestStateURL
-                ?? testRoot.appendingPathComponent("client-state-v1.nwstate")
-            : support.appendingPathComponent("client-state-v1.nwstate")
-        if isUITest {
-            if NoctweaveUITestRuntime.contains(.resetState),
-               externalUITestStateURL == nil {
-                try? FileManager.default.removeItem(at: stateURL.deletingLastPathComponent())
-            }
-            if externalUITestStateURL != nil {
-                // Real-world UI scenarios seed two independent CLI states and
-                // launch two app processes against them. Keep this explicitly
-                // test-only so production state never loses encryption or its
-                // rollback anchor.
-                stateStore = ClientStateStore(
-                    fileURL: stateURL,
-                    protection: .insecurePlaintextForTesting
-                )
-            } else {
-                stateStore = ClientStateStore(
-                    fileURL: stateURL,
-                    protection: .encrypted,
-                    encryptionKey: SymmetricKey(data: Data(repeating: 0x4E, count: 32)),
-                    rollbackAnchorStore: UITestFileRollbackAnchorStore(
-                        fileURL: testRoot.appendingPathComponent("rollback-anchor-v1.json")
-                    ),
-                    storageScopeIdentifier: ClientStorageLocationResolver.primaryScopeIdentifier
-                )
-            }
-        } else {
-            stateStore = ClientStateStore(
-                fileURL: stateURL,
-                storageScopeIdentifier: storageLocation.scopeIdentifier
-            )
+            ?? FileManager.default.temporaryDirectory.appendingPathComponent(
+                NoctweaveUITestRuntime.contains(.automatedProfile) ? "NoctweaveAutomationUITests"
+                    : NoctweaveUITestRuntime.contains(.lockFixture) ? "NoctweaveLockVisibilityUITests" : "NoctweaveCleanV1UITests", isDirectory: true)
+        let support = isUITest ? testRoot : location.supportDirectory
+        let stateURL = externalUITestStateURL ?? support.appendingPathComponent("client-state-v1.nwstate")
+        if isUITest, NoctweaveUITestRuntime.contains(.resetState), externalUITestStateURL == nil, !afterLocalWipe {
+            try? FileManager.default.removeItem(at: support)
         }
-        let uiTestAttachmentKey = isUITest
-            ? SymmetricKey(data: Data(repeating: 0x41, count: 32))
-            : nil
-        let attachmentDirectory = (isUITest ? testRoot : support)
-            .appendingPathComponent("attachments", isDirectory: true)
+        let fixtureKeys = isUITest && externalUITestStateURL == nil
+        let plaintext = isUITest && externalUITestStateURL != nil
         #else
         let isUITest = false
         isUITestReadyState = false
         isUITestProductFixture = false
+        let support = location.supportDirectory
         let stateURL = support.appendingPathComponent("client-state-v1.nwstate")
-        stateStore = ClientStateStore(
-            fileURL: stateURL,
-            storageScopeIdentifier: storageLocation.scopeIdentifier
-        )
-        let uiTestAttachmentKey: SymmetricKey? = nil
-        let attachmentDirectory = support
-            .appendingPathComponent("attachments", isDirectory: true)
+        let fixtureKeys = false
+        let plaintext = false
         #endif
         self.isUITest = isUITest
-        attachmentStore = ClientAttachmentStore(
-            directory: attachmentDirectory,
-            storageScopeIdentifier: storageLocation.scopeIdentifier,
-            encryptionKey: uiTestAttachmentKey
-        )
+        storageSession = ClientStorageSession(stateURL: stateURL,
+            attachmentsURL: support.appendingPathComponent("attachments", isDirectory: true),
+            scope: isUITest ? ClientStorageLocationResolver.primaryScopeIdentifier : location.scopeIdentifier,
+            usesFixtureKeys: fixtureKeys, usesPlaintextFixture: plaintext)
+        stateStore = storageSession.stateStore()
+        attachmentStore = storageSession.attachments()
         onboardingStorageProtectionAcknowledged = isUITest
             || UserDefaults.standard.bool(forKey: onboardingStorageKey)
         Task {
@@ -780,8 +749,9 @@ final class ClientViewModel: ObservableObject {
     }
 
     var onboardingStep: ClientOnboardingStep {
-        guard let state else { return .legal }
+        guard let state else { return .appLock }
         if state.hasCompletedOnboarding { return .complete }
+        if !state.appLock.hasCompletedSetup && state.appLock.mode == .off { return .appLock }
         if !onboardingLegalAccepted
                 && (!state.hasAcceptedPrivacyPolicy || !state.hasAcceptedTermsOfUse) {
             return .legal
@@ -793,7 +763,7 @@ final class ClientViewModel: ObservableObject {
                 && (isUITest || !UserDefaults.standard.bool(forKey: onboardingPrivacyKey)) {
             return .privacy
         }
-        return .appLock
+        return .privacy
     }
 
     var hasCompletedPersonaOnboarding: Bool {
@@ -807,7 +777,12 @@ final class ClientViewModel: ObservableObject {
         onboardingStep == .complete
     }
 
-    func open() async {
+    func resumeOnboarding() async {
+        if state != nil { showsOnboardingResume = false }
+        else { await open(continueAfterReset: true) }
+    }
+
+    func open(continueAfterReset: Bool = false) async {
         guard !duressActivated else { return }
         bootState = .loading
         lastError = nil
@@ -815,6 +790,21 @@ final class ClientViewModel: ObservableObject {
 
         while !Task.isCancelled {
             do {
+                let transition = ClientDuressTransition(storage: storageSession)
+                do {
+                    if let (action, replacement) = try await transition.pending() {
+                        try await transition.complete(replacement, action: action, oldState: stateStore,
+                            oldAttachments: attachmentStore, clearSideEffects: clearLocalDuressSideEffects)
+                        stateStore = storageSession.stateStore()
+                        attachmentStore = storageSession.attachments()
+                    }
+                    try await transition.clearInactiveStaging()
+                } catch {
+                    // Recovery errors must not expose journal paths or the action
+                    // that created them on the unauthenticated launch screen.
+                    if isTransientSecureStorageFailure(error) { throw error }
+                    throw ClientStateStoreError.storageUnavailable
+                }
                 // Integration assumption: current Core exposes ClientState's
                 // onboarding flags but not a dedicated first-run builder. Create
                 // only a non-authoritative placeholder aggregate; the user-chosen
@@ -823,14 +813,20 @@ final class ClientViewModel: ObservableObject {
                 if let existing = try await stateStore.load() {
                     opened = try HeadlessMessagingClient(stateStore: stateStore, initialState: existing)
                 } else {
+                    let wasErased = try await stateStore.isAwaitingFreshState()
+                    if wasErased && !continueAfterReset {
+                        showsOnboardingResume = true
+                        bootState = .ready
+                        return
+                    }
                     var initial: ClientState
-                    if isUITestProductFixture {
+                    if isUITestProductFixture && !wasErased {
                         initial = try Self.makeProductFixtureState()
                     } else {
                         initial = try ClientState.initialLocalState(
-                            displayName: isUITestReadyState ? "UI Test Persona" : "Unnamed Persona"
+                            displayName: isUITestReadyState && !wasErased ? "UI Test Persona" : "Unnamed Persona"
                         )
-                        if isUITestReadyState {
+                        if isUITestReadyState && !wasErased {
                             var accepted = initial
                             try accepted.completeOnboarding(
                                 privacyPolicyAccepted: true,
@@ -840,7 +836,7 @@ final class ClientViewModel: ObservableObject {
                         }
                     }
                     #if DEBUG
-                    if NoctweaveUITestRuntime.contains(.lockFixture),
+                    if NoctweaveUITestRuntime.contains(.lockFixture), !wasErased,
                        NoctweaveUITestRuntime.value(after: .plaintextState) == nil {
                         let mode = NoctweaveUITestRuntime.value(after: .lockFixture).flatMap(AppLockMode.init(rawValue:))
                             ?? .securityKeyAndPin
@@ -856,7 +852,10 @@ final class ClientViewModel: ObservableObject {
                             hiddenUnlockFactors: hidden.intersection(mode.requiredFactors))
                         if let raw = NoctweaveUITestRuntime.value(after: .duressFixture),
                            let action = AppLockDuressAction(rawValue: raw) {
-                            initial.appLock.duressPlans = [try AppLockDuressPassword.makePlan(password: "654321", label: "Fixture", action: action)]
+                            initial.appLock.duressPlans = [try AppLockDuressPassword.makePlan(password: "654321", label: "Fixture", action: action,
+                                decoyChats: action == .decoy ? Set(initial.personas.flatMap { persona in
+                                    persona.relationships.prefix(1).map { AppLockDecoyChat(personaID: persona.id, kind: .relationship, chatID: $0.id) }
+                                }) : [])]
                         }
                     }
                     #endif
@@ -865,9 +864,12 @@ final class ClientViewModel: ObservableObject {
                 }
                 client = opened
                 try await refresh()
+                showsOnboardingResume = false
                 onboardingLegalAccepted = state?.hasAcceptedPrivacyPolicy == true
                     && state?.hasAcceptedTermsOfUse == true
-                isLocked = isOnboardingComplete && appLockMode != .off
+                isLocked = appLockMode != .off && !unlockAfterLocalWipe
+                unlockAfterLocalWipe = false
+                showsOnboardingResume = !isLocked && !isOnboardingComplete && state?.appLock.hasCompletedSetup == true && !continueAfterReset
                 statusMessage = "Encrypted local state is ready."
                 bootState = .ready
                 if isOnboardingComplete && !isLocked {
@@ -1108,7 +1110,7 @@ final class ClientViewModel: ObservableObject {
         if !isUITest {
             UserDefaults.standard.set(true, forKey: onboardingPrivacyKey)
         }
-        return true
+        return await finishOnboarding()
     }
 
     func completeOnboardingAppLock(
@@ -1123,14 +1125,15 @@ final class ClientViewModel: ObservableObject {
             lockScreenMessage: lockScreenMessage,
             newPIN: newPIN
         ) else { return false }
-        return await finishOnboarding()
+        return true
     }
 
     func skipOnboardingAppLock() async -> Bool {
-        await finishOnboarding()
+        await completeOnboardingAppLock(mode: .off)
     }
 
     func finishOnboarding() async -> Bool {
+        guard state?.appLock.hasCompletedSetup == true || appLockMode != .off else { return false }
         guard onboardingLegalAccepted
                 || (state?.hasAcceptedPrivacyPolicy == true
                     && state?.hasAcceptedTermsOfUse == true),
@@ -2573,7 +2576,7 @@ final class ClientViewModel: ObservableObject {
             checkingUnlockInput = false
             guard isLocked, attempt == lockAttemptID, !duressActivated else { return }
             if matching.count == 1, let plan = matching.first {
-                await executeDuress(plan.action)
+                await executeDuress(plan, password: value)
             } else {
                 unlockWithOrdinaryPIN(value)
             }
@@ -2588,7 +2591,7 @@ final class ClientViewModel: ObservableObject {
             return
         }
         if let pinLockedUntil, pinLockedUntil > Date() {
-            lockError = "PIN entry is temporarily locked."
+            lockError = "Unable to unlock. Try again."
             return
         }
         guard let settings = state?.appLock,
@@ -2604,10 +2607,10 @@ final class ClientViewModel: ObservableObject {
         finishUnlockIfComplete(additionalFactor: .pin)
     }
 
-    func addPendingDuressPlan(password: String, label: String, action: AppLockDuressAction) async -> Bool {
+    func addPendingDuressPlan(password: String, label: String, action: AppLockDuressAction, decoyChats: Set<AppLockDecoyChat> = []) async -> Bool {
         guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings, pendingDuressPlans.count < 4,
-              AppLockDuressPassword.isValid(password), !verifyConfiguredPIN(password) else {
-            settingsError = "Choose a distinct password of 6–128 characters. Up to four actions are supported."
+              ClientUnlockCredentialPolicy.isValidNewCredential(password), !verifyConfiguredPIN(password) else {
+            settingsError = ClientUnlockCredentialPolicy.rules + " Choose a distinct value. Up to four actions are supported."
             return false
         }
         let generation = lockOperationGeneration
@@ -2619,14 +2622,14 @@ final class ClientViewModel: ObservableObject {
                 guard !existing.contains(where: { AppLockDuressPassword.matches(password, plan: $0) }) else {
                     throw NoctweaveClientError.invalidAppLockPIN
                 }
-                return try AppLockDuressPassword.makePlan(password: password, label: label.trimmingCharacters(in: .whitespacesAndNewlines), action: action)
+                return try AppLockDuressPassword.makePlan(password: password, label: label.trimmingCharacters(in: .whitespacesAndNewlines), action: action, decoyChats: decoyChats)
             }.value
             guard generation == lockOperationGeneration, canEditSecurityKeys else { return false }
             pendingDuressPlans.append(plan)
             settingsError = nil
             return true
         } catch {
-            settingsError = "Use a distinct password and a short label."
+            settingsError = "Use a distinct \(ClientUnlockCredentialPolicy.name.lowercased()) and a short label."
             return false
         }
     }
@@ -2636,8 +2639,14 @@ final class ClientViewModel: ObservableObject {
         pendingDuressPlans.removeAll { $0.id == id }
     }
 
-    private func executeDuress(_ action: AppLockDuressAction) async {
+    private func executeDuress(_ plan: AppLockDuressPlan, password: String) async {
         guard isLocked, !duressActivated else { return }
+        let action = plan.action
+        let transition = ClientDuressTransition(storage: storageSession)
+        checkingUnlockInput = true
+        defer { checkingUnlockInput = false }
+        let names = (UserDefaults.standard.string(forKey: "noctweave.groupNames") ?? "{}").data(using: .utf8)
+            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
         duressPresentationMode = appLockMode
         duressAppearance = appearanceSettings
         duressPrivacy = privacySettings
@@ -2647,6 +2656,18 @@ final class ClientViewModel: ObservableObject {
         pairingTask?.cancel(); pairingLobbyTask?.cancel(); pairingRelayCheckTask?.cancel()
         onboardingRelayCheckTask?.cancel(); relayManagementTask?.cancel(); queuedOperationTask?.cancel()
         activeOperationTask?.cancel(); activeOperationTask = nil
+        attachmentStore.suspendWritesForLocalTransition()
+        let replacement: ClientState
+        do {
+            guard let snapshot = try await stateStore.suspendForLocalTransition(), snapshot.appLock.duressPlans.contains(plan) else {
+                throw ClientStateStoreError.concurrentUpdate
+            }
+            state = snapshot
+            replacement = try await Task.detached(priority: .userInitiated) {
+                try snapshot.replacementAfterDuress(plan: plan, password: password,
+                    usesNumericPIN: ClientUnlockCredentialPolicy.usesPINForDuressReplacement(password))
+            }.value
+        } catch { lockError = "Unable to unlock. Try again."; return }
         let preview: [LocalChatPreview]
         if action == .showChatsAndDestroyLocalKeys {
             let directChats = relationships.map { relationship in
@@ -2678,30 +2699,66 @@ final class ClientViewModel: ObservableObject {
         biometricStepPassed = false; securityKeyStepPassed = false
         settingsAuthorizedUntil = nil; settingsBiometricAuthorizedUntil = nil
         notificationManager.stop()
-        var failed = false
-        if action.destroysKeys {
-            do { try await stateStore.destroyLocalEncryptionMaterial(preservingCiphertext: action != .wipeLocalData) }
-            catch { failed = true }
-            do { try attachmentStore.prepareForKeyDestruction() }
-            catch {
-                do { try attachmentStore.eraseAllLocalAttachments() } catch { failed = true }
+        do {
+            try await transition.stage(replacement, action: action, sourceAttachments: attachmentStore, groupNames: names)
+            try await transition.complete(replacement, action: action, oldState: stateStore,
+                oldAttachments: attachmentStore, clearSideEffects: clearLocalDuressSideEffects)
+            _ = PairingInvitationInbox.shared.takePendingItem()
+            if action == .showChatsAndDestroyLocalKeys {
+                localSessionPreview = preview
+            } else {
+                onLocalWipeCompleted?()
             }
-            do { try attachmentStore.destroyEncryptionMaterial() } catch { failed = true }
-            if action == .wipeLocalData {
-                do { try attachmentStore.eraseAllLocalAttachments() } catch { failed = true }
-                if !isUITest, let bundleIdentifier = Bundle.main.bundleIdentifier {
-                    UserDefaults.standard.removePersistentDomain(forName: bundleIdentifier)
-                }
-            }
-        }
-        do { try OpaqueRoutePrefetchBridge.eraseAllLocalState() } catch { failed = true }
-        if failed {
-            // Never reveal an action, its targets, or partial completion on the lock screen.
+        } catch {
+            // A committed journal is retried before startup opens any session.
             lockError = "Unable to unlock. Try again."
-        } else {
-            localSessionPreview = preview
         }
     }
+
+    private func clearLocalDuressSideEffects() throws {
+        notificationManager.stop()
+        try OpaqueRoutePrefetchBridge.eraseAllLocalState()
+        if !isUITest, let identifier = Bundle.main.bundleIdentifier {
+            let temporary = FileManager.default.temporaryDirectory
+            for name in ["NoctweavePairingShares", "NoctweaveAttachmentSanitize"] {
+                let directory = temporary.appendingPathComponent(name, isDirectory: true)
+                if FileManager.default.fileExists(atPath: directory.path) { try FileManager.default.removeItem(at: directory) }
+            }
+            for file in try FileManager.default.contentsOfDirectory(at: temporary, includingPropertiesForKeys: nil)
+                where file.lastPathComponent.hasPrefix("noctweave-voice-") {
+                try FileManager.default.removeItem(at: file)
+            }
+            UserDefaults.standard.removePersistentDomain(forName: identifier)
+        } else {
+            // Test profiles never clear the manual review or production domains.
+            for key in [onboardingStorageKey, onboardingPrivacyKey, onboardingPersonaKey, "noctweave.groupNames"] {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        _ = PairingInvitationInbox.shared.takePendingItem()
+    }
+
+    var decoyChatChoices: [(selection: AppLockDecoyChat, title: String, persona: String)] {
+        guard let state else { return [] }
+        let names = (UserDefaults.standard.string(forKey: "noctweave.groupNames") ?? "{}").data(using: .utf8)
+            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+        return state.personas.flatMap { persona in
+            persona.relationships.map {
+                (AppLockDecoyChat(personaID: persona.id, kind: .relationship, chatID: $0.id), $0.peerIdentity.relationshipPseudonym, persona.displayName)
+            } + persona.groupRuntimes.map {
+                (AppLockDecoyChat(personaID: persona.id, kind: .group, chatID: $0.groupId), names[$0.groupId.uuidString.lowercased()] ?? "Private Group", persona.displayName)
+            }
+        }
+    }
+
+    func setPendingDecoyChat(_ selection: AppLockDecoyChat, in planID: UUID, retained: Bool) {
+        guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings,
+              let index = pendingDuressPlans.firstIndex(where: { $0.id == planID && $0.action == .decoy }) else { return }
+        if retained, pendingDuressPlans[index].decoyChats.count < 4_096 { pendingDuressPlans[index].decoyChats.insert(selection) }
+        else { pendingDuressPlans[index].decoyChats.remove(selection) }
+    }
+
+    var usesUnlockPassword: Bool { ClientUnlockCredentialPolicy.usesPassword || appLockSettings.pinHash.map(AppLockPasswordV1.isRecord) == true }
 
     private func recordFailedUnlockInput() {
         failedPINAttempts += 1
@@ -2995,7 +3052,7 @@ final class ClientViewModel: ObservableObject {
             if mode.requiresPIN {
                 guard let newPIN else { throw NoctweaveClientError.invalidAppLockPIN }
                 pinRecord = try await Task.detached(priority: .userInitiated) {
-                    try AppLockPINV2.makeRecord(pin: newPIN)
+                    try ClientUnlockCredentialPolicy.makeRecord(newPIN)
                 }.value
             } else {
                 pinRecord = nil
@@ -3017,7 +3074,8 @@ final class ClientViewModel: ObservableObject {
                 securityKeys: pendingSecurityKeys,
                 requireSecurityKeyPresence: mode.requiresSecurityKey && pendingKeyPresenceRequired,
                 hiddenUnlockFactors: pendingHiddenUnlockFactors.intersection(mode.requiredFactors).subtracting([.pin]),
-                duressPlans: mode == .off ? [] : pendingDuressPlans
+                duressPlans: mode == .off ? [] : pendingDuressPlans,
+                hasCompletedSetup: true
             )
             guard candidate.isStructurallyValid else {
                 throw NoctweaveClientError.invalidAppLockPIN
@@ -3297,6 +3355,24 @@ final class ClientViewModel: ObservableObject {
         _ = try relationshipWithEvent.appendEvent(receipt)
         try state.updateActivePersona { persona in
             try persona.upsert(relationship: relationshipWithEvent)
+        }
+        if NoctweaveUITestRuntime.contains(.duressFixture) || NoctweaveUITestRuntime.contains(.automatedProfile) {
+            var extraOffer = try ContactPairingHandshakeV2.makeOffer(createdAt: now, expiresAt: now.addingTimeInterval(300))
+            var extraLedger = RendezvousRedemptionLedgerV2()
+            let extraLocal = try makeFixtureParticipant(pseudonym: "Unselected local", relay: RelayEndpoint(host: "unselected-local.invalid", port: 443, useTLS: true, transport: .websocket), createdAt: now)
+            let extraPeer = try makeFixtureParticipant(pseudonym: "Unselected chat", relay: RelayEndpoint(host: "unselected-peer.invalid", port: 443, useTLS: true, transport: .websocket), createdAt: now)
+            let response = try ContactPairingResponderFlowV2.begin(invitation: extraOffer.invitation, participant: extraPeer, at: now.addingTimeInterval(1))
+            var responderFlow = response.flow
+            let offered = try ContactPairingOffererFlowV2.begin(pendingOffer: &extraOffer.pending, invitation: extraOffer.invitation,
+                participant: extraLocal, openRequest: response.openRequest, acceptanceFrame: response.acceptanceFrame,
+                ledger: &extraLedger, at: now.addingTimeInterval(2))
+            var offererFlow = offered.flow
+            let confirmation = try responderFlow.receiveOffer(offered.offerFrame, at: now.addingTimeInterval(3))
+            let completion = try offererFlow.receiveConfirmation(confirmation, at: now.addingTimeInterval(4))
+            var extra = completion.relationship
+            _ = try extra.appendEvent(ConversationEvent(conversationId: extra.conversationID, authorEndpointHandle: extra.localEndpointHandle,
+                createdAt: now, kind: .application, content: EncodedContent.text("Unselected message")!))
+            try state.updateActivePersona { try $0.upsert(relationship: extra) }
         }
         let inactive = try state.addPersona(displayName: "Fixture Inactive Persona", createdAt: now)
         try state.selectPersona(firstPersonaID)
@@ -4354,7 +4430,9 @@ final class ClientViewModel: ObservableObject {
         salt: Data,
         expected: Data
     ) -> Bool {
-        AppLockPINV2.verify(pin: pin, salt: salt, encodedHash: expected)
+        AppLockPasswordV1.isRecord(expected)
+            ? AppLockPasswordV1.verify(password: pin, salt: salt, encodedHash: expected)
+            : AppLockPINV2.verify(pin: pin, salt: salt, encodedHash: expected)
     }
 
     private func verifyConfiguredPIN(_ value: String) -> Bool {
@@ -4439,64 +4517,6 @@ final class ClientViewModel: ObservableObject {
     }
 }
 
-#if DEBUG
-/// UI-test state intentionally survives app-process restarts so simulator and
-/// desktop interoperability scenarios can exercise durable recovery. This
-/// file-backed anchor is scoped to the disposable UI-test directory and is
-/// deleted only with `UI_TESTING_RESET_STATE`; production continues to use
-/// the platform rollback-anchor store.
-private final class UITestFileRollbackAnchorStore:
-    ClientStateRollbackAnchorStore, @unchecked Sendable {
-    private let fileURL: URL
-    private let lock = NSLock()
-
-    init(fileURL: URL) {
-        self.fileURL = fileURL
-    }
-
-    func load() throws -> ClientStateRollbackAnchorRecord? {
-        lock.lock()
-        defer { lock.unlock() }
-        return try loadUnlocked()
-    }
-
-    func compareAndSwap(
-        expected: ClientStateRollbackAnchorRecord?,
-        replacement: ClientStateRollbackAnchorRecord
-    ) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        guard try loadUnlocked() == expected else {
-            throw ClientStateRollbackAnchorError.compareAndSwapFailed
-        }
-        try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try SecureRegularFileIO.writePrivate(
-            NoctweaveCoder.encode(replacement, sortedKeys: true),
-            to: fileURL,
-            maximumBytes: 64 * 1_024
-        )
-    }
-
-    private func loadUnlocked() throws -> ClientStateRollbackAnchorRecord? {
-        for attempt in 0..<3 {
-            do {
-                let data = try SecureRegularFileIO.read(
-                    from: fileURL, maximumBytes: 64 * 1_024, requirePrivateOwner: true)
-                return try NoctweaveCoder.decode(ClientStateRollbackAnchorRecord.self, from: data)
-            } catch SecureRegularFileIOError.notFound {
-                return nil
-            } catch SecureRegularFileIOError.changedDuringRead where attempt < 2 {
-                // Discard unstable bytes, then repeat all descriptor/version checks.
-                continue
-            }
-        }
-        throw SecureRegularFileIOError.changedDuringRead
-    }
-}
-#endif
 
 private extension AppLockSecurityKeyRecordV1 {
     var hardwareCredential: SecurityKeyCredential {

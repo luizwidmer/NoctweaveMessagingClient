@@ -11,7 +11,19 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if let chats = model.localSessionPreview {
+            if model.showsOnboardingResume {
+                launchSurface {
+                    Image(systemName: "sparkles").font(.system(size: 34)).foregroundStyle(.secondary)
+                    Text("Finish your onboarding").font(.title2.weight(.bold))
+                        .accessibilityIdentifier("onboarding.resume.title")
+                    Text("Complete setup to start using Noctweave on this device.")
+                        .foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    Button("Continue") { Task { await model.resumeOnboarding() } }
+                        .glassButton(prominent: true)
+                        .disabled(model.bootState == .loading)
+                        .accessibilityIdentifier("onboarding.resume")
+                }
+            } else if let chats = model.localSessionPreview {
                 protectedLocalSessionPreview(chats)
             } else if model.isLocked {
                 ClientLockView(model: model)
@@ -144,8 +156,9 @@ struct ContentView: View {
         ZStack {
             GlassBackground()
             VStack(spacing: 14, content: content)
-                .padding(28)
-                .uniformGlassCard(cornerRadius: 24, padding: 22)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(32)
+                .uniformGlassCard(cornerRadius: 24, padding: 0)
                 .frame(maxWidth: 430)
                 .padding(24)
         }
@@ -222,7 +235,8 @@ private struct ClientLockView: View {
             } else {
                 if model.showsPINUnlockInput {
                     HStack {
-                        SecureField("PIN", text: $pin)
+                        SecureField(model.usesUnlockPassword ? "Password" : "PIN", text: $pin)
+                            .appUnlockKeyboard(usesPassword: model.usesUnlockPassword)
                             .noctweaveInputField().frame(maxWidth: 220)
                             .accessibilityIdentifier("unlock.pin")
                             .disabled(model.checkingUnlockInput)
@@ -336,7 +350,7 @@ private struct ClientOnboardingView: View {
                     .frame(width: 62, height: 62)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Welcome to Noctweave")
+                    Text(model.appLockSettings.hasCompletedSetup ? "Finish your onboarding" : "Welcome to Noctweave")
                         .font(.largeTitle.weight(.bold))
                         .minimumScaleFactor(0.75)
                     Text("Private by design. Future by default.")
@@ -566,6 +580,7 @@ private struct ClientOnboardingView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("onboarding.lock.method.\(mode.rawValue)")
                     }
                 }
 
@@ -578,22 +593,24 @@ private struct ClientOnboardingView: View {
                 }
 
                 if requiresPIN {
-                    SecureField("Six-digit PIN", text: $pin)
-                        .pinKeyboard()
+                    SecureField(ClientUnlockCredentialPolicy.name, text: $pin)
+                        .appUnlockKeyboard(usesPassword: ClientUnlockCredentialPolicy.usesPassword)
                         .noctweaveInputField()
-                    SecureField("Repeat PIN", text: $pinConfirmation)
-                        .pinKeyboard()
+                        .accessibilityIdentifier("onboarding.lock.pin")
+                    SecureField("Repeat \(ClientUnlockCredentialPolicy.name.lowercased())", text: $pinConfirmation)
+                        .appUnlockKeyboard(usesPassword: ClientUnlockCredentialPolicy.usesPassword)
                         .noctweaveInputField()
-                    if !pin.isEmpty && (pin.count != 6 || pin != pinConfirmation) {
-                        Text(pin.count == 6 && pinConfirmation.count == 6
-                            ? "PIN entries do not match."
-                            : "PINs must contain exactly six digits.")
+                        .accessibilityIdentifier("onboarding.lock.confirmation")
+                    if !pin.isEmpty && (!ClientUnlockCredentialPolicy.isValidNewCredential(pin) || pin != pinConfirmation) {
+                        Text(ClientUnlockCredentialPolicy.isValidNewCredential(pin) && !pinConfirmation.isEmpty
+                            ? "Entries do not match."
+                            : ClientUnlockCredentialPolicy.rules)
                             .font(.caption)
                             .foregroundStyle(.red)
                     }
                 }
 
-                Button(appLockMode == .off ? "Finish Without App Lock" : "Enable and Finish") {
+                Button(appLockMode == .off ? "Continue Without App Lock" : "Save Protection and Continue") {
                     Task {
                         if appLockMode == .off {
                             _ = await model.skipOnboardingAppLock()
@@ -608,7 +625,7 @@ private struct ClientOnboardingView: View {
                 .glassButton(prominent: true)
                 .disabled(model.securityKeyBusy || (requiresPIN && !validPIN)
                     || (appLockMode.requiresSecurityKey && !model.canEnableSecurityKeyProtection))
-                .accessibilityIdentifier("onboarding.finish")
+                .accessibilityIdentifier("onboarding.lock.continue")
 
                 if let error = model.settingsError {
                     Text(error).font(.caption).foregroundStyle(.red)
@@ -709,17 +726,17 @@ private struct ClientOnboardingView: View {
     }
 
     private var validPIN: Bool {
-        pin.count == 6 && pin == pinConfirmation && pin.allSatisfy(\.isNumber)
+        ClientUnlockCredentialPolicy.isValidNewCredential(pin) && pin == pinConfirmation
     }
 
     private var stepNumber: Int {
         switch model.onboardingStep {
-        case .legal: 1
-        case .persona: 2
-        case .relay: 3
-        case .storageProtection: 4
-        case .privacy: 5
-        case .appLock, .complete: 6
+        case .appLock: 1
+        case .legal: 2
+        case .persona: 3
+        case .relay: 4
+        case .storageProtection: 5
+        case .privacy, .complete: 6
         }
     }
 
@@ -739,7 +756,7 @@ private struct ClientOnboardingView: View {
         switch mode {
         case .off: "lock.open"
         case .biometrics: "faceid"
-        case .pinOnly: "number.square.fill"
+        case .pinOnly: ClientUnlockCredentialPolicy.icon
         case .biometricsAndPin: "person.badge.key.fill"
         case .securityKey, .securityKeyAndPin, .biometricsAndSecurityKey, .biometricsPinAndSecurityKey: "key.horizontal.fill"
         }
@@ -750,11 +767,11 @@ private struct ClientOnboardingView: View {
         case .off: "No app lock"
         case .biometrics: model.biometricDisplayName
         case .securityKey: "Security Key"
-        case .securityKeyAndPin: "Key + PIN"
+        case .securityKeyAndPin: "Key + \(ClientUnlockCredentialPolicy.name)"
         case .biometricsAndSecurityKey: "\(model.biometricDisplayName) + Key"
-        case .biometricsPinAndSecurityKey: "\(model.biometricDisplayName) + PIN + Key"
-        case .pinOnly: "Six-digit PIN"
-        case .biometricsAndPin: "\(model.biometricDisplayName) + PIN"
+        case .biometricsPinAndSecurityKey: "\(model.biometricDisplayName) + \(ClientUnlockCredentialPolicy.name) + Key"
+        case .pinOnly: ClientUnlockCredentialPolicy.name
+        case .biometricsAndPin: "\(model.biometricDisplayName) + \(ClientUnlockCredentialPolicy.name)"
         }
     }
 
@@ -765,7 +782,7 @@ private struct ClientOnboardingView: View {
         case .pinOnly: "Works without biometric hardware"
         case .biometricsAndPin: "Require both independent checks"
         case .securityKey: "A physical FIDO2 key, verified locally"
-        case .securityKeyAndPin: "Require your key and six-digit app PIN"
+        case .securityKeyAndPin: "Require your key and app \(ClientUnlockCredentialPolicy.name.lowercased())"
         case .biometricsAndSecurityKey: "Require biometrics and your key"
         case .biometricsPinAndSecurityKey: "Require all three checks"
         }

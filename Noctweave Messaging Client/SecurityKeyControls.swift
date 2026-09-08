@@ -9,7 +9,7 @@ struct UnlockVisibilityControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Lock-screen privacy", systemImage: "eye.slash").font(.headline)
-            Text("Hide key and biometric hints on the waiting screen. Its PIN field disappears when authentication starts and returns at the required PIN step.")
+            Text("Hide key and biometric hints on the waiting screen. Its \(ClientUnlockCredentialPolicy.name.lowercased()) field disappears when authentication starts and returns at the required \(ClientUnlockCredentialPolicy.name.lowercased()) step.")
                 .font(.callout).foregroundStyle(.secondary)
             ForEach(AppLockFactor.allCases.filter { $0 != .pin && mode.requiredFactors.contains($0) }, id: \.self) { factor in
                 Toggle("Hide \(unlockFactorName(factor))", isOn: Binding(
@@ -17,9 +17,9 @@ struct UnlockVisibilityControls: View {
                     set: { model.setPendingUnlockFactorHidden(factor, hidden: $0) }))
                     .accessibilityIdentifier("unlock.hide.\(factor.rawValue)")
             }
-            Text("Normal unlock order is security key, biometrics, then PIN. Connecting a USB key starts its authentication flow; biometrics start when the key check is complete. Unconfigured checks are skipped.")
+            Text("Normal unlock order is security key, biometrics, then \(ClientUnlockCredentialPolicy.name.lowercased()). Connecting a USB key starts its authentication flow; biometrics start when the key check is complete. Unconfigured checks are skipped.")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("There is no hidden-method menu or shortcut. System prompts appear when authentication starts. Avoid naming hidden methods in a custom lock message. The waiting PIN screen accepts duress passwords before the normal checks; cancel the key flow to return to it.")
+            Text("There is no hidden-method menu or shortcut. System prompts appear when authentication starts. Avoid naming hidden methods in a custom lock message. The waiting \(ClientUnlockCredentialPolicy.name.lowercased()) screen accepts duress codes before the normal checks; cancel the key flow to return to it.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -33,7 +33,7 @@ struct UnlockVisibilityControls: View {
 private func unlockFactorName(_ factor: AppLockFactor) -> String {
     switch factor {
     case .biometrics: "biometrics"
-    case .pin: "PIN"
+    case .pin: ClientUnlockCredentialPolicy.name
     case .securityKey: "security key"
     }
 }
@@ -105,7 +105,7 @@ struct SecurityKeySetupControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Label("Your security keys", systemImage: "key.horizontal.fill").font(.headline)
-            Text("A spare key helps if your main key is lost. Only a registered key can unlock the app; there is no PIN or biometric fallback. Keep at least one key accessible.")
+            Text("A spare key helps if your main key is lost. Only a registered key can unlock the app; there is no app \(ClientUnlockCredentialPolicy.name.lowercased()) or biometric fallback. Keep at least one key accessible.")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if model.continuousKeyPresenceAvailable {
                 Toggle("Keep key connected", isOn: Binding(
@@ -179,25 +179,37 @@ struct DuressPlanControls: View {
     @State private var confirmation = ""
     @State private var action: AppLockDuressAction = .decoy
     @State private var acknowledged = false
+    @State private var selectedChats = Set<AppLockDecoyChat>()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("Duress passwords", systemImage: "shield.lefthalf.filled").font(.headline)
-            Text("Enter these in the ordinary PIN field. They run without a security key or biometrics and never unlock the real session.")
+            Label(ClientUnlockCredentialPolicy.usesPassword ? "Duress passwords" : "Duress PINs", systemImage: "shield.lefthalf.filled").font(.headline)
+            Text("Enter these in the ordinary \(ClientUnlockCredentialPolicy.name.lowercased()) field. Each code runs its action immediately, then becomes the only unlock \(ClientUnlockCredentialPolicy.name.lowercased()). Previous unlock methods and all duress actions are removed.")
                 .font(.callout).foregroundStyle(.secondary)
             if !model.appLockSettings.actionPlans.isEmpty {
                 Text("Older action plans are inactive. Recreate the actions you want here.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             ForEach(model.pendingDuressPlans) { plan in
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text(plan.label).font(.headline)
-                        Text(plan.action.displayName).font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(plan.label).font(.headline)
+                            Text(plan.action.displayName).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 12)
+                        Button("Remove") { model.removePendingDuressPlan(plan.id) }
                     }
-                    Spacer()
-                    Button("Remove") { model.removePendingDuressPlan(plan.id) }
+                    if plan.action == .decoy {
+                        DisclosureGroup("Chats to keep (\(plan.decoyChats.count))") {
+                            chatSelection(selected: plan.decoyChats) { selection, keep in
+                                model.setPendingDecoyChat(selection, in: plan.id, retained: keep)
+                            }
+                        }
+                    }
                 }
+                .padding(12)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
             }
             if model.pendingDuressPlans.count < 4 {
                 TextField("Label for your reference", text: $label).noctweaveInputField().accessibilityIdentifier("duress.label")
@@ -205,28 +217,40 @@ struct DuressPlanControls: View {
                     ForEach(AppLockDuressAction.allCases) { value in Text(value.displayName).tag(value) }
                 }
                 Text(action.explanation).font(.caption).foregroundStyle(.secondary)
-                SecureField("Duress password", text: $password).noctweaveInputField().accessibilityIdentifier("duress.password")
-                SecureField("Repeat duress password", text: $confirmation).noctweaveInputField().accessibilityIdentifier("duress.confirmation")
-                Text("Use 6–128 characters, different from the ordinary PIN and your other duress passwords.")
+                if action == .decoy {
+                    DisclosureGroup("Chats to keep (\(selectedChats.count))") {
+                        chatSelection(selected: selectedChats) { selection, keep in
+                            if keep { selectedChats.insert(selection) } else { selectedChats.remove(selection) }
+                        }
+                    }
+                    Text("These chats keep their history and can still send and receive. Everything outside this selection is erased, including chats in other personas.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                SecureField("Duress \(ClientUnlockCredentialPolicy.name.lowercased())", text: $password)
+                    .appUnlockKeyboard(usesPassword: ClientUnlockCredentialPolicy.usesPassword).noctweaveInputField().accessibilityIdentifier("duress.password")
+                SecureField("Repeat duress \(ClientUnlockCredentialPolicy.name.lowercased())", text: $confirmation)
+                    .appUnlockKeyboard(usesPassword: ClientUnlockCredentialPolicy.usesPassword).noctweaveInputField().accessibilityIdentifier("duress.confirmation")
+                Text(ClientUnlockCredentialPolicy.rules + " Choose a different value from your ordinary unlock and other duress codes.")
                     .font(.caption).foregroundStyle(.secondary)
                 if action.destroysKeys {
-                    Toggle("I understand that this action permanently destroys local access to real data.", isOn: $acknowledged)
-                    Text("It cannot erase recipient copies, exports, backups, or data already copied from this process. The temporary chat view retains message text until the app closes.")
+                    Toggle("I understand that this action permanently erases data and replaces my unlock methods.", isOn: $acknowledged)
+                    Text("It cannot erase recipient copies, exports, backups, or data already copied from this process.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Button("Add action to setup") {
                     let submitted = password
+                    let chats = action == .decoy ? selectedChats : []
                     password = ""; confirmation = ""
                     Task {
-                        if await model.addPendingDuressPlan(password: submitted, label: label, action: action) {
-                            label = ""; acknowledged = false
+                        if await model.addPendingDuressPlan(password: submitted, label: label, action: action, decoyChats: chats) {
+                            label = ""; acknowledged = false; selectedChats = []
                         }
                     }
                 }
                 .glassButton()
                 .accessibilityIdentifier("duress.add")
-                .disabled(label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !AppLockDuressPassword.isValid(password)
-                    || password != confirmation || (action.destroysKeys && !acknowledged))
+                .disabled(label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !ClientUnlockCredentialPolicy.isValidNewCredential(password)
+                    || password != confirmation || selectedChats.count > 4_096 || (action.destroysKeys && !acknowledged))
             }
             Text("Changes take effect only after Save Protection. Test your chosen flow with disposable data before relying on it.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -234,8 +258,64 @@ struct DuressPlanControls: View {
         .fixedSize(horizontal: false, vertical: true)
         .padding(16).uniformGlassCard(cornerRadius: 20, padding: 0)
         .disabled(model.isSavingSettings || model.securityKeyBusy)
-        .onChange(of: action) { _, _ in acknowledged = false }
+        .disclosureGroupStyle(ChatSelectionDisclosureStyle())
+        .onChange(of: action) { _, _ in acknowledged = false; selectedChats = [] }
         .onDisappear { password = ""; confirmation = "" }
+    }
+
+    private func chatSelection(selected: Set<AppLockDecoyChat>, change: @escaping (AppLockDecoyChat, Bool) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if model.decoyChatChoices.isEmpty {
+                Text("No chats available. This action will keep an empty profile.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else if model.decoyChatChoices.count <= 6 {
+                VStack(alignment: .leading, spacing: 10) { chatChoiceRows(selected: selected, change: change) }
+                    .padding(.vertical, 8)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) { chatChoiceRows(selected: selected, change: change) }
+                        .padding(.vertical, 8)
+                }.frame(height: 230)
+            }
+        }.padding(.top, 8)
+    }
+
+    private func chatChoiceRows(selected: Set<AppLockDecoyChat>, change: @escaping (AppLockDecoyChat, Bool) -> Void) -> some View {
+        ForEach(model.decoyChatChoices, id: \.selection) { choice in
+                Toggle(isOn: Binding(get: { selected.contains(choice.selection) }, set: { change(choice.selection, $0) })) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(choice.title).lineLimit(2)
+                        Text(choice.persona).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.automatic)
+                .accessibilityLabel("\(choice.title), \(choice.persona)")
+                .accessibilityIdentifier("duress.chat.\(choice.selection.chatID.uuidString)")
+        }
+    }
+
+}
+
+/// The entire label is a click/tap target, including on macOS where the native
+/// disclosure style otherwise exposes a much smaller expansion affordance.
+private struct ChatSelectionDisclosureStyle: DisclosureGroupStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button { configuration.isExpanded.toggle() } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    configuration.label
+                    Spacer(minLength: 0)
+                }
+                .frame(minHeight: 32)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
+            if configuration.isExpanded { configuration.content }
+        }
     }
 }
 

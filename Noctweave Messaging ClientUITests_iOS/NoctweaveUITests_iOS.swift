@@ -8,7 +8,7 @@ final class NoctweaveUITests_iOS: XCTestCase {
         continueAfterFailure = false
         app = XCUIApplication()
         app.launchArguments = [
-            "UI_TESTING",
+            "UI_TESTING", "UI_TESTING_AUTOMATED_PROFILE",
             "UI_TESTING_READY_STATE",
             "UI_TESTING_RESET_STATE"
         ]
@@ -63,11 +63,15 @@ final class NoctweaveUITests_iOS: XCTestCase {
 
     func testDuressDecoyRunsBeforeKeyAndBiometrics() {
         enterDuressPassword()
-        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.staticTexts["Fixture message"].exists)
+        XCTAssertTrue(app.buttons["You"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts.matching(identifier: "Fixture message").firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["Unselected message"].exists)
         XCTAssertFalse(app.buttons["Verify Security Key"].exists)
-        XCTAssertFalse(app.buttons["You"].exists)
-        attachScreenshot(named: "iPhone Separate Local View")
+        attachScreenshot(named: "Usable retained chats")
+        relaunchAfterDuressAndUnlock()
+        XCTAssertTrue(app.buttons["You"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts.matching(identifier: "Fixture message").firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["Unselected message"].exists)
     }
 
     func testDuressKeyAttachmentReplacesPINUntilCancelled() {
@@ -81,12 +85,16 @@ final class NoctweaveUITests_iOS: XCTestCase {
         XCTAssertTrue(app.secureTextFields["unlock.pin"].waitForExistence(timeout: 3))
         XCTAssertFalse(app.secureTextFields["securityKey.pin"].exists)
         enterDuressPassword()
-        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["You"].exists)
+        XCTAssertTrue(app.buttons["You"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts.matching(identifier: "Fixture message").firstMatch.exists)
     }
 
     func testDuressReadOnlyChatsRunBeforeKeyAndBiometrics() {
         enterDuressPassword()
+        XCTAssertTrue(app.buttons["Send"].waitForExistence(timeout: 20))
+        if app.buttons["Chats"].exists { app.buttons["Chats"].tap() }
+        let chat = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Fixture local contact")).firstMatch
+        if chat.exists { chat.tap() }
         XCTAssertTrue(app.staticTexts.matching(identifier: "Fixture message").firstMatch.waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["You"].exists)
         XCTAssertFalse(app.buttons["Send"].isEnabled)
@@ -96,16 +104,46 @@ final class NoctweaveUITests_iOS: XCTestCase {
 
     func testDuressWipeRunsBeforeKeyAndBiometrics() {
         enterDuressPassword()
-        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Finish your onboarding"].waitForExistence(timeout: 20))
         XCTAssertFalse(app.staticTexts["Fixture message"].exists)
         XCTAssertFalse(app.buttons["You"].exists)
+        attachScreenshot(named: "Finish onboarding after erase")
+        app.buttons["onboarding.resume"].tap()
+        XCTAssertTrue(app.buttons["onboarding.legal.continue"].waitForExistence(timeout: 5))
+        relaunchAfterDuressAndUnlock()
+        XCTAssertTrue(app.staticTexts["Finish your onboarding"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Fixture message"].exists)
+        XCTAssertFalse(app.buttons["onboarding.lock.continue"].exists)
     }
 
     func testDuressDestroyKeysRunsBeforeKeyAndBiometrics() {
         enterDuressPassword()
-        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Finish your onboarding"].waitForExistence(timeout: 20))
         XCTAssertFalse(app.staticTexts["Fixture message"].exists)
         XCTAssertFalse(app.buttons["You"].exists)
+        attachScreenshot(named: "Finish onboarding after erase")
+        app.buttons["onboarding.resume"].tap()
+        XCTAssertTrue(app.buttons["onboarding.legal.continue"].waitForExistence(timeout: 5))
+        relaunchAfterDuressAndUnlock()
+        XCTAssertTrue(app.staticTexts["Finish your onboarding"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Fixture message"].exists)
+        XCTAssertFalse(app.buttons["onboarding.lock.continue"].exists)
+    }
+
+    private func relaunchAfterDuressAndUnlock(password: String = "654321") {
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "UI_TESTING_RESET_STATE" }
+        app.launch()
+        let input = app.secureTextFields["unlock.pin"]
+        XCTAssertTrue(input.waitForExistence(timeout: 15))
+        XCTAssertEqual(input.placeholderValue, "PIN")
+        input.tap(); input.typeText("123456")
+        app.buttons["unlock.submitPIN"].tap()
+        XCTAssertTrue(app.staticTexts["Unable to unlock. Try again."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Verify Security Key"].exists)
+        XCTAssertFalse(app.buttons["Verify Biometrics"].exists)
+        input.tap(); input.typeText(password)
+        app.buttons["unlock.submitPIN"].tap()
     }
 
     private func enterDuressPassword() {
@@ -176,7 +214,7 @@ final class NoctweaveUITests_iOS: XCTestCase {
     func testSecureRenderingExposesOneInteractiveTabSet() {
         app.terminate()
         app = XCUIApplication()
-        app.launchArguments = ["UI_TESTING", "UI_TESTING_READY_STATE", "SECURE_RENDERING_TEST"]
+        app.launchArguments = ["UI_TESTING", "UI_TESTING_AUTOMATED_PROFILE", "UI_TESTING_READY_STATE", "SECURE_RENDERING_TEST"]
         app.launch()
 
         let chats = app.buttons["tab.chats"]
@@ -320,11 +358,21 @@ final class NoctweaveUITests_iOS: XCTestCase {
     func testFreshInstallCannotBypassLegalOrPersonaOnboarding() {
         app.terminate()
         app = XCUIApplication()
-        app.launchArguments = ["UI_TESTING", "UI_TESTING_RESET_STATE"]
+        app.launchArguments = ["UI_TESTING", "UI_TESTING_AUTOMATED_PROFILE", "UI_TESTING_RESET_STATE"]
         app.launch()
 
         XCTAssertTrue(app.staticTexts["Welcome to Noctweave"].waitForExistence(timeout: 5))
         assertOnboardingIsHorizontallyCentered()
+        XCTAssertFalse(app.buttons["onboarding.legal.continue"].exists)
+        app.buttons["onboarding.lock.method.off"].tap()
+        let securityContinue = app.buttons["onboarding.lock.continue"]
+        for _ in 0..<8 where !securityContinue.isHittable {
+            app.swipeUp()
+        }
+        XCTAssertTrue(securityContinue.isHittable)
+        attachScreenshot(named: "Security first onboarding")
+        securityContinue.tap()
+        XCTAssertTrue(app.buttons["onboarding.legal.continue"].waitForExistence(timeout: 5))
         let legalContinue = app.buttons["onboarding.legal.continue"]
         XCTAssertTrue(legalContinue.exists)
         XCTAssertFalse(legalContinue.isEnabled)
@@ -341,6 +389,40 @@ final class NoctweaveUITests_iOS: XCTestCase {
         personaName.tap()
         personaName.typeText("Fresh Test")
         XCTAssertTrue(app.buttons["onboarding.persona.continue"].isEnabled)
+    }
+
+    func testFreshInstallCreatesSixDigitPINAndRequiresItAfterRelaunch() {
+        app.terminate()
+        app.launchArguments = ["UI_TESTING", "UI_TESTING_AUTOMATED_PROFILE", "UI_TESTING_RESET_STATE"]
+        app.launch()
+        XCTAssertTrue(app.buttons["onboarding.lock.method.pinOnly"].waitForExistence(timeout: 10))
+        app.buttons["onboarding.lock.method.pinOnly"].tap()
+        let pin = app.secureTextFields["onboarding.lock.pin"]
+        let confirmation = app.secureTextFields["onboarding.lock.confirmation"]
+        let next = app.buttons["onboarding.lock.continue"]
+        for _ in 0..<6 where !pin.isHittable { app.swipeUp() }
+        XCTAssertEqual(pin.placeholderValue, "PIN")
+        pin.tap(); pin.typeText("01234")
+        XCTAssertFalse(next.isEnabled)
+        XCTAssertTrue(app.staticTexts["Use exactly six digits."].exists)
+        pin.typeText("5")
+        confirmation.tap(); confirmation.typeText("01234")
+        XCTAssertFalse(next.isEnabled)
+        confirmation.typeText("5")
+        XCTAssertTrue(waitUntilEnabled(next))
+        attachScreenshot(named: "iPhone Numeric PIN Setup")
+        for _ in 0..<6 where !next.isHittable { app.swipeUp() }
+        next.tap()
+        XCTAssertTrue(app.buttons["onboarding.legal.continue"].waitForExistence(timeout: 10))
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "UI_TESTING_RESET_STATE" }
+        app.launch()
+        let unlock = app.secureTextFields["unlock.pin"]
+        XCTAssertTrue(unlock.waitForExistence(timeout: 10))
+        XCTAssertEqual(unlock.placeholderValue, "PIN")
+        unlock.tap(); unlock.typeText("012345")
+        app.buttons["unlock.submitPIN"].tap()
+        XCTAssertTrue(app.buttons["onboarding.legal.continue"].waitForExistence(timeout: 10))
     }
 
     private func assertOnboardingIsHorizontallyCentered(

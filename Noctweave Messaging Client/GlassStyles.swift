@@ -216,6 +216,17 @@ extension View {
         buttonStyle(GlassCircleButtonStyle(prominent: prominent, diameter: diameter))
     }
 
+    @ViewBuilder
+    func appUnlockKeyboard(usesPassword: Bool) -> some View {
+        #if os(iOS)
+        self.keyboardType(usesPassword ? .default : .numberPad)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+        #else
+        self
+        #endif
+    }
+
     func pinKeyboard() -> some View {
         #if os(iOS)
         return keyboardType(.numberPad)
