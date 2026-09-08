@@ -606,7 +606,7 @@ private struct MatureAppLockSetupFlow: View {
                 }
                 .disabled(model.appLockMode.requiresPIN && enteredPIN.count != 6)
                 if model.appLockMode.requiresBiometrics {
-                    Text("Biometrics are also required before the security key check.")
+                    Text("After the security key check, biometrics are required.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             } else if model.appLockMode == .biometrics {
@@ -647,6 +647,11 @@ private struct MatureAppLockSetupFlow: View {
 
             if mode.requiresSecurityKey {
                 SecurityKeySetupControls(model: model)
+            }
+
+            if mode != .off {
+                UnlockVisibilityControls(model: model, mode: mode)
+                DuressPlanControls(model: model)
             }
 
             Text("LOCK TIMING").settingsSectionLabel().padding(.top, 4)

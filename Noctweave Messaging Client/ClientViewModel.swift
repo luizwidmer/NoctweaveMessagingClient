@@ -93,6 +93,15 @@ private enum ClientStorageLocationResolver {
 @MainActor
 private final class ClientNotificationManager {
     private var isAuthorized = false
+    private var isStopped = false
+
+    func stop() {
+        isStopped = true
+        isAuthorized = false
+        let center = UNUserNotificationCenter.current()
+        center.removeAllPendingNotificationRequests()
+        center.removeAllDeliveredNotifications()
+    }
 
     func refreshAuthorization() async -> ClientNotificationPermissionStatus {
         let settings = await UNUserNotificationCenter.current().notificationSettings()
@@ -100,6 +109,7 @@ private final class ClientNotificationManager {
     }
 
     func requestAuthorization() async -> ClientNotificationPermissionStatus {
+        guard !isStopped else { return .notDetermined }
         let center = UNUserNotificationCenter.current()
         let existing = await center.notificationSettings().authorizationStatus
         guard existing == .notDetermined else {
@@ -116,6 +126,7 @@ private final class ClientNotificationManager {
     }
 
     private func apply(_ status: UNAuthorizationStatus) -> ClientNotificationPermissionStatus {
+        guard !isStopped else { return .notDetermined }
         switch status {
         case .authorized, .provisional, .ephemeral:
             isAuthorized = true
@@ -133,7 +144,7 @@ private final class ClientNotificationManager {
     }
 
     func notifyNewMessage(count: Int = 1) {
-        guard isAuthorized else { return }
+        guard !isStopped, isAuthorized else { return }
         let content = UNMutableNotificationContent()
         content.title = "Noctweave"
         content.body = count == 1
@@ -150,166 +161,6 @@ private final class ClientNotificationManager {
             withCompletionHandler: nil
         )
     }
-}
-
-@MainActor
-private final class ClientAttachmentStore {
-    private static let maximumStoredAttachmentBytes = 12 * 1024 * 1024
-    // This key identity is deliberately independent of the app-container URL.
-    // Apple may relocate that URL during an update while preserving both the
-    // relative attachment files and this Keychain item.
-    private static let keyService = "com.noctweave.securestorage"
-    private static let keyAccount = "attachment-vault-v1"
-    private let directory: URL
-    private let suppliedEncryptionKey: SymmetricKey?
-
-    init(directory: URL, encryptionKey: SymmetricKey? = nil) {
-        self.directory = directory
-        suppliedEncryptionKey = encryptionKey
-    }
-
-    func saveSanitizedAttachment(_ data: Data, attachmentId: UUID) throws -> String {
-        guard !data.isEmpty,
-              data.count <= AttachmentDescriptor.maximumTransportBytes else {
-            throw ClientAttachmentStoreError.invalidPayload
-        }
-        let fileName = "\(attachmentId.uuidString).bin"
-        let url = try attachmentURL(fileName: fileName)
-        guard let sealed = try? AES.GCM.seal(
-            data,
-            using: storageKey(),
-            authenticating: Self.authenticatedData(for: attachmentId)
-        ),
-              var combined = sealed.combined else {
-            throw ClientAttachmentStoreError.invalidPayload
-        }
-        defer { combined.secureWipeClientAttachment() }
-        let envelope = try NoctweaveCoder.encode(
-            ClientAttachmentEnvelope(version: 2, sealed: combined)
-        )
-        guard envelope.count <= Self.maximumStoredAttachmentBytes else {
-            throw ClientAttachmentStoreError.fileTooLarge
-        }
-        try SecureRegularFileIO.writePrivate(
-            envelope,
-            to: url,
-            maximumBytes: Self.maximumStoredAttachmentBytes
-        )
-        return fileName
-    }
-
-    func warmUpKeychain() throws {
-        _ = try storageKey()
-    }
-
-    func existingFileName(attachmentId: UUID) -> String? {
-        let fileName = "\(attachmentId.uuidString).bin"
-        guard let url = try? attachmentURL(fileName: fileName),
-              SecureRegularFileIO.privateRegularFileExists(
-                at: url,
-                maximumBytes: Self.maximumStoredAttachmentBytes
-              ) else {
-            return nil
-        }
-        return fileName
-    }
-
-    func loadSanitizedAttachment(fileName: String) throws -> Data {
-        let url = try attachmentURL(fileName: fileName)
-        let attachmentId = try attachmentID(fileName: fileName)
-        let encoded = try SecureRegularFileIO.read(
-            from: url,
-            maximumBytes: Self.maximumStoredAttachmentBytes,
-            requirePrivateOwner: true
-        )
-        let envelope = try NoctweaveCoder.decode(ClientAttachmentEnvelope.self, from: encoded)
-        guard (envelope.version == 1 || envelope.version == 2),
-              let sealed = try? AES.GCM.SealedBox(combined: envelope.sealed) else {
-            throw ClientAttachmentStoreError.invalidPayload
-        }
-        let key = try storageKey()
-        let opened: Data
-        if envelope.version == 2 {
-            opened = try AES.GCM.open(
-                sealed,
-                using: key,
-                authenticating: Self.authenticatedData(for: attachmentId)
-            )
-        } else {
-            opened = try AES.GCM.open(sealed, using: key)
-        }
-        guard !opened.isEmpty,
-              opened.count <= AttachmentDescriptor.maximumTransportBytes else {
-            throw ClientAttachmentStoreError.invalidPayload
-        }
-        if envelope.version == 1 {
-            _ = try saveSanitizedAttachment(opened, attachmentId: attachmentId)
-        }
-        return opened
-    }
-
-    func eraseAllLocalAttachments() throws {
-        do {
-            try SecureRegularFileIO.ensurePrivateDirectory(at: directory)
-        } catch SecureRegularFileIOError.notFound {
-            return
-        }
-        let entries = try FileManager.default.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-            options: [.skipsHiddenFiles]
-        )
-        for entry in entries {
-            try FileManager.default.removeItem(at: entry)
-        }
-        try FileManager.default.removeItem(at: directory)
-    }
-
-    private func attachmentURL(fileName: String) throws -> URL {
-        let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed == (trimmed as NSString).lastPathComponent,
-              trimmed.hasSuffix(".bin"),
-              UUID(uuidString: String(trimmed.dropLast(4))) != nil else {
-            throw ClientAttachmentStoreError.invalidFileName
-        }
-        return directory.appendingPathComponent(trimmed, isDirectory: false)
-    }
-
-    private func attachmentID(fileName: String) throws -> UUID {
-        let trimmed = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed == (trimmed as NSString).lastPathComponent,
-              trimmed.hasSuffix(".bin"),
-              let identifier = UUID(uuidString: String(trimmed.dropLast(4))) else {
-            throw ClientAttachmentStoreError.invalidFileName
-        }
-        return identifier
-    }
-
-    private static func authenticatedData(for attachmentId: UUID) -> Data {
-        Data("org.noctweave.client-attachment/v2\0\(attachmentId.uuidString.lowercased())".utf8)
-    }
-
-    private func storageKey() throws -> SymmetricKey {
-        if let suppliedEncryptionKey {
-            return suppliedEncryptionKey
-        }
-        return try SecureStorageKeyProvider.shared.loadOrCreateKey(
-            service: Self.keyService,
-            account: Self.keyAccount
-        )
-    }
-
-}
-
-private struct ClientAttachmentEnvelope: Codable {
-    let version: Int
-    let sealed: Data
-}
-
-private enum ClientAttachmentStoreError: Error {
-    case invalidFileName
-    case invalidPayload
-    case fileTooLarge
 }
 
 enum ClientBootState: Equatable {
@@ -664,7 +515,16 @@ final class ClientViewModel: ObservableObject {
     @Published private(set) var biometricStepPassed = false
     @Published private(set) var securityKeyBusy = false
     @Published private(set) var securityKeyStepPassed = false
+    @Published private(set) var automaticKeyPrompt = false
     @Published private(set) var pendingKeyPresenceRequired = false
+    @Published private(set) var pendingHiddenUnlockFactors: Set<AppLockFactor> = []
+    @Published private(set) var pendingDuressPlans: [AppLockDuressPlan] = []
+    @Published private(set) var localSessionPreview: [LocalChatPreview]?
+    @Published private(set) var checkingUnlockInput = false
+    private var duressActivated = false
+    private var duressPresentationMode: AppLockMode = .pinOnly
+    private var duressAppearance = AppearanceSettings()
+    private var duressPrivacy = PrivacySettings()
     @Published private(set) var lockAttemptID = UUID()
     @Published private(set) var pendingSecurityKeys: [AppLockSecurityKeyRecordV1] = []
     @Published private(set) var lockError: String?
@@ -705,7 +565,10 @@ final class ClientViewModel: ObservableObject {
     private var onboardingLegalAccepted = false
     private var onboardingPersonaNameSaved = false
     private var onboardingPrivacyCompleted = false
-    private var biometricRequestInFlight = false
+    @Published private(set) var biometricRequestInFlight = false
+    private var biometricContext: LAContext?
+    private var automaticBiometricAttemptID: UUID?
+    private var automaticKeyTask: Task<Void, Never>?
     private let hardwareSecurityKey = HardwareSecurityKey()
     private var lockOperationGeneration: UInt64 = 0
     private var securityKeyProofUntil: Date?
@@ -717,6 +580,7 @@ final class ClientViewModel: ObservableObject {
     private var onboardingRelayCheckTask: Task<Void, Never>?
     private var relayManagementTask: Task<Void, Never>?
     private var queuedOperationTask: Task<Void, Never>?
+    private var activeOperationTask: Task<Void, Never>?
     private var attachmentDownloadsInFlight = Set<UUID>()
     private let notificationManager = ClientNotificationManager()
     private let onboardingStorageKey = "noctweave.onboarding.storage-protection-ack.v1"
@@ -737,7 +601,8 @@ final class ClientViewModel: ObservableObject {
             .map { URL(fileURLWithPath: $0, isDirectory: false).standardizedFileURL }
         let testRoot = externalUITestStateURL?.deletingLastPathComponent()
             ?? FileManager.default.temporaryDirectory
-                .appendingPathComponent("NoctweaveCleanV1UITests", isDirectory: true)
+                .appendingPathComponent(NoctweaveUITestRuntime.contains(.lockFixture)
+                    ? "NoctweaveLockVisibilityUITests" : "NoctweaveCleanV1UITests", isDirectory: true)
         let stateURL = isUITest
             ? externalUITestStateURL
                 ?? testRoot.appendingPathComponent("client-state-v1.nwstate")
@@ -794,6 +659,7 @@ final class ClientViewModel: ObservableObject {
         self.isUITest = isUITest
         attachmentStore = ClientAttachmentStore(
             directory: attachmentDirectory,
+            storageScopeIdentifier: storageLocation.scopeIdentifier,
             encryptionKey: uiTestAttachmentKey
         )
         onboardingStorageProtectionAcknowledged = isUITest
@@ -864,15 +730,15 @@ final class ClientViewModel: ObservableObject {
     }
 
     var appLockMode: AppLockMode {
-        state?.appLock.mode ?? .off
+        duressActivated ? duressPresentationMode : (state?.appLock.mode ?? .off)
     }
 
     var appearanceSettings: AppearanceSettings {
-        state?.appearance ?? AppearanceSettings()
+        duressActivated ? duressAppearance : (state?.appearance ?? AppearanceSettings())
     }
 
     var privacySettings: PrivacySettings {
-        state?.privacy ?? PrivacySettings()
+        duressActivated ? duressPrivacy : (state?.privacy ?? PrivacySettings())
     }
 
     var appLockSettings: AppLockSettings {
@@ -942,6 +808,7 @@ final class ClientViewModel: ObservableObject {
     }
 
     func open() async {
+        guard !duressActivated else { return }
         bootState = .loading
         lastError = nil
         var retryDelayNanoseconds: UInt64 = 250_000_000
@@ -972,6 +839,27 @@ final class ClientViewModel: ObservableObject {
                             initial = accepted
                         }
                     }
+                    #if DEBUG
+                    if NoctweaveUITestRuntime.contains(.lockFixture),
+                       NoctweaveUITestRuntime.value(after: .plaintextState) == nil {
+                        let mode = NoctweaveUITestRuntime.value(after: .lockFixture).flatMap(AppLockMode.init(rawValue:))
+                            ?? .securityKeyAndPin
+                        let hidden = Set((NoctweaveUITestRuntime.value(after: .hiddenUnlockFactors) ?? "securityKey")
+                            .split(separator: ",").compactMap { AppLockFactor(rawValue: String($0)) })
+                        let pin = try AppLockPINV2.makeRecord(pin: "123456")
+                        initial.appLock = AppLockSettings(mode: mode,
+                            pinSalt: mode.requiresPIN ? pin.salt : nil,
+                            pinHash: mode.requiresPIN ? pin.encodedHash : nil,
+                            securityKeys: mode.requiresSecurityKey ? [.init(name: "UI fixture",
+                                credentialID: Data(repeating: 7, count: 32),
+                                publicKey: Data([4]) + Data(repeating: 1, count: 64), signatureCounter: 0)] : [],
+                            hiddenUnlockFactors: hidden.intersection(mode.requiredFactors))
+                        if let raw = NoctweaveUITestRuntime.value(after: .duressFixture),
+                           let action = AppLockDuressAction(rawValue: raw) {
+                            initial.appLock.duressPlans = [try AppLockDuressPassword.makePlan(password: "654321", label: "Fixture", action: action)]
+                        }
+                    }
+                    #endif
                     try await stateStore.save(initial, replacing: nil)
                     opened = try HeadlessMessagingClient(stateStore: stateStore, initialState: initial)
                 }
@@ -1016,6 +904,7 @@ final class ClientViewModel: ObservableObject {
     /// state is created, so an older encrypted database cannot be replayed
     /// after reset.
     func resetLocalApplication() async {
+        guard !duressActivated else { return }
         bootState = .loading
         lastError = nil
         statusMessage = "Erasing local encrypted state…"
@@ -1086,6 +975,7 @@ final class ClientViewModel: ObservableObject {
     func refresh() async throws {
         guard let client else { throw NoctweaveClientError.unavailable }
         let snapshot = await client.snapshot()
+        guard !duressActivated else { return }
         state = snapshot
         archivedPersonaIDs = snapshot.archivedPersonaIDs
         var attachmentFiles: [UUID: String] = [:]
@@ -2530,6 +2420,8 @@ final class ClientViewModel: ObservableObject {
         keyPresenceTask = nil
         activeKeyPresence = nil
         lockAttemptID = UUID()
+        stopAutomaticUnlock()
+        automaticBiometricAttemptID = nil
         cancelAppLockChanges()
         backgroundedAt = nil
         biometricStepPassed = false
@@ -2559,15 +2451,88 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
+    var authenticationPromptInFlight: Bool { biometricRequestInFlight || securityKeyBusy }
+
+    var showsSecurityKeyUnlockPrompt: Bool {
+        appLockMode.requiresSecurityKey && !securityKeyStepPassed &&
+            (automaticKeyPrompt || appLockSettings.visibleUnlockFactors.contains(.securityKey))
+    }
+
+    var showsPINUnlockInput: Bool {
+        ClientLockPresentation.showsPIN(mode: appLockMode, completedFactors: completedUnlockFactors,
+            keyPromptVisible: showsSecurityKeyUnlockPrompt,
+            authenticationInFlight: authenticationPromptInFlight)
+    }
+
+    private var completedUnlockFactors: Set<AppLockFactor> {
+        var result = Set<AppLockFactor>()
+        if securityKeyStepPassed { result.insert(.securityKey) }
+        if biometricStepPassed { result.insert(.biometrics) }
+        return result
+    }
+
+    /// Observe attachment without claiming a device or treating discovery as authentication.
+    /// A cancelled or rejected request is not retried until another attachment/lock attempt.
+    func listenForUnlockDevices() async {
+        var observed = Set<String>()
+        while !Task.isCancelled && isLocked && !duressActivated {
+            expireUnlockFactors()
+            let devices: Set<String>
+            #if DEBUG
+            if NoctweaveUITestRuntime.contains(.lockFixture) {
+                devices = NoctweaveUITestRuntime.contains(.attachedKeyFixture) ? ["ui-test-key"] : []
+            }
+            else { devices = Set(await SecurityKeyPresence.attachedDeviceTokens()) }
+            #else
+            devices = Set(await SecurityKeyPresence.attachedDeviceTokens())
+            #endif
+            guard !Task.isCancelled, isLocked else { break }
+            let inserted = !devices.subtracting(observed).isEmpty
+            if inserted { automaticBiometricAttemptID = nil }
+            observed = devices
+            if devices.isEmpty && automaticKeyPrompt {
+                automaticKeyPrompt = false
+                cancelSecurityKeyOperation()
+            }
+            if inserted && appLockMode.requiresSecurityKey && !securityKeyStepPassed && !securityKeyBusy {
+                automaticKeyPrompt = true
+                // A fixture may present discovery, but never authenticates or claims real hardware.
+                if !NoctweaveUITestRuntime.contains(.lockFixture) {
+                    automaticKeyTask = Task { [weak self] in
+                        await self?.unlockWithSecurityKey(pin: "", transport: .usb)
+                    }
+                }
+            }
+            if appLockMode.canAttempt(.biometrics, completedFactors: completedUnlockFactors),
+               !biometricStepPassed, !securityKeyBusy, automaticBiometricAttemptID != lockAttemptID {
+                automaticBiometricAttemptID = lockAttemptID
+                await unlockWithBiometrics()
+            }
+            do { try await Task.sleep(for: .milliseconds(500)) } catch { break }
+        }
+    }
+
+    func stopAutomaticUnlock() {
+        automaticKeyTask?.cancel()
+        automaticKeyTask = nil
+        automaticKeyPrompt = false
+        biometricContext?.invalidate()
+        biometricContext = nil
+        cancelSecurityKeyOperation()
+    }
+
     func unlockWithBiometrics() async {
         expireUnlockFactors()
-        guard isLocked, !biometricRequestInFlight, appLockMode.requiresBiometrics else { return }
+        guard isLocked, !biometricRequestInFlight,
+              appLockMode.canAttempt(.biometrics, completedFactors: completedUnlockFactors) else { return }
         let started = lockOperationGeneration
         let originalMode = appLockMode
         biometricRequestInFlight = true
         defer { biometricRequestInFlight = false }
         lockError = nil
         let context = LAContext()
+        biometricContext = context
+        defer { if biometricContext === context { biometricContext = nil } }
         var error: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
             lockError = "Biometric authentication is unavailable."
@@ -2592,11 +2557,34 @@ final class ClientViewModel: ObservableObject {
     }
 
     func unlockWithPIN(_ value: String) {
+        guard isLocked, !checkingUnlockInput, !duressActivated, value.utf8.count <= 128 else { return }
+        if let deadline = pinLockedUntil, deadline > Date() {
+            lockError = "Unable to unlock. Try again."
+            return
+        }
+        let plans = appLockSettings.duressPlans
+        guard !plans.isEmpty else { unlockWithOrdinaryPIN(value); return }
+        checkingUnlockInput = true
+        let attempt = lockAttemptID
+        Task {
+            let matching = await Task.detached(priority: .userInitiated) {
+                plans.filter { AppLockDuressPassword.matches(value, plan: $0) }
+            }.value
+            checkingUnlockInput = false
+            guard isLocked, attempt == lockAttemptID, !duressActivated else { return }
+            if matching.count == 1, let plan = matching.first {
+                await executeDuress(plan.action)
+            } else {
+                unlockWithOrdinaryPIN(value)
+            }
+        }
+    }
+
+    private func unlockWithOrdinaryPIN(_ value: String) {
         expireUnlockFactors()
-        guard isLocked, appLockMode.requiresPIN,
-              !appLockMode.requiresBiometrics || biometricStepPassed,
-              !appLockMode.requiresSecurityKey || securityKeyStepPassed else {
-            lockError = "Complete the other required checks first."
+        guard isLocked, !duressActivated,
+              appLockMode.canAttempt(.pin, completedFactors: completedUnlockFactors) else {
+            recordFailedUnlockInput()
             return
         }
         if let pinLockedUntil, pinLockedUntil > Date() {
@@ -2607,20 +2595,121 @@ final class ClientViewModel: ObservableObject {
               let salt = settings.pinSalt,
               let expected = settings.pinHash,
               matchesStructuredPIN(value, salt: salt, expected: expected) else {
-            failedPINAttempts += 1
-            if failedPINAttempts >= 5 {
-                pinLockedUntil = Date().addingTimeInterval(30)
-                failedPINAttempts = 0
-                lockError = "Too many attempts. PIN entry is locked for 30 seconds."
-            } else {
-                lockError = "Incorrect PIN."
-            }
+            recordFailedUnlockInput()
             return
         }
         failedPINAttempts = 0
         pinLockedUntil = nil
         lockError = nil
         finishUnlockIfComplete(additionalFactor: .pin)
+    }
+
+    func addPendingDuressPlan(password: String, label: String, action: AppLockDuressAction) async -> Bool {
+        guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings, pendingDuressPlans.count < 4,
+              AppLockDuressPassword.isValid(password), !verifyConfiguredPIN(password) else {
+            settingsError = "Choose a distinct password of 6–128 characters. Up to four actions are supported."
+            return false
+        }
+        let generation = lockOperationGeneration
+        let existing = pendingDuressPlans
+        isSavingSettings = true
+        defer { isSavingSettings = false }
+        do {
+            let plan = try await Task.detached(priority: .userInitiated) {
+                guard !existing.contains(where: { AppLockDuressPassword.matches(password, plan: $0) }) else {
+                    throw NoctweaveClientError.invalidAppLockPIN
+                }
+                return try AppLockDuressPassword.makePlan(password: password, label: label.trimmingCharacters(in: .whitespacesAndNewlines), action: action)
+            }.value
+            guard generation == lockOperationGeneration, canEditSecurityKeys else { return false }
+            pendingDuressPlans.append(plan)
+            settingsError = nil
+            return true
+        } catch {
+            settingsError = "Use a distinct password and a short label."
+            return false
+        }
+    }
+
+    func removePendingDuressPlan(_ id: UUID) {
+        guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings else { return }
+        pendingDuressPlans.removeAll { $0.id == id }
+    }
+
+    private func executeDuress(_ action: AppLockDuressAction) async {
+        guard isLocked, !duressActivated else { return }
+        duressPresentationMode = appLockMode
+        duressAppearance = appearanceSettings
+        duressPrivacy = privacySettings
+        duressActivated = true
+        stopAutomaticUnlock()
+        keyPresenceTask?.cancel(); keyPresenceTask = nil; activeKeyPresence = nil
+        pairingTask?.cancel(); pairingLobbyTask?.cancel(); pairingRelayCheckTask?.cancel()
+        onboardingRelayCheckTask?.cancel(); relayManagementTask?.cancel(); queuedOperationTask?.cancel()
+        activeOperationTask?.cancel(); activeOperationTask = nil
+        let preview: [LocalChatPreview]
+        if action == .showChatsAndDestroyLocalKeys {
+            let directChats = relationships.map { relationship in
+                LocalChatPreview(title: relationship.peerIdentity.relationshipPseudonym,
+                    messages: relationship.events.filter { $0.kind != .receipt && $0.content.type == .text }.map {
+                        LocalChatPreview.Message(text: displayText(for: $0), outgoing: $0.authorEndpointHandle == relationship.localEndpointHandle)
+                    })
+            }
+            let names = (UserDefaults.standard.string(forKey: "noctweave.groupNames") ?? "{}").data(using: .utf8)
+                .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+            let groupChats = groups.map { group in
+                LocalChatPreview(title: names[group.groupId.uuidString.lowercased()] ?? "Private Group",
+                    messages: group.events.filter { $0.content.type == .text }.map {
+                        LocalChatPreview.Message(text: displayText(for: $0), outgoing: $0.authorCredentialHandle == group.localCredential.credentialHandle)
+                    })
+            }
+            preview = directChats + groupChats
+        } else { preview = [] }
+        client = nil
+        state = nil
+        selectedRelationshipID = nil; selectedGroupID = nil
+        draftMessage = ""; groupDraftMessage = ""; receivedAttachmentFileNames = [:]
+        pendingSecurityKeys = []; pendingDuressPlans = []; pendingHiddenUnlockFactors = []
+        pendingKeyPresence = nil; verifiedSetupCredentialID = nil
+        directOffererPending = nil; directOffererFlow = nil; directResponderFlow = nil; directTemporaryParticipant = nil
+        pairingLink = nil; directPairingPayload = nil; groupExchangeLink = nil
+        pairingLobbyHost = nil; pairingLobbyRequester = nil; pairingLobbySubscription = nil
+        pairingLobbyListings = []; pairingLobbyRequests = []
+        biometricStepPassed = false; securityKeyStepPassed = false
+        settingsAuthorizedUntil = nil; settingsBiometricAuthorizedUntil = nil
+        notificationManager.stop()
+        var failed = false
+        if action.destroysKeys {
+            do { try await stateStore.destroyLocalEncryptionMaterial(preservingCiphertext: action != .wipeLocalData) }
+            catch { failed = true }
+            do { try attachmentStore.prepareForKeyDestruction() }
+            catch {
+                do { try attachmentStore.eraseAllLocalAttachments() } catch { failed = true }
+            }
+            do { try attachmentStore.destroyEncryptionMaterial() } catch { failed = true }
+            if action == .wipeLocalData {
+                do { try attachmentStore.eraseAllLocalAttachments() } catch { failed = true }
+                if !isUITest, let bundleIdentifier = Bundle.main.bundleIdentifier {
+                    UserDefaults.standard.removePersistentDomain(forName: bundleIdentifier)
+                }
+            }
+        }
+        do { try OpaqueRoutePrefetchBridge.eraseAllLocalState() } catch { failed = true }
+        if failed {
+            // Never reveal an action, its targets, or partial completion on the lock screen.
+            lockError = "Unable to unlock. Try again."
+        } else {
+            localSessionPreview = preview
+        }
+    }
+
+    private func recordFailedUnlockInput() {
+        failedPINAttempts += 1
+        if failedPINAttempts >= 5 {
+            pinLockedUntil = Date().addingTimeInterval(30)
+            failedPINAttempts = 0
+        }
+        lockError = "Unable to unlock. Try again."
     }
 
     func unlockWithoutConfiguredProtection() {
@@ -2646,7 +2735,7 @@ final class ClientViewModel: ObservableObject {
         if biometricStepPassed { completed.insert(.biometrics) }
         if securityKeyStepPassed { completed.insert(.securityKey) }
         if let additionalFactor { completed.insert(additionalFactor) }
-        guard appLockMode.accepts(completedFactors: completed),
+        guard !duressActivated, !checkingUnlockInput, appLockMode.accepts(completedFactors: completed),
               !appLockSettings.requireSecurityKeyPresence || activeKeyPresence?.isConnected == true else { return }
         backgroundedAt = nil
         isLocked = false
@@ -2659,9 +2748,17 @@ final class ClientViewModel: ObservableObject {
         guard appLockMode == .off, !isLocked else { return }
         pendingSecurityKeys = appLockSettings.securityKeys
         pendingKeyPresenceRequired = appLockSettings.requireSecurityKeyPresence
+        pendingHiddenUnlockFactors = appLockSettings.hiddenUnlockFactors.subtracting([.pin])
+        pendingDuressPlans = appLockSettings.duressPlans
     }
 
     var continuousKeyPresenceAvailable: Bool { SecurityKeyPresence.isSupported }
+
+    func setPendingUnlockFactorHidden(_ factor: AppLockFactor, hidden: Bool) {
+        guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings else { return }
+        if hidden { pendingHiddenUnlockFactors.insert(factor) }
+        else { pendingHiddenUnlockFactors.remove(factor) }
+    }
 
     func setPendingKeyPresenceRequirement(_ required: Bool) {
         guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings else { return }
@@ -2750,11 +2847,11 @@ final class ClientViewModel: ObservableObject {
 
     func unlockWithSecurityKey(pin: String, transport: SecurityKeyTransport) async {
         expireUnlockFactors()
-        guard isLocked, appLockMode.requiresSecurityKey, !securityKeyBusy,
-              !appLockMode.requiresBiometrics || biometricStepPassed else { return }
+        guard isLocked, appLockMode.requiresSecurityKey, !securityKeyBusy else { return }
         lockError = nil
         if await verifySecurityKey(pin: pin, transport: transport) {
             securityKeyStepPassed = true
+            automaticKeyPrompt = false
             if unlockFactorsExpireAt == nil { unlockFactorsExpireAt = Date().addingTimeInterval(300) }
             finishUnlockIfComplete()
         } else {
@@ -2817,22 +2914,24 @@ final class ClientViewModel: ObservableObject {
         let mode = appLockMode
         settingsError = nil
         do {
-            if mode.requiresPIN {
-                guard let pin, verifyConfiguredPIN(pin) else { throw NoctweaveClientError.invalidAppLockPIN }
+            if mode.requiresSecurityKey {
+                guard await verifySecurityKey(pin: keyPIN, transport: transport) else { return false }
+                securityKeyProofUntil = Date().addingTimeInterval(300)
             }
             if mode.requiresBiometrics {
                 try await evaluateBiometrics(reason: "Authorize changes to Noctweave app security")
                 guard started == lockOperationGeneration, appLockMode == mode, !isLocked else { return false }
                 settingsBiometricAuthorizedUntil = Date().addingTimeInterval(300)
             }
-            if mode.requiresSecurityKey {
-                guard await verifySecurityKey(pin: keyPIN, transport: transport) else { return false }
-                securityKeyProofUntil = Date().addingTimeInterval(300)
+            if mode.requiresPIN {
+                guard let pin, verifyConfiguredPIN(pin) else { throw NoctweaveClientError.invalidAppLockPIN }
             }
             guard started == lockOperationGeneration, appLockMode == mode, !isLocked else { return false }
             settingsAuthorizedUntil = Date().addingTimeInterval(300)
             pendingSecurityKeys = appLockSettings.securityKeys
             pendingKeyPresenceRequired = appLockSettings.requireSecurityKeyPresence
+            pendingHiddenUnlockFactors = appLockSettings.hiddenUnlockFactors.subtracting([.pin])
+            pendingDuressPlans = appLockSettings.duressPlans
             return true
         } catch {
             settingsError = describe(error)
@@ -2841,7 +2940,8 @@ final class ClientViewModel: ObservableObject {
     }
 
     func cancelAppLockChanges() {
-        cancelSecurityKeyOperation()
+        stopAutomaticUnlock()
+        automaticBiometricAttemptID = nil
         biometricStepPassed = false
         securityKeyStepPassed = false
         unlockFactorsExpireAt = nil
@@ -2849,6 +2949,8 @@ final class ClientViewModel: ObservableObject {
         pendingKeyPresence = nil
         verifiedSetupCredentialID = nil
         pendingKeyPresenceRequired = false
+        pendingHiddenUnlockFactors = []
+        pendingDuressPlans = []
         securityKeyProofUntil = nil
         settingsAuthorizedUntil = nil
         settingsBiometricAuthorizedUntil = nil
@@ -2899,6 +3001,12 @@ final class ClientViewModel: ObservableObject {
                 pinRecord = nil
             }
 
+            if let newPIN, pendingDuressPlans.contains(where: { AppLockDuressPassword.matches(newPIN, plan: $0) }) {
+                throw NoctweaveClientError.invalidAppLockPIN
+            }
+            if pendingDuressPlans.contains(where: { $0.action.destroysKeys }) {
+                try attachmentStore.prepareForKeyDestruction()
+            }
             let candidate = AppLockSettings(
                 mode: mode,
                 sessionTimeoutMinutes: sessionTimeoutMinutes,
@@ -2907,7 +3015,9 @@ final class ClientViewModel: ObservableObject {
                 pinHash: pinRecord?.encodedHash,
                 actionPlans: appLockSettings.actionPlans,
                 securityKeys: pendingSecurityKeys,
-                requireSecurityKeyPresence: mode.requiresSecurityKey && pendingKeyPresenceRequired
+                requireSecurityKeyPresence: mode.requiresSecurityKey && pendingKeyPresenceRequired,
+                hiddenUnlockFactors: pendingHiddenUnlockFactors.intersection(mode.requiredFactors).subtracting([.pin]),
+                duressPlans: mode == .off ? [] : pendingDuressPlans
             )
             guard candidate.isStructurallyValid else {
                 throw NoctweaveClientError.invalidAppLockPIN
@@ -3019,6 +3129,7 @@ final class ClientViewModel: ObservableObject {
         label: String,
         _ operation: @escaping (HeadlessMessagingClient) async throws -> Void
     ) {
+        guard !duressActivated else { return }
         guard !isWorking else {
             queuedOperationTask?.cancel()
             statusMessage = "\(label) Waiting for the current operation to finish."
@@ -3040,7 +3151,7 @@ final class ClientViewModel: ObservableObject {
         isWorking = true
         statusMessage = label
         lastError = nil
-        Task {
+        activeOperationTask = Task {
             defer { isWorking = false }
             do {
                 guard let client else { throw NoctweaveClientError.unavailable }
@@ -3061,6 +3172,7 @@ final class ClientViewModel: ObservableObject {
         label: String,
         _ mutation: @escaping (inout ClientState) throws -> Void
     ) {
+        guard !duressActivated else { return }
         guard !isWorking else {
             lastError = describe(NoctweaveClientError.personaOperationInProgress)
             return
@@ -3068,7 +3180,7 @@ final class ClientViewModel: ObservableObject {
         isWorking = true
         statusMessage = label
         lastError = nil
-        Task {
+        activeOperationTask = Task {
             defer { isWorking = false }
             do {
                 try await replaceStoredState(mutation)
@@ -3089,6 +3201,7 @@ final class ClientViewModel: ObservableObject {
         var candidate = previous
         try mutation(&candidate)
         try await stateStore.save(candidate, replacing: previous)
+        guard !duressActivated else { return }
         client = try HeadlessMessagingClient(
             stateStore: stateStore,
             initialState: candidate
@@ -4368,20 +4481,19 @@ private final class UITestFileRollbackAnchorStore:
     }
 
     private func loadUnlocked() throws -> ClientStateRollbackAnchorRecord? {
-        let data: Data
-        do {
-            data = try SecureRegularFileIO.read(
-                from: fileURL,
-                maximumBytes: 64 * 1_024,
-                requirePrivateOwner: true
-            )
-        } catch SecureRegularFileIOError.notFound {
-            return nil
+        for attempt in 0..<3 {
+            do {
+                let data = try SecureRegularFileIO.read(
+                    from: fileURL, maximumBytes: 64 * 1_024, requirePrivateOwner: true)
+                return try NoctweaveCoder.decode(ClientStateRollbackAnchorRecord.self, from: data)
+            } catch SecureRegularFileIOError.notFound {
+                return nil
+            } catch SecureRegularFileIOError.changedDuringRead where attempt < 2 {
+                // Discard unstable bytes, then repeat all descriptor/version checks.
+                continue
+            }
         }
-        return try NoctweaveCoder.decode(
-            ClientStateRollbackAnchorRecord.self,
-            from: data
-        )
+        throw SecureRegularFileIOError.changedDuringRead
     }
 }
 #endif

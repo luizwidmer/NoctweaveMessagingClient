@@ -12,7 +12,107 @@ final class NoctweaveUITests_iOS: XCTestCase {
             "UI_TESTING_READY_STATE",
             "UI_TESTING_RESET_STATE"
         ]
+        if name.contains("testHidden") || name.contains("testDuress") {
+            let all = name.contains("testHiddenAll") || name.contains("testDuress")
+            let mode = all ? "biometricsPinAndSecurityKey" : name.contains("PINCan") ? "pinOnly" : "securityKeyAndPin"
+            let hidden = all ? "biometrics,pin,securityKey" : name.contains("PINCan") ? "pin" : "securityKey"
+            app.launchArguments += ["UI_TESTING_LOCK_FIXTURE", mode, "UI_TESTING_HIDDEN_UNLOCK_FACTORS", hidden]
+            if name.contains("KeyAttachment") { app.launchArguments += ["UI_TESTING_ATTACHED_KEY_FIXTURE"] }
+            if name.contains("testDuress") {
+                app.launchArguments += ["UI_TESTING_PRODUCT_FIXTURE", "UI_TESTING_DURESS_FIXTURE",
+                    name.contains("ReadOnly") ? "showChatsAndDestroyLocalKeys" : name.contains("Wipe") ? "wipeLocalData" : name.contains("DestroyKeys") ? "destroyLocalKeys" : "decoy"]
+            }
+        }
         app.launch()
+    }
+
+    func testHiddenKeyKeepsPINVisibleWithoutAllowingPINBypass() {
+        XCTAssertTrue(app.staticTexts["Noctweave is locked"].waitForExistence(timeout: 10))
+        let pin = app.secureTextFields["unlock.pin"]
+        XCTAssertTrue(pin.exists)
+        XCTAssertFalse(app.buttons["Verify Security Key"].exists)
+        XCTAssertFalse(app.staticTexts["Every selected check is required"].exists)
+        pin.tap(); pin.typeText("123456")
+        app.buttons["unlock.submitPIN"].tap()
+        XCTAssertTrue(app.staticTexts["Unable to unlock. Try again."].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["Noctweave is locked"].exists)
+        XCTAssertFalse(app.buttons["You"].exists)
+        attachScreenshot(named: "iPhone Hidden Key With Visible PIN")
+    }
+
+    func testHiddenAllMethodsKeepPINWithoutAdvertisingAdditionalChecks() {
+        XCTAssertTrue(app.staticTexts["Noctweave is locked"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.secureTextFields["unlock.pin"].exists)
+        XCTAssertFalse(app.buttons["Verify Biometrics"].exists)
+        XCTAssertFalse(app.buttons["Verify Security Key"].exists)
+        XCTAssertFalse(app.secureTextFields["securityKey.pin"].exists)
+        XCTAssertFalse(app.buttons["unlock.options"].exists)
+        XCTAssertFalse(app.staticTexts["Every selected check is required"].exists)
+        attachScreenshot(named: "iPhone Concealed Key And Biometrics")
+    }
+
+    func testHiddenPINCanNoLongerConcealTheOrdinaryPINField() {
+        XCTAssertTrue(app.staticTexts["Noctweave is locked"].waitForExistence(timeout: 10))
+        let pin = app.secureTextFields["unlock.pin"]
+        XCTAssertTrue(pin.exists)
+        XCTAssertFalse(app.buttons["unlock.options"].exists)
+        pin.tap(); pin.typeText("123456")
+        app.buttons["unlock.submitPIN"].tap()
+        XCTAssertTrue(app.buttons["You"].waitForExistence(timeout: 8))
+    }
+
+    func testDuressDecoyRunsBeforeKeyAndBiometrics() {
+        enterDuressPassword()
+        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Fixture message"].exists)
+        XCTAssertFalse(app.buttons["Verify Security Key"].exists)
+        XCTAssertFalse(app.buttons["You"].exists)
+        attachScreenshot(named: "iPhone Separate Local View")
+    }
+
+    func testDuressKeyAttachmentReplacesPINUntilCancelled() {
+        XCTAssertTrue(app.secureTextFields["securityKey.pin"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.secureTextFields["unlock.pin"].exists)
+        XCTAssertFalse(app.buttons["unlock.submitPIN"].exists)
+        XCTAssertFalse(app.buttons["Verify Biometrics"].exists)
+        XCTAssertFalse(app.buttons["You"].exists)
+        attachScreenshot(named: "iPhone Key Flow Without Waiting PIN")
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(app.secureTextFields["unlock.pin"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.secureTextFields["securityKey.pin"].exists)
+        enterDuressPassword()
+        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["You"].exists)
+    }
+
+    func testDuressReadOnlyChatsRunBeforeKeyAndBiometrics() {
+        enterDuressPassword()
+        XCTAssertTrue(app.staticTexts.matching(identifier: "Fixture message").firstMatch.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["You"].exists)
+        XCTAssertFalse(app.buttons["Send"].isEnabled)
+        XCTAssertFalse(app.buttons["Verify Biometrics"].exists)
+        attachScreenshot(named: "iPhone Temporary Chat View")
+    }
+
+    func testDuressWipeRunsBeforeKeyAndBiometrics() {
+        enterDuressPassword()
+        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Fixture message"].exists)
+        XCTAssertFalse(app.buttons["You"].exists)
+    }
+
+    func testDuressDestroyKeysRunsBeforeKeyAndBiometrics() {
+        enterDuressPassword()
+        XCTAssertTrue(app.staticTexts["No conversations yet"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["Fixture message"].exists)
+        XCTAssertFalse(app.buttons["You"].exists)
+    }
+
+    private func enterDuressPassword() {
+        XCTAssertTrue(app.staticTexts["Noctweave is locked"].waitForExistence(timeout: 10))
+        let pin = app.secureTextFields["unlock.pin"]
+        pin.tap(); pin.typeText("654321")
+        app.buttons["unlock.submitPIN"].tap()
     }
 
     override func tearDown() {

@@ -11,7 +11,9 @@ struct ContentView: View {
 
     var body: some View {
         Group {
-            if model.isLocked {
+            if let chats = model.localSessionPreview {
+                protectedLocalSessionPreview(chats)
+            } else if model.isLocked {
                 ClientLockView(model: model)
             } else {
                 switch model.bootState {
@@ -90,7 +92,7 @@ struct ContentView: View {
             if phase == .active {
                 model.resumeFromBackground()
                 model.foregroundResumeSync()
-            } else {
+            } else if phase == .background || !model.authenticationPromptInFlight {
                 model.lockForBackgroundIfConfigured()
             }
         }
@@ -108,6 +110,19 @@ struct ContentView: View {
                 model.syncAll()
             }
         }
+    }
+
+    @ViewBuilder
+    private func protectedLocalSessionPreview(_ chats: [LocalChatPreview]) -> some View {
+        #if os(iOS)
+        if NoctweaveUITestRuntime.isEnabled && !NoctweaveUITestRuntime.contains(.secureRendering) {
+            LocalSessionPreviewView(chats: chats)
+        } else {
+            LocalSessionPreviewView(chats: chats).secureContainerIfAvailable()
+        }
+        #else
+        LocalSessionPreviewView(chats: chats)
+        #endif
     }
 
     @ViewBuilder
@@ -159,95 +174,96 @@ struct ContentView: View {
 
 private struct ClientLockView: View {
     @ObservedObject var model: ClientViewModel
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appTheme) private var theme
     @State private var pin = ""
+
+    @FocusState private var pinIsFocused: Bool
+
+    private var visibleFactors: Set<AppLockFactor> { model.appLockSettings.visibleUnlockFactors }
 
     var body: some View {
         GeometryReader { geometry in
             ZStack {
                 GlassBackground().ignoresSafeArea()
                 ScrollView {
-                    lockCard
-                        .padding(24)
+                    lockCard.padding(24)
                         .frame(maxWidth: .infinity, minHeight: geometry.size.height)
                 }
                 .scrollBounceBehavior(.basedOnSize)
             }
         }
         .onChange(of: model.lockAttemptID) { _, _ in pin = "" }
-        .task {
-            guard model.appLockMode.requiresBiometrics && !model.biometricStepPassed else { return }
-            await model.unlockWithBiometrics()
+        .onChange(of: model.showsPINUnlockInput) { _, visible in
+            if !visible { pinIsFocused = false; pin = "" }
         }
+        .task(id: "\(model.lockAttemptID)-\(scenePhase)") {
+            guard scenePhase == .active else { return }
+            await model.listenForUnlockDevices()
+        }
+        .onDisappear { pin = ""; model.stopAutomaticUnlock() }
     }
 
     private var lockCard: some View {
-            VStack(spacing: 18) {
-                ZStack {
-                    Circle().fill(theme.accent.opacity(0.14))
-                    Image(systemName: "lock.shield.fill")
-                        .font(.system(size: 34, weight: .semibold))
-                        .foregroundStyle(theme.accent)
-                }
-                .frame(width: 72, height: 72)
-                Text("Noctweave is locked")
-                    .font(.title2.weight(.bold))
-                Text(lockMessage)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 380)
+        VStack(spacing: 18) {
+            ZStack {
+                Circle().fill(theme.accent.opacity(0.14))
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 34, weight: .semibold)).foregroundStyle(theme.accent)
+            }
+            .frame(width: 72, height: 72)
+            .accessibilityHidden(true)
+            Text("Noctweave is locked").font(.title2.weight(.bold))
+            Text(model.appLockMessage)
+                .foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 380)
 
-                if model.appLockMode.requiredFactors.count > 1 {
-                    Text("Every selected check is required")
-                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                }
-                if model.appLockMode == .off {
-                    Button("Unlock") { model.unlockWithoutConfiguredProtection() }
-                        .glassButton(prominent: true)
-                } else if model.appLockMode.requiresBiometrics && !model.biometricStepPassed {
-                    Button("Verify Biometrics") { Task { await model.unlockWithBiometrics() } }
-                        .glassButton(prominent: true)
-                } else if model.appLockMode.requiresSecurityKey && !model.securityKeyStepPassed {
-                    SecurityKeyPrompt(busy: model.securityKeyBusy, title: "Verify Security Key",
-                                      requiresUSB: model.appLockSettings.requireSecurityKeyPresence, cancel: model.cancelSecurityKeyOperation) { pin, transport in
-                        await model.unlockWithSecurityKey(pin: pin, transport: transport)
+            if model.appLockMode == .off {
+                Button("Unlock") { model.unlockWithoutConfiguredProtection() }.glassButton(prominent: true)
+            } else {
+                if model.showsPINUnlockInput {
+                    HStack {
+                        SecureField("PIN", text: $pin)
+                            .noctweaveInputField().frame(maxWidth: 220)
+                            .accessibilityIdentifier("unlock.pin")
+                            .disabled(model.checkingUnlockInput)
+                            .focused($pinIsFocused)
+                            .onSubmit { submitPIN() }
+                        Button("Unlock", action: submitPIN).glassButton(prominent: true)
+                            .accessibilityIdentifier("unlock.submitPIN")
                     }
-                } else if model.appLockMode.requiresPIN {
-                    pinEntry
                 }
-
-                if let error = model.lockError {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
+                if model.showsSecurityKeyUnlockPrompt {
+                    SecurityKeyPrompt(busy: model.securityKeyBusy, title: "Verify Security Key",
+                        requiresUSB: model.appLockSettings.requireSecurityKeyPresence,
+                        showCancelWhileIdle: model.automaticKeyPrompt,
+                        cancel: {
+                            // Removing a completed key form must not cancel the following biometric check.
+                            if !model.securityKeyStepPassed { model.stopAutomaticUnlock() }
+                        }) { value, transport in
+                        await model.unlockWithSecurityKey(pin: value, transport: transport)
+                    }
+                }
+                if model.appLockMode.requiresBiometrics && !model.biometricStepPassed &&
+                    (visibleFactors.contains(.biometrics) || !model.showsPINUnlockInput) &&
+                    (!model.appLockMode.requiresSecurityKey || model.securityKeyStepPassed) {
+                    Button(visibleFactors.contains(.biometrics) ? "Verify Biometrics" : "Unlock") {
+                        Task { await model.unlockWithBiometrics() }
+                    }
+                        .glassButton()
+                        .disabled(model.biometricRequestInFlight)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .center)
-            .padding(22)
-            .uniformGlassCard(cornerRadius: 26, padding: 0)
-            .frame(maxWidth: 460)
-    }
-
-    private var lockMessage: String {
-        if model.appLockMode.requiresPIN && (!model.appLockMode.requiresBiometrics || model.biometricStepPassed)
-            && (!model.appLockMode.requiresSecurityKey || model.securityKeyStepPassed) { return model.appLockMessage }
-        return model.appLockMode.requiresSecurityKey
-            ? "Use your registered key and complete the required checks to open Noctweave."
-            : "Authenticate to reveal your encrypted conversations."
-    }
-
-    private var pinEntry: some View {
-        HStack {
-            SecureField("Six-digit PIN", text: $pin)
-                .noctweaveInputField()
-                .frame(maxWidth: 220)
-                .onSubmit { submitPIN() }
-            Button("Unlock") { submitPIN() }
-                .glassButton(prominent: true)
+            if model.lockError != nil {
+                Text("Unable to unlock. Try again.").font(.caption).foregroundStyle(.red)
+                    .accessibilityIdentifier("unlock.error")
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .center).padding(22)
+        .uniformGlassCard(cornerRadius: 26, padding: 0).frame(maxWidth: 460)
     }
 
     private func submitPIN() {
+        guard model.showsPINUnlockInput else { pin = ""; return }
         model.unlockWithPIN(pin)
         pin = ""
     }
@@ -555,6 +571,10 @@ private struct ClientOnboardingView: View {
 
                 if appLockMode.requiresSecurityKey {
                     SecurityKeySetupControls(model: model)
+                }
+
+                if appLockMode != .off {
+                    UnlockVisibilityControls(model: model, mode: appLockMode)
                 }
 
                 if requiresPIN {

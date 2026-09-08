@@ -10,6 +10,10 @@ enum NoctweaveUITestRuntime {
         case resetState
         case plaintextState
         case secureRendering
+        case lockFixture
+        case attachedKeyFixture
+        case hiddenUnlockFactors
+        case duressFixture
     }
 
     static var isEnabled: Bool {
@@ -55,6 +59,14 @@ enum NoctweaveUITestRuntime {
             "UI_TESTING_PLAINTEXT_STATE"
         case .secureRendering:
             "SECURE_RENDERING_TEST"
+        case .lockFixture:
+            "UI_TESTING_LOCK_FIXTURE"
+        case .attachedKeyFixture:
+            "UI_TESTING_ATTACHED_KEY_FIXTURE"
+        case .hiddenUnlockFactors:
+            "UI_TESTING_HIDDEN_UNLOCK_FACTORS"
+        case .duressFixture:
+            "UI_TESTING_DURESS_FIXTURE"
         }
     }
     #endif

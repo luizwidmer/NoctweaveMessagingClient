@@ -41,7 +41,7 @@ channels that cannot transfer files.
 
 ## Hardware security keys
 
-Open **You → Settings → App Security → Choose App Unlock Method**. Choose a FIDO2 security key alone, with an app PIN, with biometrics, or with both. The existing biometrics, PIN, and biometrics + PIN choices remain available. Every selected factor is required; the lock screen verifies biometrics, then the key, then the app PIN when applicable. The key's own FIDO2 PIN is separate from the six-digit app PIN.
+Open **You → Settings → App Security → Choose App Unlock Method**. Choose a FIDO2 security key alone, with an app PIN, with biometrics, or with both. The existing biometrics, PIN, and biometrics + PIN choices remain available. Every selected factor is required; the lock screen verifies the key, then biometrics, then the app PIN when applicable. The key's own FIDO2 PIN is separate from the six-digit app PIN.
 
 Register the key, enter its existing hardware PIN in the app, and touch it when prompted. Enrollment performs registration and a separate verification, so two touches may be needed. Click **Save Protection** after verification. Add a spare key before enabling continuous presence. Changing existing protection requires all currently selected factors again.
 
@@ -50,6 +50,25 @@ On macOS, **Keep key connected** locks the app when the verified USB key is remo
 macOS uses generic FIDO2 USB HID. iPhone supports NFC; iOS USB support follows YubiKit's smart-card reader support and requires physical-device verification. iOS and NFC do not offer continuous presence. U2F-only keys and PIV/OTP credentials are not implemented. Native app locking controls application access while existing OS-backed storage encryption remains in place; it is not hardware-derived vault encryption or tamper-resistant DRM.
 
 YubiKit Swift 1.3.0 is Apache-2.0 licensed. Its license is included in the app resources and the sibling security-key package documents the sole read-only USB presence patch.
+
+## Lock-screen privacy
+
+In **You → Settings → App Security → Choose App Unlock Method**, use **Lock-screen privacy** to hide biometric and security-key hints independently. The waiting screen shows a PIN field that accepts duress passwords before any other check. When a key is detected or authentication starts, that waiting field disappears and its contents are cleared. The real PIN step appears only after its configured key and biometric checks pass. Cancelling the key flow returns to the waiting screen. Older hidden-PIN preferences no longer conceal an available PIN step. Hiding a method changes presentation only; every configured factor and the optional USB-presence policy remain enforced.
+
+There is no hidden-method menu, icon action, shortcut, required-check summary, or method-specific error on the waiting screen. While the app is active and locked, connecting a USB key starts its authentication flow. Biometric authentication starts when its preceding key check is complete, or immediately if no key is required. Unconfigured checks are skipped. Rejected or cancelled automatic checks do not loop; reconnect the key or begin a new lock attempt to retry. OS authentication prompts still appear during the actual ceremony. iPhone NFC scanning must be started explicitly; hidden-key automatic discovery currently requires supported USB hardware. A custom lock message can reveal information, so avoid naming concealed methods there.
+
+## Duress passwords
+
+After authorizing App Security settings, configure up to four distinct passwords and explicitly save protection. Each password selects one action:
+
+- **Wipe local data:** remove this installation's encrypted state, managed attachments, and local decryption keys.
+- **Make stored data unreadable:** destroy local decryption keys while retaining encrypted files. This uses cryptographic erasure instead of random file corruption.
+- **Show chats and destroy local keys:** retain a temporary, read-only text view of the active persona's direct and group chats, destroy local decryption keys, and stop real messaging. The view disappears when the process closes.
+- **Open a decoy:** show an empty, separate local view while the real session stays locked. Restart the app to authenticate normally.
+
+Duress passwords are accepted through the ordinary PIN field before security-key or biometric checks. They never satisfy normal authentication or grant access to the real client. Five rejected inputs cause a 30-second lockout. Destructive actions require an explicit acknowledgement during configuration; existing legacy action plans remain inactive until recreated. Passwords use salted, domain-separated PBKDF2 verifiers and are stored inside the encrypted app settings.
+
+Attachment files are migrated to an installation-scoped key before a destructive plan can be saved. Erasure retires the state and attachment stores so queued writes cannot recreate their keys. The operation affects managed local copies only: recipient copies, exports, backups, and copies already taken from process memory remain outside its reach. The temporary chat view deliberately retains plaintext text in memory. A partial erasure failure keeps the real session locked and shows the same neutral unlock error.
 
 ## Requirements
 
