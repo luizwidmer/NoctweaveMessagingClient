@@ -235,11 +235,13 @@ struct MaturePairingSheet: View {
     }
 
     private var directionPicker: some View {
-        Picker("Pairing direction", selection: directionSelection) {
+        Picker("", selection: directionSelection) {
             Text("Invite").tag(PairingDirection.share)
             Text("Join").tag(PairingDirection.receive)
         }
         .pickerStyle(.segmented)
+        .labelsHidden()
+        .accessibilityLabel("Pairing direction")
         .disabled(model.isPairing)
         .accessibilityIdentifier("pairing.direction")
     }

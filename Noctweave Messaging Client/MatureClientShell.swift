@@ -411,9 +411,13 @@ struct MatureClientShell: View {
             MatureSideRail(selection: $destination) {
                 compactRoute = nil
             }
-            Rectangle()
-                .fill(theme.surfaceBorder)
-                .frame(width: 0.5)
+            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(theme.surfaceBorder, lineWidth: 0.7)
+            }
+            .padding(.leading, 8)
+            .padding(.vertical, 8)
             destinationView(compact: false)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -803,6 +807,7 @@ private struct MatureChatsHome: View {
                 .glassButton()
             }
         }
+        .frame(maxWidth: .infinity, alignment: .center)
         .uniformGlassCard(
             cornerRadius: compact ? 24 : 28,
             padding: compact ? 24 : 30
@@ -862,6 +867,54 @@ private struct MatureConversationListRow: View {
     }
 }
 
+private struct MatureChatWallpaper: View {
+    let compact: Bool
+    let opacity: Double
+
+    var body: some View {
+        GeometryReader { viewport in
+            ZStack {
+                GlassBackground(extendsIntoSafeArea: false)
+                Image(compact ? "ChatDoodlesPhoneDark" : "ChatDoodlesTabletDark")
+                    .resizable(resizingMode: .tile)
+                    .opacity(opacity)
+            }
+            .frame(width: viewport.size.width, height: viewport.size.height)
+            .clipped()
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct MatureChatComposerSurface: ViewModifier {
+    @Environment(\.appTheme) private var theme
+
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        content
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(theme.surfaceBorder, lineWidth: 0.8)
+                    }
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            .padding(.bottom, 10)
+        #else
+        content
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial)
+        #endif
+    }
+}
+
 private struct MatureConversationView: View {
     @ObservedObject var model: ClientViewModel
     @Environment(\.appTheme) private var theme
@@ -909,7 +962,9 @@ private struct MatureConversationView: View {
 
             GeometryReader { viewport in
                 ZStack {
-                    chatWallpaper
+                    #if !os(macOS)
+                    MatureChatWallpaper(compact: compact, opacity: 0.10)
+                    #endif
                     if model.selectedEvents.isEmpty {
                         VStack(spacing: 10) {
                             Image(systemName: "lock.shield")
@@ -983,6 +1038,9 @@ private struct MatureConversationView: View {
                 TextField("Message", text: $model.draftMessage, axis: .vertical)
                     .lineLimit(1...2)
                     .autocorrectionDisabled(model.privacySettings.secureTypingEnabled)
+                    #if os(macOS)
+                    .frame(minHeight: 22)
+                    #endif
                     .noctweaveInputField(cornerRadius: 18)
                     .onSubmit { model.sendDraft() }
                     .disabled(
@@ -1000,15 +1058,11 @@ private struct MatureConversationView: View {
                         || relationship.localPolicy.consent != .accepted
                 )
             }
-            .padding(.horizontal, 12)
-            #if os(macOS)
-            .padding(.top, 8)
-            .padding(.bottom, 16)
-            #else
-            .padding(.vertical, 10)
-            #endif
-            .background(.ultraThinMaterial)
+            .modifier(MatureChatComposerSurface())
         }
+        #if os(macOS)
+        .background { MatureChatWallpaper(compact: false, opacity: 0.07) }
+        #endif
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [.item],
@@ -1091,22 +1145,6 @@ private struct MatureConversationView: View {
             }
             openAttachment(descriptor)
         }
-    }
-
-    @ViewBuilder
-    private var chatWallpaper: some View {
-        GlassBackground(extendsIntoSafeArea: false)
-        #if os(iOS)
-        Image(compact ? "ChatDoodlesPhoneDark" : "ChatDoodlesTabletDark")
-            .resizable(resizingMode: .tile)
-            .opacity(0.10)
-            .allowsHitTesting(false)
-        #else
-        Image("ChatDoodlesTabletDark")
-            .resizable(resizingMode: .tile)
-            .opacity(0.07)
-            .allowsHitTesting(false)
-        #endif
     }
 }
 
@@ -1377,11 +1415,9 @@ private struct MatureGroupConversationView: View {
 
             GeometryReader { viewport in
                 ZStack {
-                    GlassBackground(extendsIntoSafeArea: false)
-                    Image(compact ? "ChatDoodlesPhoneDark" : "ChatDoodlesTabletDark")
-                        .resizable(resizingMode: .tile)
-                        .opacity(0.08)
-                        .allowsHitTesting(false)
+                    #if !os(macOS)
+                    MatureChatWallpaper(compact: compact, opacity: 0.08)
+                    #endif
                     if model.selectedGroupEvents.isEmpty {
                         VStack(spacing: 10) {
                             Image(systemName: "person.3.fill")
@@ -1418,6 +1454,9 @@ private struct MatureGroupConversationView: View {
                 TextField("Message the group", text: $model.groupDraftMessage, axis: .vertical)
                     .lineLimit(1...2)
                     .autocorrectionDisabled(model.privacySettings.secureTypingEnabled)
+                    #if os(macOS)
+                    .frame(minHeight: 22)
+                    #endif
                     .noctweaveInputField(cornerRadius: 18)
                     .onSubmit { model.sendGroupDraft() }
                 Button { model.sendGroupDraft() } label: {
@@ -1427,15 +1466,11 @@ private struct MatureGroupConversationView: View {
                 .glassCircleButton(prominent: true, diameter: 42)
                 .disabled(model.groupDraftMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isWorking)
             }
-            .padding(.horizontal, 12)
-            #if os(macOS)
-            .padding(.top, 8)
-            .padding(.bottom, 16)
-            #else
-            .padding(.vertical, 10)
-            #endif
-            .background(.ultraThinMaterial)
+            .modifier(MatureChatComposerSurface())
         }
+        #if os(macOS)
+        .background { MatureChatWallpaper(compact: false, opacity: 0.08) }
+        #endif
         .sheet(isPresented: $showingSettings) {
             MatureGroupSettingsSheet(
                 model: model,
