@@ -171,6 +171,38 @@ final class NoctweaveUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Terms of Use"].exists)
     }
 
+    func testSecurityKeyProtectionRequiresVerifiedRegistration() {
+        app.buttons["You"].tap()
+        app.buttons["you.settings"].tap()
+        app.buttons["settings.appSecurity"].tap()
+        app.buttons["settings.appSecurity.configure"].tap()
+        let method = app.buttons["appLock.method.securityKey"]
+        XCTAssertTrue(method.waitForExistence(timeout: 3))
+        method.tap()
+        XCTAssertTrue(app.staticTexts["Your security keys"].waitForExistence(timeout: 3))
+        let save = app.buttons["Save Protection"]
+        XCTAssertTrue(save.exists)
+        XCTAssertFalse(save.isEnabled, "A key method must not be enabled before registration and proof of possession")
+        XCTAssertTrue(app.secureTextFields["securityKey.pin"].exists)
+        XCTAssertTrue(app.switches["securityKey.keepConnected"].exists || app.checkBoxes["securityKey.keepConnected"].exists)
+        attachScreenshot(named: "macOS Security Key Setup")
+        for (mode, button) in [("securityKeyAndPin", "Continue to PIN"),
+                               ("biometricsAndSecurityKey", "Save Protection"),
+                               ("biometricsPinAndSecurityKey", "Continue to PIN")] {
+            let choice = app.buttons["appLock.method.\(mode)"]
+            XCTAssertTrue(choice.exists)
+            if choice.isEnabled {
+                choice.tap()
+                XCTAssertFalse(app.buttons[button].isEnabled, "Every key combination requires a verified key")
+            }
+        }
+        attachScreenshot(named: "macOS Combined Key Protection")
+        app.buttons["Close"].tap()
+        app.buttons["settings.appSecurity.configure"].tap()
+        XCTAssertTrue(app.buttons["appLock.method.off"].waitForExistence(timeout: 3))
+        attachScreenshot(named: "macOS Security Key Setup Cancelled")
+    }
+
     func testFreshInstallCannotBypassLegalOrPersonaOnboarding() {
         app.terminate()
         app = XCUIApplication()

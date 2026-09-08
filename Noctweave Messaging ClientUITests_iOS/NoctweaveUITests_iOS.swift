@@ -21,6 +21,31 @@ final class NoctweaveUITests_iOS: XCTestCase {
         super.tearDown()
     }
 
+    func testSecurityKeySetupFitsPhoneAndRequiresVerification() {
+        app.buttons["You"].tap()
+        app.buttons["you.settings"].tap()
+        app.buttons["settings.appSecurity"].tap()
+        app.buttons["settings.appSecurity.configure"].tap()
+        let keyMethod = app.buttons["appLock.method.securityKey"]
+        XCTAssertTrue(keyMethod.waitForExistence(timeout: 3))
+        for _ in 0..<4 where !keyMethod.isHittable || keyMethod.frame.maxY > app.frame.maxY - 40 { app.swipeUp() }
+        XCTAssertTrue(keyMethod.isHittable)
+        assertFitsScreen(keyMethod)
+        keyMethod.tap()
+        let register = app.buttons["securityKey.submit"]
+        for _ in 0..<6 where !register.isHittable || register.frame.maxY > app.frame.maxY - 40 { app.swipeUp() }
+        XCTAssertTrue(register.isHittable)
+        assertFitsScreen(register)
+        let pin = app.secureTextFields["securityKey.pin"]
+        XCTAssertTrue(pin.exists)
+        assertFitsScreen(pin)
+        XCTAssertFalse(app.switches["securityKey.keepConnected"].exists,
+                       "NFC and iOS must not advertise continuous USB presence")
+        XCTAssertFalse(app.buttons["Save Protection"].isEnabled)
+        attachScreenshot(named: "iPhone Security Key Setup")
+        app.buttons["Close"].tap()
+    }
+
     func testPhoneShellRestoresStableProductTabs() {
         XCTAssertTrue(app.staticTexts["Welcome to Noctweave"].waitForExistence(timeout: 5))
         let welcomeRegion = app.otherElements["chats.emptyWelcomeRegion"]

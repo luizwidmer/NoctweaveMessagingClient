@@ -163,8 +163,25 @@ private struct ClientLockView: View {
     @State private var pin = ""
 
     var body: some View {
-        ZStack {
-            GlassBackground()
+        GeometryReader { geometry in
+            ZStack {
+                GlassBackground().ignoresSafeArea()
+                ScrollView {
+                    lockCard
+                        .padding(24)
+                        .frame(maxWidth: .infinity, minHeight: geometry.size.height)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+            }
+        }
+        .onChange(of: model.lockAttemptID) { _, _ in pin = "" }
+        .task {
+            guard model.appLockMode.requiresBiometrics && !model.biometricStepPassed else { return }
+            await model.unlockWithBiometrics()
+        }
+    }
+
+    private var lockCard: some View {
             VStack(spacing: 18) {
                 ZStack {
                     Circle().fill(theme.accent.opacity(0.14))
@@ -180,26 +197,23 @@ private struct ClientLockView: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 380)
 
-                switch model.appLockMode {
-                case .off:
-                    Button("Unlock") { model.unlockWithPIN("") }
+                if model.appLockMode.requiredFactors.count > 1 {
+                    Text("Every selected check is required")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                }
+                if model.appLockMode == .off {
+                    Button("Unlock") { model.unlockWithoutConfiguredProtection() }
                         .glassButton(prominent: true)
-                case .biometrics:
-                    Button("Unlock with Biometrics") {
-                        Task { await model.unlockWithBiometrics() }
+                } else if model.appLockMode.requiresBiometrics && !model.biometricStepPassed {
+                    Button("Verify Biometrics") { Task { await model.unlockWithBiometrics() } }
+                        .glassButton(prominent: true)
+                } else if model.appLockMode.requiresSecurityKey && !model.securityKeyStepPassed {
+                    SecurityKeyPrompt(busy: model.securityKeyBusy, title: "Verify Security Key",
+                                      requiresUSB: model.appLockSettings.requireSecurityKeyPresence, cancel: model.cancelSecurityKeyOperation) { pin, transport in
+                        await model.unlockWithSecurityKey(pin: pin, transport: transport)
                     }
-                    .glassButton(prominent: true)
-                case .pinOnly:
+                } else if model.appLockMode.requiresPIN {
                     pinEntry
-                case .biometricsAndPin:
-                    if model.biometricStepPassed {
-                        pinEntry
-                    } else {
-                        Button("Verify Biometrics") {
-                            Task { await model.unlockWithBiometrics() }
-                        }
-                        .glassButton(prominent: true)
-                    }
                 }
 
                 if let error = model.lockError {
@@ -208,28 +222,18 @@ private struct ClientLockView: View {
                         .foregroundStyle(.red)
                 }
             }
-            .padding(28)
-            .uniformGlassCard(cornerRadius: 26, padding: 22)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(22)
+            .uniformGlassCard(cornerRadius: 26, padding: 0)
             .frame(maxWidth: 460)
-            .padding(24)
-        }
-        .ignoresSafeArea()
-        .task {
-            guard model.appLockMode == .biometrics
-                    || (model.appLockMode == .biometricsAndPin && !model.biometricStepPassed) else {
-                return
-            }
-            await model.unlockWithBiometrics()
-        }
     }
 
     private var lockMessage: String {
-        switch model.appLockMode {
-        case .pinOnly, .biometricsAndPin:
-            model.appLockMessage
-        case .off, .biometrics:
-            "Authenticate to reveal your encrypted conversations."
-        }
+        if model.appLockMode.requiresPIN && (!model.appLockMode.requiresBiometrics || model.biometricStepPassed)
+            && (!model.appLockMode.requiresSecurityKey || model.securityKeyStepPassed) { return model.appLockMessage }
+        return model.appLockMode.requiresSecurityKey
+            ? "Use your registered key and complete the required checks to open Noctweave."
+            : "Authenticate to reveal your encrypted conversations."
     }
 
     private var pinEntry: some View {
@@ -549,6 +553,10 @@ private struct ClientOnboardingView: View {
                     }
                 }
 
+                if appLockMode.requiresSecurityKey {
+                    SecurityKeySetupControls(model: model)
+                }
+
                 if requiresPIN {
                     SecureField("Six-digit PIN", text: $pin)
                         .pinKeyboard()
@@ -578,7 +586,8 @@ private struct ClientOnboardingView: View {
                     }
                 }
                 .glassButton(prominent: true)
-                .disabled(requiresPIN && !validPIN)
+                .disabled(model.securityKeyBusy || (requiresPIN && !validPIN)
+                    || (appLockMode.requiresSecurityKey && !model.canEnableSecurityKeyProtection))
                 .accessibilityIdentifier("onboarding.finish")
 
                 if let error = model.settingsError {
@@ -657,7 +666,7 @@ private struct ClientOnboardingView: View {
 
     private var availableLockModes: [AppLockMode] {
         let available = AppLockMode.allCases.filter { mode in
-            model.biometricsAvailable || (mode != .biometrics && mode != .biometricsAndPin)
+            model.biometricsAvailable || !mode.requiresBiometrics
         }
         return available.sorted { lockModeRank($0) < lockModeRank($1) }
     }
@@ -667,12 +676,16 @@ private struct ClientOnboardingView: View {
         case .biometrics: 0
         case .biometricsAndPin: 1
         case .pinOnly: 2
-        case .off: 3
+        case .securityKey: 3
+        case .securityKeyAndPin: 4
+        case .biometricsAndSecurityKey: 5
+        case .biometricsPinAndSecurityKey: 6
+        case .off: 7
         }
     }
 
     private var requiresPIN: Bool {
-        appLockMode == .pinOnly || appLockMode == .biometricsAndPin
+        appLockMode.requiresPIN
     }
 
     private var validPIN: Bool {
@@ -708,6 +721,7 @@ private struct ClientOnboardingView: View {
         case .biometrics: "faceid"
         case .pinOnly: "number.square.fill"
         case .biometricsAndPin: "person.badge.key.fill"
+        case .securityKey, .securityKeyAndPin, .biometricsAndSecurityKey, .biometricsPinAndSecurityKey: "key.horizontal.fill"
         }
     }
 
@@ -715,6 +729,10 @@ private struct ClientOnboardingView: View {
         switch mode {
         case .off: "No app lock"
         case .biometrics: model.biometricDisplayName
+        case .securityKey: "Security Key"
+        case .securityKeyAndPin: "Key + PIN"
+        case .biometricsAndSecurityKey: "\(model.biometricDisplayName) + Key"
+        case .biometricsPinAndSecurityKey: "\(model.biometricDisplayName) + PIN + Key"
         case .pinOnly: "Six-digit PIN"
         case .biometricsAndPin: "\(model.biometricDisplayName) + PIN"
         }
@@ -726,6 +744,10 @@ private struct ClientOnboardingView: View {
         case .biometrics: "Biometric-only, no passcode fallback"
         case .pinOnly: "Works without biometric hardware"
         case .biometricsAndPin: "Require both independent checks"
+        case .securityKey: "A physical FIDO2 key, verified locally"
+        case .securityKeyAndPin: "Require your key and six-digit app PIN"
+        case .biometricsAndSecurityKey: "Require biometrics and your key"
+        case .biometricsPinAndSecurityKey: "Require all three checks"
         }
     }
 

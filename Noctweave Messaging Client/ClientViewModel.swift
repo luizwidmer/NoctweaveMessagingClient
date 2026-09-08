@@ -4,6 +4,7 @@ import Combine
 import Foundation
 import ImageIO
 import LocalAuthentication
+import NoctweaveSecurityKeys
 @_spi(Testing) import NoctweaveCore
 import OSLog
 import Security
@@ -661,6 +662,11 @@ final class ClientViewModel: ObservableObject {
 
     @Published private(set) var isLocked = false
     @Published private(set) var biometricStepPassed = false
+    @Published private(set) var securityKeyBusy = false
+    @Published private(set) var securityKeyStepPassed = false
+    @Published private(set) var pendingKeyPresenceRequired = false
+    @Published private(set) var lockAttemptID = UUID()
+    @Published private(set) var pendingSecurityKeys: [AppLockSecurityKeyRecordV1] = []
     @Published private(set) var lockError: String?
     @Published private(set) var isSavingSettings = false
     @Published private(set) var settingsMessage: String?
@@ -700,6 +706,14 @@ final class ClientViewModel: ObservableObject {
     private var onboardingPersonaNameSaved = false
     private var onboardingPrivacyCompleted = false
     private var biometricRequestInFlight = false
+    private let hardwareSecurityKey = HardwareSecurityKey()
+    private var lockOperationGeneration: UInt64 = 0
+    private var securityKeyProofUntil: Date?
+    private var unlockFactorsExpireAt: Date?
+    private var pendingKeyPresence: SecurityKeyPresence?
+    private var verifiedSetupCredentialID: Data?
+    private var activeKeyPresence: SecurityKeyPresence?
+    private var keyPresenceTask: Task<Void, Never>?
     private var onboardingRelayCheckTask: Task<Void, Never>?
     private var relayManagementTask: Task<Void, Never>?
     private var queuedOperationTask: Task<Void, Never>?
@@ -2512,6 +2526,11 @@ final class ClientViewModel: ObservableObject {
     }
 
     func lockNow() {
+        keyPresenceTask?.cancel()
+        keyPresenceTask = nil
+        activeKeyPresence = nil
+        lockAttemptID = UUID()
+        cancelAppLockChanges()
         backgroundedAt = nil
         biometricStepPassed = false
         lockError = nil
@@ -2519,12 +2538,18 @@ final class ClientViewModel: ObservableObject {
     }
 
     func lockForBackgroundIfConfigured() {
+        cancelAppLockChanges()
         guard appLockMode != .off else { return }
         if backgroundedAt == nil { backgroundedAt = Date() }
         if appLockSettings.sessionTimeoutMinutes == 0 { lockNow() }
     }
 
     func resumeFromBackground() {
+        if appLockSettings.requireSecurityKeyPresence && !isLocked && activeKeyPresence?.isConnected != true {
+            lockNow()
+            lockError = "Reconnect your registered security key and authenticate again."
+            return
+        }
         guard let backgroundedAt else { return }
         self.backgroundedAt = nil
         guard appLockMode != .off else { return }
@@ -2535,14 +2560,13 @@ final class ClientViewModel: ObservableObject {
     }
 
     func unlockWithBiometrics() async {
-        guard !biometricRequestInFlight else { return }
+        expireUnlockFactors()
+        guard isLocked, !biometricRequestInFlight, appLockMode.requiresBiometrics else { return }
+        let started = lockOperationGeneration
+        let originalMode = appLockMode
         biometricRequestInFlight = true
         defer { biometricRequestInFlight = false }
         lockError = nil
-        if appLockMode == .off {
-            isLocked = false
-            return
-        }
         let context = LAContext()
         var error: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
@@ -2554,25 +2578,25 @@ final class ClientViewModel: ObservableObject {
                 .deviceOwnerAuthenticationWithBiometrics,
                 localizedReason: "Unlock encrypted Noctweave conversations"
             )
+            guard started == lockOperationGeneration, appLockMode == originalMode else { return }
             guard accepted else {
                 lockError = "Biometric authentication failed."
                 return
             }
-            if appLockMode == .biometricsAndPin {
-                biometricStepPassed = true
-            } else {
-                backgroundedAt = nil
-                isLocked = false
-            }
+            biometricStepPassed = true
+            unlockFactorsExpireAt = Date().addingTimeInterval(300)
+            finishUnlockIfComplete()
         } catch {
             lockError = describe(error)
         }
     }
 
     func unlockWithPIN(_ value: String) {
-        guard appLockMode == .pinOnly
-                || (appLockMode == .biometricsAndPin && biometricStepPassed) else {
-            lockError = "Complete biometric authentication first."
+        expireUnlockFactors()
+        guard isLocked, appLockMode.requiresPIN,
+              !appLockMode.requiresBiometrics || biometricStepPassed,
+              !appLockMode.requiresSecurityKey || securityKeyStepPassed else {
+            lockError = "Complete the other required checks first."
             return
         }
         if let pinLockedUntil, pinLockedUntil > Date() {
@@ -2596,8 +2620,182 @@ final class ClientViewModel: ObservableObject {
         failedPINAttempts = 0
         pinLockedUntil = nil
         lockError = nil
+        finishUnlockIfComplete(additionalFactor: .pin)
+    }
+
+    func unlockWithoutConfiguredProtection() {
+        guard appLockMode == .off else { return }
+        finishUnlockIfComplete()
+    }
+
+    private func expireUnlockFactors() {
+        if appLockSettings.requireSecurityKeyPresence && securityKeyStepPassed && activeKeyPresence?.isConnected != true {
+            lockNow()
+            lockError = "The security key was disconnected. Complete the unlock checks again."
+        }
+        if let deadline = unlockFactorsExpireAt, deadline <= Date() {
+            biometricStepPassed = false
+            securityKeyStepPassed = false
+            unlockFactorsExpireAt = nil
+        }
+    }
+
+    private func finishUnlockIfComplete(additionalFactor: AppLockFactor? = nil) {
+        expireUnlockFactors()
+        var completed = Set<AppLockFactor>()
+        if biometricStepPassed { completed.insert(.biometrics) }
+        if securityKeyStepPassed { completed.insert(.securityKey) }
+        if let additionalFactor { completed.insert(additionalFactor) }
+        guard appLockMode.accepts(completedFactors: completed),
+              !appLockSettings.requireSecurityKeyPresence || activeKeyPresence?.isConnected == true else { return }
         backgroundedAt = nil
         isLocked = false
+        biometricStepPassed = false
+        securityKeyStepPassed = false
+        unlockFactorsExpireAt = nil
+    }
+
+    func prepareSecurityKeySetup() {
+        guard appLockMode == .off, !isLocked else { return }
+        pendingSecurityKeys = appLockSettings.securityKeys
+        pendingKeyPresenceRequired = appLockSettings.requireSecurityKeyPresence
+    }
+
+    var continuousKeyPresenceAvailable: Bool { SecurityKeyPresence.isSupported }
+
+    func setPendingKeyPresenceRequirement(_ required: Bool) {
+        guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings else { return }
+        pendingKeyPresenceRequired = required && continuousKeyPresenceAvailable
+    }
+
+    private func monitorKeyPresence(_ presence: SecurityKeyPresence) {
+        activeKeyPresence = presence
+        keyPresenceTask?.cancel()
+        keyPresenceTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.appLockSettings.requireSecurityKeyPresence else { return }
+                guard presence.isConnected else {
+                    self.lockNow()
+                    self.lockError = "Your security key was disconnected. Reconnect it and authenticate again."
+                    return
+                }
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            }
+        }
+    }
+
+    func cancelSecurityKeyOperation() {
+        lockOperationGeneration &+= 1
+        Task { await hardwareSecurityKey.cancel() }
+    }
+
+    var canEnableSecurityKeyProtection: Bool {
+        pendingSecurityKeys.contains { $0.credentialID == verifiedSetupCredentialID }
+            && securityKeyProofUntil.map { $0 > Date() } == true
+            && (!pendingKeyPresenceRequired || pendingKeyPresence?.isConnected == true)
+    }
+
+    func verifyPendingSecurityKey(pin: String, transport: SecurityKeyTransport) async {
+        guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings else { return }
+        let started = lockOperationGeneration
+        securityKeyBusy = true
+        settingsError = nil
+        defer { securityKeyBusy = false }
+        do {
+            let key = try await hardwareSecurityKey.authenticate(application: .noctweave,
+                credentials: pendingSecurityKeys.map(\.hardwareCredential), pin: pin, transport: transport)
+            let presence = await hardwareSecurityKey.verifiedPresence()
+            guard !pendingKeyPresenceRequired || presence?.isConnected == true else { throw SecurityKeyError.unsupported }
+            guard started == lockOperationGeneration, canEditSecurityKeys,
+                  let index = pendingSecurityKeys.firstIndex(where: { $0.id == key.id }) else { throw SecurityKeyError.cancelled }
+            pendingKeyPresence = presence
+            verifiedSetupCredentialID = key.credentialID
+            pendingSecurityKeys[index] = AppLockSecurityKeyRecordV1(key)
+            securityKeyProofUntil = Date().addingTimeInterval(300)
+        } catch {
+            if started == lockOperationGeneration { settingsError = error.localizedDescription }
+        }
+    }
+
+    func removePendingSecurityKey(_ id: UUID) {
+        guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings else { return }
+        pendingSecurityKeys.removeAll { $0.id == id }
+    }
+
+    private var canEditSecurityKeys: Bool {
+        !isLocked && (appLockMode == .off || settingsAuthorizedUntil.map { $0 > Date() } == true)
+    }
+
+    func registerSecurityKey(name: String, pin: String, transport: SecurityKeyTransport) async {
+        guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings else { return }
+        let started = lockOperationGeneration
+        securityKeyBusy = true
+        settingsError = nil
+        defer { securityKeyBusy = false }
+        do {
+            let key = try await hardwareSecurityKey.register(application: .noctweave,
+                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                excluding: pendingSecurityKeys.map(\.hardwareCredential), pin: pin, transport: transport)
+            let presence = await hardwareSecurityKey.verifiedPresence()
+            guard !pendingKeyPresenceRequired || presence?.isConnected == true else { throw SecurityKeyError.unsupported }
+            guard started == lockOperationGeneration, canEditSecurityKeys else { throw SecurityKeyError.cancelled }
+            pendingKeyPresence = presence
+            verifiedSetupCredentialID = key.credentialID
+            pendingSecurityKeys.append(AppLockSecurityKeyRecordV1(key))
+            securityKeyProofUntil = Date().addingTimeInterval(300)
+        } catch {
+            if started == lockOperationGeneration { settingsError = error.localizedDescription }
+        }
+    }
+
+    func unlockWithSecurityKey(pin: String, transport: SecurityKeyTransport) async {
+        expireUnlockFactors()
+        guard isLocked, appLockMode.requiresSecurityKey, !securityKeyBusy,
+              !appLockMode.requiresBiometrics || biometricStepPassed else { return }
+        lockError = nil
+        if await verifySecurityKey(pin: pin, transport: transport) {
+            securityKeyStepPassed = true
+            if unlockFactorsExpireAt == nil { unlockFactorsExpireAt = Date().addingTimeInterval(300) }
+            finishUnlockIfComplete()
+        } else {
+            lockError = settingsError
+            settingsError = nil
+        }
+    }
+
+    /// Persist the verified counter before granting access. A changed lock configuration or
+    /// background/cancel event invalidates the in-flight ceremony, including a late success.
+    private func verifySecurityKey(pin: String, transport: SecurityKeyTransport) async -> Bool {
+        guard appLockMode.requiresSecurityKey, !securityKeyBusy, !isSavingSettings else { return false }
+        let started = lockOperationGeneration
+        let original = appLockSettings
+        securityKeyBusy = true
+        defer { securityKeyBusy = false }
+        do {
+            let key = try await hardwareSecurityKey.authenticate(application: .noctweave,
+                credentials: original.securityKeys.map(\.hardwareCredential), pin: pin, transport: transport)
+            let presence = await hardwareSecurityKey.verifiedPresence()
+            guard !original.requireSecurityKeyPresence || presence?.isConnected == true else { throw SecurityKeyError.unsupported }
+            guard started == lockOperationGeneration, appLockSettings == original, let client else {
+                throw SecurityKeyError.cancelled
+            }
+            var updated = original
+            guard let index = updated.securityKeys.firstIndex(where: { $0.id == key.id }) else {
+                throw SecurityKeyError.verificationFailed
+            }
+            updated.securityKeys[index] = AppLockSecurityKeyRecordV1(key)
+            try await client.updateAppLockSettings(updated)
+            try await refresh()
+            guard started == lockOperationGeneration, appLockSettings == updated,
+                  !original.requireSecurityKeyPresence || presence?.isConnected == true else { throw SecurityKeyError.cancelled }
+            pendingKeyPresence = presence
+            verifiedSetupCredentialID = key.credentialID
+            if original.requireSecurityKeyPresence, let presence { monitorKeyPresence(presence) }
+            return true
+        } catch {
+            if started == lockOperationGeneration { settingsError = error.localizedDescription }
+            return false
+        }
     }
 
     func saveAppearance(_ palette: ThemePalette) async -> Bool {
@@ -2612,31 +2810,29 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
-    func authorizeAppLockChanges(pin: String? = nil) async -> Bool {
+    func authorizeAppLockChanges(pin: String? = nil, keyPIN: String = "",
+                                 transport: SecurityKeyTransport = .usb) async -> Bool {
+        guard !isLocked, !securityKeyBusy else { return false }
+        let started = lockOperationGeneration
+        let mode = appLockMode
         settingsError = nil
         do {
-            switch appLockMode {
-            case .off:
-                break
-            case .biometrics:
-                try await evaluateBiometrics(
-                    reason: "Authorize changes to Noctweave app security"
-                )
-                settingsBiometricAuthorizedUntil = Date().addingTimeInterval(300)
-            case .pinOnly:
-                guard let pin, verifyConfiguredPIN(pin) else {
-                    throw NoctweaveClientError.invalidAppLockPIN
-                }
-            case .biometricsAndPin:
-                guard let pin, verifyConfiguredPIN(pin) else {
-                    throw NoctweaveClientError.invalidAppLockPIN
-                }
-                try await evaluateBiometrics(
-                    reason: "Authorize changes to Noctweave app security"
-                )
+            if mode.requiresPIN {
+                guard let pin, verifyConfiguredPIN(pin) else { throw NoctweaveClientError.invalidAppLockPIN }
+            }
+            if mode.requiresBiometrics {
+                try await evaluateBiometrics(reason: "Authorize changes to Noctweave app security")
+                guard started == lockOperationGeneration, appLockMode == mode, !isLocked else { return false }
                 settingsBiometricAuthorizedUntil = Date().addingTimeInterval(300)
             }
+            if mode.requiresSecurityKey {
+                guard await verifySecurityKey(pin: keyPIN, transport: transport) else { return false }
+                securityKeyProofUntil = Date().addingTimeInterval(300)
+            }
+            guard started == lockOperationGeneration, appLockMode == mode, !isLocked else { return false }
             settingsAuthorizedUntil = Date().addingTimeInterval(300)
+            pendingSecurityKeys = appLockSettings.securityKeys
+            pendingKeyPresenceRequired = appLockSettings.requireSecurityKeyPresence
             return true
         } catch {
             settingsError = describe(error)
@@ -2645,6 +2841,15 @@ final class ClientViewModel: ObservableObject {
     }
 
     func cancelAppLockChanges() {
+        cancelSecurityKeyOperation()
+        biometricStepPassed = false
+        securityKeyStepPassed = false
+        unlockFactorsExpireAt = nil
+        pendingSecurityKeys = []
+        pendingKeyPresence = nil
+        verifiedSetupCredentialID = nil
+        pendingKeyPresenceRequired = false
+        securityKeyProofUntil = nil
         settingsAuthorizedUntil = nil
         settingsBiometricAuthorizedUntil = nil
         settingsError = nil
@@ -2656,7 +2861,8 @@ final class ClientViewModel: ObservableObject {
         lockScreenMessage: String,
         newPIN: String?
     ) async -> Bool {
-        guard !isSavingSettings else { return false }
+        guard !isSavingSettings, !securityKeyBusy, !isLocked else { return false }
+        let started = lockOperationGeneration
         settingsError = nil
         settingsMessage = nil
         isSavingSettings = true
@@ -2669,7 +2875,7 @@ final class ClientViewModel: ObservableObject {
                 }
             }
 
-            if mode == .biometrics || mode == .biometricsAndPin {
+            if mode.requiresBiometrics {
                 if settingsBiometricAuthorizedUntil.map({ $0 > Date() }) != true {
                     try await evaluateBiometrics(
                         reason: "Enable biometric protection for Noctweave"
@@ -2677,8 +2883,14 @@ final class ClientViewModel: ObservableObject {
                 }
             }
 
+            if mode.requiresSecurityKey {
+                guard canEnableSecurityKeyProtection else {
+                    throw SecurityKeyError.verificationFailed
+                }
+            }
+
             let pinRecord: AppLockPINRecordV2?
-            if mode == .pinOnly || mode == .biometricsAndPin {
+            if mode.requiresPIN {
                 guard let newPIN else { throw NoctweaveClientError.invalidAppLockPIN }
                 pinRecord = try await Task.detached(priority: .userInitiated) {
                     try AppLockPINV2.makeRecord(pin: newPIN)
@@ -2693,18 +2905,34 @@ final class ClientViewModel: ObservableObject {
                 lockScreenMessage: lockScreenMessage.trimmingCharacters(in: .whitespacesAndNewlines),
                 pinSalt: pinRecord?.salt,
                 pinHash: pinRecord?.encodedHash,
-                actionPlans: appLockSettings.actionPlans
+                actionPlans: appLockSettings.actionPlans,
+                securityKeys: pendingSecurityKeys,
+                requireSecurityKeyPresence: mode.requiresSecurityKey && pendingKeyPresenceRequired
             )
             guard candidate.isStructurallyValid else {
                 throw NoctweaveClientError.invalidAppLockPIN
             }
             guard let client else { throw NoctweaveClientError.unavailable }
+            guard started == lockOperationGeneration, !isLocked else { throw SecurityKeyError.cancelled }
             try await client.updateAppLockSettings(candidate)
             try await refresh()
+            guard started == lockOperationGeneration, !isLocked else { throw SecurityKeyError.cancelled }
+            if candidate.requireSecurityKeyPresence {
+                guard let presence = pendingKeyPresence, presence.isConnected else {
+                    lockNow()
+                    throw SecurityKeyError.cancelled
+                }
+                monitorKeyPresence(presence)
+            } else {
+                keyPresenceTask?.cancel()
+                keyPresenceTask = nil
+                activeKeyPresence = nil
+            }
             if mode == .off {
                 isLocked = false
                 biometricStepPassed = false
             }
+            securityKeyProofUntil = nil
             settingsMessage = mode == .off
                 ? "App lock disabled."
                 : "App security updated."
@@ -4157,3 +4385,15 @@ private final class UITestFileRollbackAnchorStore:
     }
 }
 #endif
+
+private extension AppLockSecurityKeyRecordV1 {
+    var hardwareCredential: SecurityKeyCredential {
+        .init(id: id, name: name, relyingPartyID: SecurityKeyApplication.noctweave.relyingPartyID,
+              credentialID: credentialID, publicKey: publicKey, signatureCounter: signatureCounter)
+    }
+
+    init(_ credential: SecurityKeyCredential) {
+        self.init(id: credential.id, name: credential.name, credentialID: credential.credentialID,
+                  publicKey: credential.publicKey, signatureCounter: credential.signatureCounter)
+    }
+}

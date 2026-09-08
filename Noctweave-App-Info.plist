@@ -54,5 +54,11 @@
 			</dict>
 		</dict>
 	</array>
+	<key>NFCReaderUsageDescription</key>
+	<string>Use your security key to unlock Noctweave.</string>
+	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
+	<array>
+		<string>A0000006472F0001</string>
+	</array>
 </dict>
 </plist>

@@ -9,7 +9,7 @@ Noctweave Messaging Client is the native SwiftUI client for the Noctweave privat
 - Experimental encrypted group conversations
 - Encrypted image, document, audio, and voice-message attachments
 - QR-based exchange flows, relay selection, and route prefetching
-- Local PIN and biometric app locking
+- Local PIN, biometric, and physical security-key app locking
 - A companion iOS sync activity widget
 
 Noctweave has no protocol accounts, global public identity, hosted inbox, recovery authority, or managed relay service. Relays route and retain ciphertext; they cannot decrypt message or attachment contents. Relay operators and network observers can still infer transport metadata such as IP addresses, timing, availability, destination relay, and traffic volume.
@@ -39,11 +39,24 @@ default. Exchange them over an authenticated private channel and delete them
 after the member joins. Raw paste remains an advanced fallback for debugging or
 channels that cannot transfer files.
 
+## Hardware security keys
+
+Open **You → Settings → App Security → Choose App Unlock Method**. Choose a FIDO2 security key alone, with an app PIN, with biometrics, or with both. The existing biometrics, PIN, and biometrics + PIN choices remain available. Every selected factor is required; the lock screen verifies biometrics, then the key, then the app PIN when applicable. The key's own FIDO2 PIN is separate from the six-digit app PIN.
+
+Register the key, enter its existing hardware PIN in the app, and touch it when prompted. Enrollment performs registration and a separate verification, so two touches may be needed. Click **Save Protection** after verification. Add a spare key before enabling continuous presence. Changing existing protection requires all currently selected factors again.
+
+On macOS, **Keep key connected** locks the app when the verified USB key is removed. Reconnecting it never resumes access automatically: all selected unlock checks must succeed again. Each registered spare can start a fresh session, but inserting a different key cannot preserve an existing session. Key modes have no PIN-only or biometric-only recovery bypass, so keep a registered key accessible.
+
+macOS uses generic FIDO2 USB HID. iPhone supports NFC; iOS USB support follows YubiKit's smart-card reader support and requires physical-device verification. iOS and NFC do not offer continuous presence. U2F-only keys and PIV/OTP credentials are not implemented. Native app locking controls application access while existing OS-backed storage encryption remains in place; it is not hardware-derived vault encryption or tamper-resistant DRM.
+
+YubiKit Swift 1.3.0 is Apache-2.0 licensed. Its license is included in the app resources and the sibling security-key package documents the sole read-only USB presence patch.
+
 ## Requirements
 
 - Xcode 26 or later
 - macOS 26 / iOS 26 SDKs
 - `NoctweaveCore` checked out as a sibling directory at `../NoctweaveCore`
+- `NoctweaveSecurityKeys` from the same parent checkout at `../NoctweaveSecurityKeys` (includes pinned YubiKit source)
 
 ## Build
 

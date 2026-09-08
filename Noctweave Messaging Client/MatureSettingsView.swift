@@ -381,7 +381,7 @@ private struct MatureAppSecuritySettings: View {
                         SettingsActionLabel(
                             icon: "key.fill",
                             title: "Choose App Unlock Method",
-                            message: "Configure biometrics, a six-digit PIN, or both. Existing protection must be authenticated before any change."
+                            message: "Choose biometrics, a six-digit PIN, or a physical security key. Existing protection must be authenticated before any change."
                         )
                     }
                     .buttonStyle(.plain)
@@ -577,6 +577,8 @@ private struct MatureAppLockSetupFlow: View {
         }
         .frame(minWidth: 360, idealWidth: 540, minHeight: 560, idealHeight: 700)
         .interactiveDismissDisabled(model.isSavingSettings)
+        .task { model.prepareSecurityKeySetup() }
+        .onDisappear { model.cancelAppLockChanges() }
         .task(id: stage) {
             guard stage == .authorize,
                   model.appLockMode == .biometrics,
@@ -593,7 +595,21 @@ private struct MatureAppLockSetupFlow: View {
                 title: "Confirm it is you",
                 message: "Changing the unlock method can expose encrypted local state. Authenticate with the protection already configured on this device."
             )
-            if model.appLockMode == .biometrics {
+            if model.appLockMode.requiresSecurityKey {
+                if model.appLockMode.requiresPIN { SettingsPINPad(pin: $enteredPIN) }
+                SecurityKeyPrompt(busy: model.securityKeyBusy, title: "Verify Security Key",
+                                  requiresUSB: model.appLockSettings.requireSecurityKeyPresence, cancel: model.cancelSecurityKeyOperation) { pin, transport in
+                    if await model.authorizeAppLockChanges(pin: enteredPIN, keyPIN: pin, transport: transport) {
+                        enteredPIN = ""
+                        stage = .configure
+                    }
+                }
+                .disabled(model.appLockMode.requiresPIN && enteredPIN.count != 6)
+                if model.appLockMode.requiresBiometrics {
+                    Text("Biometrics are also required before the security key check.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else if model.appLockMode == .biometrics {
                 ProgressView("Waiting for \(model.biometricDisplayName)…")
                     .padding(24)
                 if model.settingsError != nil {
@@ -629,6 +645,10 @@ private struct MatureAppLockSetupFlow: View {
                 }
             }
 
+            if mode.requiresSecurityKey {
+                SecurityKeySetupControls(model: model)
+            }
+
             Text("LOCK TIMING").settingsSectionLabel().padding(.top, 4)
             HStack(spacing: 12) {
                 SettingsIcon(symbol: "timer", color: .orange)
@@ -650,7 +670,7 @@ private struct MatureAppLockSetupFlow: View {
             .padding(16)
             .uniformGlassCard(cornerRadius: 20, padding: 0, minHeight: 84)
 
-            if mode == .pinOnly || mode == .biometricsAndPin {
+            if mode.requiresPIN {
                 Text("PIN SCREEN").settingsSectionLabel().padding(.top, 4)
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Custom message").font(.headline)
@@ -669,8 +689,8 @@ private struct MatureAppLockSetupFlow: View {
             }
 
             errorText
-            Button(mode == .pinOnly || mode == .biometricsAndPin ? "Continue to PIN" : "Save Protection") {
-                if mode == .pinOnly || mode == .biometricsAndPin {
+            Button(mode.requiresPIN ? "Continue to PIN" : "Save Protection") {
+                if mode.requiresPIN {
                     enteredPIN = ""
                     localError = nil
                     stage = .newPIN
@@ -679,7 +699,8 @@ private struct MatureAppLockSetupFlow: View {
                 }
             }
             .glassButton(prominent: true)
-            .disabled(model.isSavingSettings || ((mode == .biometrics || mode == .biometricsAndPin) && !model.biometricsAvailable))
+            .disabled(model.isSavingSettings || model.securityKeyBusy
+                || (mode.requiresSecurityKey && !model.canEnableSecurityKeyProtection) || (mode.requiresBiometrics && !model.biometricsAvailable))
         }
     }
 
@@ -724,17 +745,20 @@ private struct MatureAppLockSetupFlow: View {
     }
 
     private func unlockMethodButton(_ candidate: AppLockMode) -> some View {
-        let needsBiometrics = candidate == .biometrics || candidate == .biometricsAndPin
+        let needsBiometrics = candidate.requiresBiometrics
         let unavailable = needsBiometrics && !model.biometricsAvailable
         return Button {
+            guard !model.securityKeyBusy else { return }
             mode = candidate
         } label: {
             HStack(spacing: 12) {
                 SettingsIcon(symbol: methodIcon(candidate), color: candidate == .off ? .gray : .green)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(methodName(candidate)).font(.headline)
+                    Text(methodName(candidate)).font(.subheadline.weight(.semibold))
+                        .lineLimit(2, reservesSpace: true)
                     Text(methodDescription(candidate))
                         .font(.caption)
+                        .lineLimit(3, reservesSpace: true)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.leading)
                 }
@@ -746,7 +770,8 @@ private struct MatureAppLockSetupFlow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(unavailable)
+        .disabled(unavailable || model.securityKeyBusy)
+        .accessibilityIdentifier("appLock.method.\(candidate.rawValue)")
         .opacity(unavailable ? 0.5 : 1)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
@@ -819,6 +844,7 @@ private struct MatureAppLockSetupFlow: View {
         case .biometrics: "faceid"
         case .pinOnly: "number.square.fill"
         case .biometricsAndPin: "person.badge.key.fill"
+        case .securityKey, .securityKeyAndPin, .biometricsAndSecurityKey, .biometricsPinAndSecurityKey: "key.horizontal.fill"
         }
     }
 
@@ -826,6 +852,9 @@ private struct MatureAppLockSetupFlow: View {
         switch value {
         case .biometrics: model.biometricDisplayName
         case .biometricsAndPin: "\(model.biometricDisplayName) + PIN"
+        case .securityKeyAndPin: "Key + PIN"
+        case .biometricsAndSecurityKey: "\(model.biometricDisplayName) + Key"
+        case .biometricsPinAndSecurityKey: "\(model.biometricDisplayName) + PIN + Key"
         default: value.displayName
         }
     }
@@ -836,6 +865,10 @@ private struct MatureAppLockSetupFlow: View {
         case .biometrics: "Fast, with no password fallback"
         case .pinOnly: "Six digits, entered in app"
         case .biometricsAndPin: "Require both checks"
+        case .securityKey: "Physical FIDO2 key with verification"
+        case .securityKeyAndPin: "Require your key and app PIN"
+        case .biometricsAndSecurityKey: "Require biometrics and your key"
+        case .biometricsPinAndSecurityKey: "Require all three checks"
         }
     }
 }
