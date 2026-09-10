@@ -27,7 +27,7 @@ struct ClientDuressTransitionTests {
         let scope = "org.noctweave.tests.replacement.\(UUID())"
         let storage = ClientStorageSession(stateURL: root.appendingPathComponent("state.nwstate"),
             attachmentsURL: root.appendingPathComponent("attachments"), scope: scope,
-            usesFixtureKeys: false, usesPlaintextFixture: false)
+            usesFixtureKeys: false, usesPlaintextFixture: false, clearsSupportDirectory: true)
         defer {
             try? FileManager.default.removeItem(at: root)
             for suffix in [""] + AppLockDuressAction.allCases.map({ ".replacement.\($0.rawValue)" }) {
@@ -100,6 +100,22 @@ struct ClientDuressTransitionTests {
         catch is ClientAttachmentStoreError { }
         let stillPresent = try await storage.stateStore().load()
         try require(stillPresent?.activePersonaID == reloaded.activePersonaID, "Old session destroyed fresh state")
+        let orphan = root.appendingPathComponent("interrupted-write.tmp")
+        try Data("orphaned fixture".utf8).write(to: orphan)
+        let fullReset = ClientFullReset(storage: storage)
+        try fullReset.begin()
+        do {
+            try await fullReset.complete { throw Failure.interrupted }
+            throw Failure.assertion("Full reset ignored cleanup failure")
+        } catch Failure.interrupted { }
+        try require(fullReset.isPending, "Full reset intent was lost on failure")
+        try await ClientFullReset(storage: storage).complete(clearSideEffects: {})
+        try require(!fullReset.isPending, "Full reset did not finish")
+        try require(!FileManager.default.fileExists(atPath: orphan.path), "Interrupted temporary file survived purge")
+        try require(try await storage.stateStore().load() == nil, "Active state survived purge")
+        try require(try await transition.pending() == nil, "Replacement state survived purge")
+        try require(!FileManager.default.fileExists(atPath: storage.attachmentsURL.path), "Attachments survived purge")
+        try require(try await storage.stateStore().isAwaitingFreshState(), "Reset lost rollback tombstone")
     }
 
     private static func makeRelationship() throws -> PairwiseRelationshipV2 {

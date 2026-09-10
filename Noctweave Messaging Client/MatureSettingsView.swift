@@ -36,7 +36,7 @@ struct MatureSettingsView: View {
                     onLock: onLock
                 )
             case .storage:
-                MatureStorageSettings(onBack: { destination = nil })
+                MatureStorageSettings(model: model, onBack: { destination = nil })
             case .legal:
                 MatureLegalSettings(onBack: { destination = nil })
             case nil:
@@ -424,6 +424,9 @@ private struct MatureAppSecuritySettings: View {
 }
 
 private struct MatureStorageSettings: View {
+    @ObservedObject var model: ClientViewModel
+    @State private var showReset = false
+    @State private var confirmation = ""
     let onBack: () -> Void
 
     var body: some View {
@@ -451,6 +454,17 @@ private struct MatureStorageSettings: View {
                         title: "Backups and exports",
                         message: "Device backups and files you explicitly export may have different retention rules. Protect those destinations separately and remove exports when they are no longer needed."
                     )
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Reset app").font(.headline)
+                        Text("Permanently remove all local profiles, chats, attachments, encryption keys, unlock methods, and settings. Copies on other devices, relays, and backups remain.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        Button("Purge and Reset App…", role: .destructive) {
+                            confirmation = ""
+                            showReset = true
+                        }
+                        .accessibilityIdentifier("app.purgeAndReset")
+                        .disabled(model.isResetting)
+                    }.padding(16)
                 }
                 .padding(16)
                 .frame(maxWidth: 820)
@@ -459,6 +473,15 @@ private struct MatureStorageSettings: View {
             .scrollIndicators(.hidden)
         }
         .accessibilityIdentifier("settings.storage.detail")
+        .alert("Purge and reset Noctweave?", isPresented: $showReset) {
+            TextField("Type RESET to confirm", text: $confirmation)
+            Button("Cancel", role: .cancel) {}
+            Button("Purge and Reset", role: .destructive) {
+                Task { await model.resetLocalApplication() }
+            }.disabled(confirmation != "RESET")
+        } message: {
+            Text("All local data and encryption keys will be removed. You will return to setup. This cannot be undone. Type RESET to continue.")
+        }
     }
 }
 
@@ -474,6 +497,7 @@ private struct MatureLegalSettings: View {
             ) { EmptyView() }
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    AppSupportCard()
                     SettingsInfoCard(
                         icon: "hand.raised.fill",
                         title: "Privacy Policy",

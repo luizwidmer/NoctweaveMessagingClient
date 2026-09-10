@@ -8,8 +8,10 @@ enum NoctweaveUITestRuntime {
         case automatedProfile
         case readyState
         case productFixture
+        case storeScreenshots
         case resetState
         case plaintextState
+        case storageDirectory
         case secureRendering
         case lockFixture
         case attachedKeyFixture
@@ -56,8 +58,12 @@ enum NoctweaveUITestRuntime {
             "UI_TESTING_READY_STATE"
         case .productFixture:
             "UI_TESTING_PRODUCT_FIXTURE"
+        case .storeScreenshots:
+            "UI_TESTING_STORE_SCREENSHOTS"
         case .resetState:
             "UI_TESTING_RESET_STATE"
+        case .storageDirectory:
+            "UI_TESTING_STORAGE_DIRECTORY"
         case .plaintextState:
             "UI_TESTING_PLAINTEXT_STATE"
         case .secureRendering:

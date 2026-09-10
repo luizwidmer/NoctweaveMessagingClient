@@ -1,0 +1,11 @@
+# Local Xcode state and build output
+.DS_Store
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+.build/
+.swiftpm/
+.runtime/
+*.xcarchive/
+*.xcresult/

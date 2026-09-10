@@ -4,6 +4,8 @@ import NoctweaveCore
 
 @main
 struct NoctweaveApp: App {
+    @StateObject private var support = AppSupportStore.shared
+
     @StateObject private var session = ClientApplicationSession()
     @AppStorage("noctweave.appearance.palette") private var paletteRaw = ThemePalette.noir.rawValue
 

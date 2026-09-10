@@ -2320,7 +2320,7 @@ private struct MatureIdentityView: View {
                                             identityBadge("ARCHIVED", color: .secondary)
                                         }
                                     }
-                                    Text("\(persona.relationships.count) contacts · \(persona.groupRuntimes.count) groups")
+                                    Text("\(persona.relationships.count) \(persona.relationships.count == 1 ? "contact" : "contacts") · \(persona.groupRuntimes.count) \(persona.groupRuntimes.count == 1 ? "group" : "groups")")
                                         .font(.subheadline)
                                         .foregroundStyle(.secondary)
                                     if let relay = relay(for: persona.id) {

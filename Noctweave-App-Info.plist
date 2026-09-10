@@ -60,5 +60,19 @@
 	<array>
 		<string>A0000006472F0001</string>
 	</array>
+	<key>AppSupportTipProductIDs</key>
+	<array>
+		<string>com.luizwidmer.noctweave.tip.small</string>
+		<string>com.luizwidmer.noctweave.tip.medium</string>
+		<string>com.luizwidmer.noctweave.tip.large</string>
+	</array>
+	<key>CFBundleDisplayName</key>
+	<string>Noctweave</string>
+	<key>AppSupportAppleID</key>
+	<string>6809914725</string>
+	<key>AppSupportURL</key>
+	<string>https://luizwidmer.com/</string>
+	<key>AppSupportPrivacyPolicyURL</key>
+	<string>https://luizwidmer.com/noctweave-privacy-policy/</string>
 </dict>
 </plist>

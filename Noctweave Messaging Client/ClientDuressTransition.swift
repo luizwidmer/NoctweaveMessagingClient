@@ -12,6 +12,7 @@ struct ClientStorageSession {
     let scope: String
     let usesFixtureKeys: Bool
     let usesPlaintextFixture: Bool
+    var clearsSupportDirectory = false
 
     func stateStore(action: AppLockDuressAction? = nil) -> ClientStateStore {
         let url = action.map { stateURL.deletingLastPathComponent().appendingPathComponent("replacement-\($0.rawValue).nwstate") } ?? stateURL
@@ -33,6 +34,45 @@ struct ClientStorageSession {
             storageScopeIdentifier: scope + (action.map { ".replacement.\($0.rawValue)" } ?? ""),
             encryptionKey: usesFixtureKeys ? SymmetricKey(data: Data(repeating: 0x41, count: 32)) : nil,
             keyProvider: SecureStorageKeyProvider())
+    }
+}
+
+/// Explicit full reset has its own durable intent, independent of duress plans.
+/// It is reconciled before any saved session or replacement vault is opened.
+@MainActor
+struct ClientFullReset {
+    let storage: ClientStorageSession
+    private var markerURL: URL { storage.stateURL.appendingPathExtension("purge-pending-v1") }
+    var isPending: Bool { FileManager.default.fileExists(atPath: markerURL.path) }
+
+    func begin() throws {
+        try FileManager.default.createDirectory(at: markerURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try SecureRegularFileIO.writePrivate(Data("purge-v1".utf8), to: markerURL, maximumBytes: 64)
+    }
+
+    func complete(clearSideEffects: () throws -> Void) async throws {
+        var failure: Error?
+        for action in [Optional<AppLockDuressAction>.none] + AppLockDuressAction.allCases.map({ Optional($0) }) {
+            let store = storage.stateStore(action: action)
+            do {
+                if storage.usesPlaintextFixture { try await store.eraseAllLocalState() }
+                else { try await store.destroyLocalEncryptionMaterial(preservingCiphertext: false) }
+            } catch { failure = error }
+            let attachments = storage.attachments(action: action)
+            do { try attachments.destroyEncryptionMaterial() } catch { failure = error }
+            do { try attachments.finishKeyDestruction(preservingCiphertext: false) } catch { failure = error }
+        }
+        if storage.clearsSupportDirectory {
+            do {
+                for file in try FileManager.default.contentsOfDirectory(at: storage.stateURL.deletingLastPathComponent(), includingPropertiesForKeys: nil)
+                    where file.standardizedFileURL != markerURL.standardizedFileURL {
+                    try FileManager.default.removeItem(at: file)
+                }
+            } catch { failure = error }
+        }
+        do { try clearSideEffects() } catch { failure = error }
+        if let failure { throw failure }
+        if isPending { try FileManager.default.removeItem(at: markerURL) }
     }
 }
 

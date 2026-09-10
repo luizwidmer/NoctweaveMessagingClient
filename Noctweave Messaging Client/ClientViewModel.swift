@@ -521,6 +521,8 @@ final class ClientViewModel: ObservableObject {
     @Published private(set) var pendingDuressPlans: [AppLockDuressPlan] = []
     @Published private(set) var localSessionPreview: [LocalChatPreview]?
     @Published private(set) var showsOnboardingResume = false
+    @Published private(set) var isResetting = false
+    private var fullResetActivated = false
     var onLocalWipeCompleted: (() -> Void)?
     private var unlockAfterLocalWipe = false
     @Published private(set) var checkingUnlockInput = false
@@ -604,7 +606,9 @@ final class ClientViewModel: ObservableObject {
         isUITestProductFixture = NoctweaveUITestRuntime.contains(.productFixture)
         let externalUITestStateURL = NoctweaveUITestRuntime.value(after: .plaintextState)
             .map { URL(fileURLWithPath: $0, isDirectory: false).standardizedFileURL }
-        let testRoot = externalUITestStateURL?.deletingLastPathComponent()
+        let isolatedTestRoot = NoctweaveUITestRuntime.value(after: .storageDirectory)
+            .flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL : nil }
+        let testRoot = externalUITestStateURL?.deletingLastPathComponent() ?? isolatedTestRoot
             ?? FileManager.default.temporaryDirectory.appendingPathComponent(
                 NoctweaveUITestRuntime.contains(.automatedProfile) ? "NoctweaveAutomationUITests"
                     : NoctweaveUITestRuntime.contains(.lockFixture) ? "NoctweaveLockVisibilityUITests" : "NoctweaveCleanV1UITests", isDirectory: true)
@@ -613,7 +617,6 @@ final class ClientViewModel: ObservableObject {
         if isUITest, NoctweaveUITestRuntime.contains(.resetState), externalUITestStateURL == nil, !afterLocalWipe {
             try? FileManager.default.removeItem(at: support)
         }
-        let fixtureKeys = isUITest && externalUITestStateURL == nil
         let plaintext = isUITest && externalUITestStateURL != nil
         #else
         let isUITest = false
@@ -621,14 +624,13 @@ final class ClientViewModel: ObservableObject {
         isUITestProductFixture = false
         let support = location.supportDirectory
         let stateURL = support.appendingPathComponent("client-state-v1.nwstate")
-        let fixtureKeys = false
         let plaintext = false
         #endif
         self.isUITest = isUITest
         storageSession = ClientStorageSession(stateURL: stateURL,
             attachmentsURL: support.appendingPathComponent("attachments", isDirectory: true),
             scope: isUITest ? ClientStorageLocationResolver.primaryScopeIdentifier : location.scopeIdentifier,
-            usesFixtureKeys: fixtureKeys, usesPlaintextFixture: plaintext)
+            usesFixtureKeys: isUITest, usesPlaintextFixture: plaintext, clearsSupportDirectory: !isUITest)
         stateStore = storageSession.stateStore()
         attachmentStore = storageSession.attachments()
         onboardingStorageProtectionAcknowledged = isUITest
@@ -786,6 +788,11 @@ final class ClientViewModel: ObservableObject {
         guard !duressActivated else { return }
         bootState = .loading
         lastError = nil
+        let fullReset = ClientFullReset(storage: storageSession)
+        if fullReset.isPending {
+            await resetLocalApplication()
+            return
+        }
         var retryDelayNanoseconds: UInt64 = 250_000_000
 
         while !Task.isCancelled {
@@ -906,70 +913,42 @@ final class ClientViewModel: ObservableObject {
     /// state is created, so an older encrypted database cannot be replayed
     /// after reset.
     func resetLocalApplication() async {
-        guard !duressActivated else { return }
-        bootState = .loading
-        lastError = nil
-        statusMessage = "Erasing local encrypted state…"
-        pairingTask?.cancel()
-        pairingLobbyTask?.cancel()
-        pairingRelayCheckTask?.cancel()
-        onboardingRelayCheckTask?.cancel()
-        relayManagementTask?.cancel()
-
+        guard !isResetting, !duressActivated || fullResetActivated else { return }
+        isResetting = true
+        defer { isResetting = false }
+        let reset = ClientFullReset(storage: storageSession)
         do {
-            try await stateStore.eraseAllLocalState()
-            try attachmentStore.eraseAllLocalAttachments()
-            try? OpaqueRoutePrefetchBridge.eraseAllLocalState()
-
-            if !isUITest, let bundleIdentifier = Bundle.main.bundleIdentifier {
-                UserDefaults.standard.removePersistentDomain(forName: bundleIdentifier)
-            }
-
-            client = nil
-            state = nil
-            selectedRelationshipID = nil
-            selectedGroupID = nil
-            draftMessage = ""
-            groupDraftMessage = ""
-            archivedPersonaIDs = []
-            receivedAttachmentFileNames = [:]
-            attachmentDownloadsInFlight.removeAll()
-            pairingLink = nil
-            pairingLobbyTask = nil
-            pairingLobbyRelay = nil
-            pairingLobbyHost = nil
-            pairingLobbyRequester = nil
-            pairingLobbySubscription = nil
-            pairingLobbyPhase = .idle
-            pairingLobbyStatus = ""
-            pairingLobbyBadge = nil
-            pairingLobbyPeerBadge = nil
-            pairingLobbyListings = []
-            pairingLobbyRequests = []
-            directPairingPayload = nil
-            directPairingCanFinish = false
-            groupExchangeLink = nil
-            groupExchangeStatus = ""
-            groupMaintenanceStatus = [:]
-            onboardingLegalAccepted = false
-            onboardingPersonaNameSaved = false
-            onboardingPrivacyCompleted = false
-            onboardingStorageProtectionAcknowledged = false
-            isLocked = false
-            biometricStepPassed = false
-            lockError = nil
-            settingsAuthorizedUntil = nil
-            settingsBiometricAuthorizedUntil = nil
-            settingsMessage = nil
-            settingsError = nil
-            isWorking = false
-            _ = PairingInvitationInbox.shared.takePendingItem()
-
-            await open()
+            try reset.begin()
+            fullResetActivated = true
+            duressActivated = true // Retire this model and fence every messaging operation.
+            bootState = .loading
+            lastError = nil
+            statusMessage = "Removing local data…"
+            stopAutomaticUnlock()
+            keyPresenceTask?.cancel(); keyPresenceTask = nil
+            let tasks = [pairingTask, pairingLobbyTask, pairingRelayCheckTask,
+                         onboardingRelayCheckTask, relayManagementTask, queuedOperationTask, activeOperationTask].compactMap { $0 }
+            tasks.forEach { $0.cancel() }
+            notificationManager.stop()
+            attachmentStore.suspendWritesForLocalTransition()
+            // Terminalize the existing writer before awaiting its queued work.
+            // The durable coordinator repeats key deletion on a fresh store if
+            // the first attempt is interrupted or the Keychain is unavailable.
+            if storageSession.usesPlaintextFixture { _ = try? await stateStore.suspendForLocalTransition() }
+            else { try? await stateStore.destroyLocalEncryptionMaterial(preservingCiphertext: false) }
+            for task in tasks { await task.value }
+            client = nil; state = nil
+            draftMessage = ""; groupDraftMessage = ""
+            selectedRelationshipID = nil; selectedGroupID = nil
+            receivedAttachmentFileNames = [:]; localSessionPreview = nil
+            pendingSecurityKeys = []; pendingDuressPlans = []; pendingHiddenUnlockFactors = []
+            pendingKeyPresence = nil; activeKeyPresence = nil; verifiedSetupCredentialID = nil
+            try await reset.complete(clearSideEffects: clearLocalDuressSideEffects)
+            onLocalWipeCompleted?()
         } catch {
-            let message = describe(error)
+            let message = "Reset could not finish. Retry to complete removal. " + describe(error)
             lastError = message
-            statusMessage = "Local reset failed."
+            statusMessage = "Local reset needs to finish."
             bootState = .failed(message)
         }
     }
@@ -3270,12 +3249,13 @@ final class ClientViewModel: ObservableObject {
     }
 
     private static func makeProductFixtureState() throws -> ClientState {
+        let storeScreenshots = NoctweaveUITestRuntime.contains(.storeScreenshots)
         // Pairwise routes enforce both issued-at and expiry bounds. A fixed
         // future timestamp eventually makes this interactive fixture reject
         // every message and attachment before transport is even attempted.
         let now = NoctweaveRendezvousV2.canonicalTimestamp(Date())
         var state = try ClientState(
-            displayName: "Fixture Persona",
+            displayName: storeScreenshots ? "Alex" : "Fixture Persona",
             hasCompletedOnboarding: true,
             hasAcceptedPrivacyPolicy: true,
             hasAcceptedTermsOfUse: true,
@@ -3287,12 +3267,12 @@ final class ClientViewModel: ObservableObject {
             expiresAt: now.addingTimeInterval(NoctweaveRendezvousV2.maximumLifetime)
         )
         let offerer = try Self.makeFixtureParticipant(
-            pseudonym: "Fixture local contact",
+            pseudonym: storeScreenshots ? "Maya" : "Fixture local contact",
             relay: RelayEndpoint(host: "fixture-offerer.invalid", port: 443, useTLS: true, transport: .websocket),
             createdAt: now
         )
         let responder = try Self.makeFixtureParticipant(
-            pseudonym: "Fixture remote contact",
+            pseudonym: storeScreenshots ? "Alex" : "Fixture remote contact",
             relay: RelayEndpoint(host: "fixture-responder.invalid", port: 443, useTLS: true, transport: .websocket),
             createdAt: now
         )
@@ -3327,7 +3307,9 @@ final class ClientViewModel: ObservableObject {
             at: now.addingTimeInterval(5)
         )
         var relationshipWithEvent = relationship
-        guard let content = EncodedContent.text("Fixture message") else {
+        guard let content = EncodedContent.text(storeScreenshots
+            ? "The weekend plan is ready. Want to take the coastal trail?"
+            : "Fixture message") else {
             throw NoctweaveClientError.invalidAttachment
         }
         let event = ConversationEvent(
@@ -3353,6 +3335,25 @@ final class ClientViewModel: ObservableObject {
             content: receiptContent
         )
         _ = try relationshipWithEvent.appendEvent(receipt)
+        if storeScreenshots {
+            let samples: [(String, Bool)] = [
+                ("Absolutely. I'll bring coffee and meet you at nine.", false),
+                ("Perfect. See you there!", true)
+            ]
+            for (index, sample) in samples.enumerated() {
+                guard let sampleContent = EncodedContent.text(sample.0) else {
+                    throw NoctweaveClientError.invalidAttachment
+                }
+                _ = try relationshipWithEvent.appendEvent(ConversationEvent(
+                    conversationId: relationship.conversationID,
+                    authorEndpointHandle: sample.1 ? relationship.localEndpointHandle
+                        : relationship.peerIdentity.sendRoutes.ownerEndpointHandle,
+                    createdAt: now.addingTimeInterval(Double(index + 2)),
+                    kind: .application,
+                    content: sampleContent
+                ))
+            }
+        }
         try state.updateActivePersona { persona in
             try persona.upsert(relationship: relationshipWithEvent)
         }
@@ -3374,7 +3375,8 @@ final class ClientViewModel: ObservableObject {
                 createdAt: now, kind: .application, content: EncodedContent.text("Unselected message")!))
             try state.updateActivePersona { try $0.upsert(relationship: extra) }
         }
-        let inactive = try state.addPersona(displayName: "Fixture Inactive Persona", createdAt: now)
+        let inactive = try state.addPersona(
+            displayName: storeScreenshots ? "Projects" : "Fixture Inactive Persona", createdAt: now)
         try state.selectPersona(firstPersonaID)
         _ = inactive
         return state

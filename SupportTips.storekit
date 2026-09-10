@@ -1,0 +1,64 @@
+{
+  "identifier": "25B51A10-9A4E-4668-89AF-10AE033BEDC9",
+  "nonRenewingSubscriptions": [],
+  "products": [
+    {
+      "displayPrice": "1.99",
+      "familyShareable": false,
+      "internalID": "BBE4336A-3097-44D5-BA24-318AAC95F3D7",
+      "localizations": [
+        {
+          "description": "A one-time tip to support app development.",
+          "displayName": "Small Tip",
+          "locale": "en_US"
+        }
+      ],
+      "productID": "com.luizwidmer.noctweave.tip.small",
+      "referenceName": "Small Tip",
+      "type": "Consumable"
+    },
+    {
+      "displayPrice": "4.99",
+      "familyShareable": false,
+      "internalID": "92B7E651-44D1-4DB7-8905-DDDEF141748B",
+      "localizations": [
+        {
+          "description": "A one-time tip to support app development.",
+          "displayName": "Medium Tip",
+          "locale": "en_US"
+        }
+      ],
+      "productID": "com.luizwidmer.noctweave.tip.medium",
+      "referenceName": "Medium Tip",
+      "type": "Consumable"
+    },
+    {
+      "displayPrice": "9.99",
+      "familyShareable": false,
+      "internalID": "2423D471-DDEB-43CC-BDDA-EAB63CB10096",
+      "localizations": [
+        {
+          "description": "A one-time tip to support app development.",
+          "displayName": "Large Tip",
+          "locale": "en_US"
+        }
+      ],
+      "productID": "com.luizwidmer.noctweave.tip.large",
+      "referenceName": "Large Tip",
+      "type": "Consumable"
+    }
+  ],
+  "settings": {
+    "_applicationInternalID": "6809914725",
+    "_developerTeamID": "9MY7SXN56X",
+    "_failTransactionsEnabled": false,
+    "_locale": "en_US",
+    "_storefront": "USA",
+    "_storeKitErrors": []
+  },
+  "subscriptionGroups": [],
+  "version": {
+    "major": 3,
+    "minor": 0
+  }
+}
