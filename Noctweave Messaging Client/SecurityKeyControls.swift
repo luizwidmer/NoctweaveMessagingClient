@@ -19,7 +19,11 @@ struct UnlockVisibilityControls: View {
             }
             Text("Normal unlock order is security key, biometrics, then \(ClientUnlockCredentialPolicy.name.lowercased()). Connecting a USB key starts its authentication flow; biometrics start when the key check is complete. Unconfigured checks are skipped.")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("There is no hidden-method menu or shortcut. System prompts appear when authentication starts. Avoid naming hidden methods in a custom lock message. The waiting \(ClientUnlockCredentialPolicy.name.lowercased()) screen accepts duress codes before the normal checks; cancel the key flow to return to it.")
+            #if os(iOS)
+            Text("If a connected key is not detected automatically, hold the lock emblem for two seconds to start authentication. No key hint is shown on the hidden lock screen.")
+                .font(.caption).foregroundStyle(.secondary)
+            #endif
+            Text("System prompts appear when authentication starts. Avoid naming hidden methods in a custom lock message. The waiting \(ClientUnlockCredentialPolicy.name.lowercased()) screen accepts duress codes before the normal checks; cancel the key flow to return to it.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -44,31 +48,63 @@ struct SecurityKeyPrompt: View {
     let title: String
     var requiresUSB: Bool = false
     var showCancelWhileIdle = false
+    /// nil means a new registration; existing records retain their original RP scope.
+    var credentials: [AppLockSecurityKeyRecordV1]? = nil
     let cancel: () -> Void
-    let submit: (String, SecurityKeyTransport) async -> Void
+    let submit: (String, SecurityKeyTransport, Bool) async -> Void
     @State private var keyPIN = ""
     @State private var transport: SecurityKeyTransport = .usb
+    @State private var useEarlierRegistration = false
+
+    private var hasLocal: Bool {
+        credentials?.contains { $0.relyingPartyID == AppLockSecurityKeyRecordV1.localRelyingPartyID } == true
+    }
+
+    private var hasEarlier: Bool {
+        credentials?.contains { $0.relyingPartyID == AppLockSecurityKeyRecordV1.nativeRelyingPartyID } == true
+    }
+
+    private var usesLocalFlow: Bool {
+        #if os(iOS)
+        credentials == nil || (hasLocal && !(hasEarlier && useEarlierRegistration))
+        #else
+        false
+        #endif
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             #if os(iOS)
-            Picker("Key connection", selection: $transport) {
-                Text("USB-C").tag(SecurityKeyTransport.usb)
-                if !requiresUSB && UIDevice.current.userInterfaceIdiom == .phone {
-                    Text("NFC").tag(SecurityKeyTransport.nfc)
-                }
+            if hasLocal && hasEarlier {
+                Toggle("Use earlier registration", isOn: $useEarlierRegistration)
+                    .disabled(busy)
+                    .onChange(of: useEarlierRegistration) { _, _ in keyPIN = "" }
             }
-            .pickerStyle(.segmented)
             #endif
-            Text("Connect your FIDO2 key. Enter its PIN if it has one, then touch the key when it blinks.")
-                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            SecureField("Security key PIN", text: $keyPIN)
-                .noctweaveInputField()
-                .disabled(busy)
-                .accessibilityIdentifier("securityKey.pin")
-                .onSubmit { start() }
-            Text("This is the key’s PIN. A key with built-in verification may not need it.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if usesLocalFlow {
+                Text("Connect your security key, then continue in the on-device authentication sheet. Enter the key’s PIN and touch it there when prompted. This works offline.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("securityKey.localFlow")
+            } else {
+                #if os(iOS)
+                Picker("Key connection", selection: $transport) {
+                    Text("USB-C").tag(SecurityKeyTransport.usb)
+                    if !requiresUSB && UIDevice.current.userInterfaceIdiom == .phone {
+                        Text("NFC").tag(SecurityKeyTransport.nfc)
+                    }
+                }
+                .pickerStyle(.segmented)
+                #endif
+                Text("Connect your FIDO2 key. Enter its PIN if it has one, then touch the key when it blinks.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                SecureField("Security key PIN", text: $keyPIN)
+                    .noctweaveInputField()
+                    .disabled(busy)
+                    .accessibilityIdentifier("securityKey.pin")
+                    .onSubmit { start() }
+                Text("This is the key’s PIN. A key with built-in verification may not need it.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if busy {
                 HStack(spacing: 12) {
                     ProgressView().controlSize(.small)
@@ -93,7 +129,8 @@ struct SecurityKeyPrompt: View {
         guard !busy else { return }
         let submittedPIN = keyPIN
         keyPIN = ""
-        Task { await submit(submittedPIN, transport) }
+        let legacy = !usesLocalFlow
+        Task { await submit(submittedPIN, transport, legacy) }
     }
 }
 
@@ -149,8 +186,10 @@ struct SecurityKeySetupControls: View {
                     }
                 }
                 SecurityKeyPrompt(busy: model.securityKeyBusy, title: verifyingExisting ? "Verify Key" : "Register Key",
-                                  requiresUSB: model.pendingKeyPresenceRequired, cancel: model.cancelSecurityKeyOperation) { pin, transport in
-                    if verifyingExisting { await model.verifyPendingSecurityKey(pin: pin, transport: transport) }
+                                  requiresUSB: model.pendingKeyPresenceRequired,
+                                  credentials: verifyingExisting ? model.pendingSecurityKeys : nil,
+                                  cancel: model.cancelSecurityKeyOperation) { pin, transport, legacy in
+                    if verifyingExisting { await model.verifyPendingSecurityKey(pin: pin, transport: transport, legacy: legacy) }
                     else { await model.registerSecurityKey(name: keyName, pin: pin, transport: transport) }
                 }
                 .disabled(model.isSavingSettings || (!verifyingExisting && keyName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
@@ -158,6 +197,11 @@ struct SecurityKeySetupControls: View {
                      ? "Verify a registered key before saving protection. Touch it when prompted."
                      : "Setup asks the key to register, then verify. You may need to touch it twice. Changes apply when you save protection.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if model.canEnableSecurityKeyProtection {
+                Label("Key verified. Ready to save protection.", systemImage: "checkmark.shield.fill")
+                    .font(.callout).foregroundStyle(.green)
+                    .accessibilityIdentifier("securityKey.verified")
             }
         }
         .onAppear { verifyingExisting = !model.pendingSecurityKeys.isEmpty }

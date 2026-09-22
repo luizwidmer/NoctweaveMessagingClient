@@ -576,6 +576,23 @@ final class ClientViewModel: ObservableObject {
     private var automaticBiometricAttemptID: UUID?
     private var automaticKeyTask: Task<Void, Never>?
     private let hardwareSecurityKey = HardwareSecurityKey()
+    #if os(iOS)
+    private let localSecurityKey = LocalSecurityKey(app: .noctweave, brandImagePNG: ClientViewModel.localKeyBrandImage())
+
+    private static func localKeyBrandImage() -> Data? {
+        guard let icon = UIImage(named: "NoctweaveIcon") else { return nil }
+        return UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64)).pngData { _ in
+            icon.draw(in: CGRect(x: 0, y: 0, width: 64, height: 64))
+        }
+    }
+
+    private func localKeyAnchor() throws -> UIWindow {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let window = scenes.filter({ $0.activationState == .foregroundActive })
+            .flatMap(\.windows).first(where: \.isKeyWindow) else { throw SecurityKeyError.unavailable }
+        return window
+    }
+    #endif
     private var lockOperationGeneration: UInt64 = 0
     private var securityKeyProofUntil: Date?
     private var unlockFactorsExpireAt: Date?
@@ -2819,7 +2836,33 @@ final class ClientViewModel: ObservableObject {
 
     func cancelSecurityKeyOperation() {
         lockOperationGeneration &+= 1
+        #if os(iOS)
+        localSecurityKey.cancel()
+        #endif
         Task { await hardwareSecurityKey.cancel() }
+    }
+
+    /// Select one stored scope before authentication; failure never retries another scope.
+    private func authenticateSecurityKeys(_ records: [AppLockSecurityKeyRecordV1], pin: String,
+                                         transport: SecurityKeyTransport, legacy: Bool?, requiresPresence: Bool)
+        async throws -> (SecurityKeyCredential, SecurityKeyPresence?) {
+        #if os(iOS)
+        let useLocal = legacy.map { !$0 }
+            ?? records.contains { $0.relyingPartyID == AppLockSecurityKeyRecordV1.localRelyingPartyID }
+        if useLocal {
+            guard !requiresPresence else { throw SecurityKeyError.unsupported }
+            let credentials = records.filter { $0.relyingPartyID == AppLockSecurityKeyRecordV1.localRelyingPartyID }
+            guard !credentials.isEmpty else { throw SecurityKeyError.wrongKey }
+            let key = try await localSecurityKey.authenticate(credentials: credentials.map(\.hardwareCredential),
+                                                              anchor: localKeyAnchor())
+            return (key, nil)
+        }
+        #endif
+        let credentials = records.filter { $0.relyingPartyID == AppLockSecurityKeyRecordV1.nativeRelyingPartyID }
+        guard !credentials.isEmpty else { throw SecurityKeyError.wrongKey }
+        let key = try await hardwareSecurityKey.authenticate(application: .noctweave,
+            credentials: credentials.map(\.hardwareCredential), pin: pin, transport: transport)
+        return (key, await hardwareSecurityKey.verifiedPresence())
     }
 
     var canEnableSecurityKeyProtection: Bool {
@@ -2828,16 +2871,15 @@ final class ClientViewModel: ObservableObject {
             && (!pendingKeyPresenceRequired || pendingKeyPresence?.isConnected == true)
     }
 
-    func verifyPendingSecurityKey(pin: String, transport: SecurityKeyTransport) async {
+    func verifyPendingSecurityKey(pin: String, transport: SecurityKeyTransport, legacy: Bool? = nil) async {
         guard canEditSecurityKeys, !securityKeyBusy, !isSavingSettings else { return }
         let started = lockOperationGeneration
         securityKeyBusy = true
         settingsError = nil
         defer { securityKeyBusy = false }
         do {
-            let key = try await hardwareSecurityKey.authenticate(application: .noctweave,
-                credentials: pendingSecurityKeys.map(\.hardwareCredential), pin: pin, transport: transport)
-            let presence = await hardwareSecurityKey.verifiedPresence()
+            let (key, presence) = try await authenticateSecurityKeys(pendingSecurityKeys, pin: pin,
+                transport: transport, legacy: legacy, requiresPresence: pendingKeyPresenceRequired)
             guard !pendingKeyPresenceRequired || presence?.isConnected == true else { throw SecurityKeyError.unsupported }
             guard started == lockOperationGeneration, canEditSecurityKeys,
                   let index = pendingSecurityKeys.firstIndex(where: { $0.id == key.id }) else { throw SecurityKeyError.cancelled }
@@ -2866,10 +2908,18 @@ final class ClientViewModel: ObservableObject {
         settingsError = nil
         defer { securityKeyBusy = false }
         do {
+            #if os(iOS)
+            guard !pendingKeyPresenceRequired else { throw SecurityKeyError.unsupported }
+            let key = try await localSecurityKey.register(name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                excluding: pendingSecurityKeys.map(\.hardwareCredential), anchor: localKeyAnchor())
+            let presence: SecurityKeyPresence? = nil
+            #else
             let key = try await hardwareSecurityKey.register(application: .noctweave,
                 name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                excluding: pendingSecurityKeys.map(\.hardwareCredential), pin: pin, transport: transport)
+                excluding: pendingSecurityKeys.filter { $0.relyingPartyID == AppLockSecurityKeyRecordV1.nativeRelyingPartyID }
+                    .map(\.hardwareCredential), pin: pin, transport: transport)
             let presence = await hardwareSecurityKey.verifiedPresence()
+            #endif
             guard !pendingKeyPresenceRequired || presence?.isConnected == true else { throw SecurityKeyError.unsupported }
             guard started == lockOperationGeneration, canEditSecurityKeys else { throw SecurityKeyError.cancelled }
             pendingKeyPresence = presence
@@ -2881,11 +2931,11 @@ final class ClientViewModel: ObservableObject {
         }
     }
 
-    func unlockWithSecurityKey(pin: String, transport: SecurityKeyTransport) async {
+    func unlockWithSecurityKey(pin: String, transport: SecurityKeyTransport, legacy: Bool? = nil) async {
         expireUnlockFactors()
         guard isLocked, appLockMode.requiresSecurityKey, !securityKeyBusy else { return }
         lockError = nil
-        if await verifySecurityKey(pin: pin, transport: transport) {
+        if await verifySecurityKey(pin: pin, transport: transport, legacy: legacy) {
             securityKeyStepPassed = true
             automaticKeyPrompt = false
             if unlockFactorsExpireAt == nil { unlockFactorsExpireAt = Date().addingTimeInterval(300) }
@@ -2898,22 +2948,24 @@ final class ClientViewModel: ObservableObject {
 
     /// Persist the verified counter before granting access. A changed lock configuration or
     /// background/cancel event invalidates the in-flight ceremony, including a late success.
-    private func verifySecurityKey(pin: String, transport: SecurityKeyTransport) async -> Bool {
+    private func verifySecurityKey(pin: String, transport: SecurityKeyTransport, legacy: Bool? = nil) async -> Bool {
         guard appLockMode.requiresSecurityKey, !securityKeyBusy, !isSavingSettings else { return false }
         let started = lockOperationGeneration
         let original = appLockSettings
         securityKeyBusy = true
         defer { securityKeyBusy = false }
         do {
-            let key = try await hardwareSecurityKey.authenticate(application: .noctweave,
-                credentials: original.securityKeys.map(\.hardwareCredential), pin: pin, transport: transport)
-            let presence = await hardwareSecurityKey.verifiedPresence()
+            let (key, presence) = try await authenticateSecurityKeys(original.securityKeys, pin: pin,
+                transport: transport, legacy: legacy, requiresPresence: original.requireSecurityKeyPresence)
             guard !original.requireSecurityKeyPresence || presence?.isConnected == true else { throw SecurityKeyError.unsupported }
             guard started == lockOperationGeneration, appLockSettings == original, let client else {
                 throw SecurityKeyError.cancelled
             }
             var updated = original
-            guard let index = updated.securityKeys.firstIndex(where: { $0.id == key.id }) else {
+            guard let index = updated.securityKeys.firstIndex(where: { $0.id == key.id }),
+                  updated.securityKeys[index].credentialID == key.credentialID,
+                  updated.securityKeys[index].relyingPartyID == key.relyingPartyID,
+                  updated.securityKeys[index].publicKey == key.publicKey else {
                 throw SecurityKeyError.verificationFailed
             }
             updated.securityKeys[index] = AppLockSecurityKeyRecordV1(key)
@@ -2944,14 +2996,14 @@ final class ClientViewModel: ObservableObject {
     }
 
     func authorizeAppLockChanges(pin: String? = nil, keyPIN: String = "",
-                                 transport: SecurityKeyTransport = .usb) async -> Bool {
+                                 transport: SecurityKeyTransport = .usb, legacy: Bool? = nil) async -> Bool {
         guard !isLocked, !securityKeyBusy else { return false }
         let started = lockOperationGeneration
         let mode = appLockMode
         settingsError = nil
         do {
             if mode.requiresSecurityKey {
-                guard await verifySecurityKey(pin: keyPIN, transport: transport) else { return false }
+                guard await verifySecurityKey(pin: keyPIN, transport: transport, legacy: legacy) else { return false }
                 securityKeyProofUntil = Date().addingTimeInterval(300)
             }
             if mode.requiresBiometrics {
@@ -4522,12 +4574,13 @@ final class ClientViewModel: ObservableObject {
 
 private extension AppLockSecurityKeyRecordV1 {
     var hardwareCredential: SecurityKeyCredential {
-        .init(id: id, name: name, relyingPartyID: SecurityKeyApplication.noctweave.relyingPartyID,
+        .init(id: id, name: name, relyingPartyID: relyingPartyID,
               credentialID: credentialID, publicKey: publicKey, signatureCounter: signatureCounter)
     }
 
     init(_ credential: SecurityKeyCredential) {
         self.init(id: credential.id, name: credential.name, credentialID: credential.credentialID,
-                  publicKey: credential.publicKey, signatureCounter: credential.signatureCounter)
+                  publicKey: credential.publicKey, signatureCounter: credential.signatureCounter,
+                  relyingPartyID: credential.relyingPartyID)
     }
 }

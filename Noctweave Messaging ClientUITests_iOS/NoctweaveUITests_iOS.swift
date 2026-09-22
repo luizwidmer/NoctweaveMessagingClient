@@ -174,9 +174,11 @@ final class NoctweaveUITests_iOS: XCTestCase {
         for _ in 0..<6 where !register.isHittable || register.frame.maxY > app.frame.maxY - 40 { app.swipeUp() }
         XCTAssertTrue(register.isHittable)
         assertFitsScreen(register)
-        let pin = app.secureTextFields["securityKey.pin"]
-        XCTAssertTrue(pin.exists)
-        assertFitsScreen(pin)
+        XCTAssertFalse(app.secureTextFields["securityKey.pin"].exists,
+                       "New iOS registrations collect the key PIN only in the system sheet")
+        let localHint = app.staticTexts["securityKey.localFlow"]
+        XCTAssertTrue(localHint.exists)
+        assertFitsScreen(localHint)
         XCTAssertFalse(app.switches["securityKey.keepConnected"].exists,
                        "NFC and iOS must not advertise continuous USB presence")
         XCTAssertFalse(app.buttons["Save Protection"].isEnabled)

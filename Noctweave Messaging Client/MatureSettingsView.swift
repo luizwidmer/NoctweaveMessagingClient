@@ -622,8 +622,10 @@ private struct MatureAppLockSetupFlow: View {
             if model.appLockMode.requiresSecurityKey {
                 if model.appLockMode.requiresPIN { currentUnlockInput }
                 SecurityKeyPrompt(busy: model.securityKeyBusy, title: "Verify Security Key",
-                                  requiresUSB: model.appLockSettings.requireSecurityKeyPresence, cancel: model.cancelSecurityKeyOperation) { pin, transport in
-                    if await model.authorizeAppLockChanges(pin: enteredPIN, keyPIN: pin, transport: transport) {
+                                  requiresUSB: model.appLockSettings.requireSecurityKeyPresence,
+                                  credentials: model.appLockSettings.securityKeys,
+                                  cancel: model.cancelSecurityKeyOperation) { pin, transport, legacy in
+                    if await model.authorizeAppLockChanges(pin: enteredPIN, keyPIN: pin, transport: transport, legacy: legacy) {
                         enteredPIN = ""
                         stage = .configure
                     }

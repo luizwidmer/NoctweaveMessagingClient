@@ -1,5 +1,6 @@
 import NoctweaveCore
 import SwiftUI
+import NoctweaveSecurityKeys
 
 struct ContentView: View {
     @ObservedObject var model: ClientViewModel
@@ -225,6 +226,14 @@ private struct ClientLockView: View {
                     .font(.system(size: 34, weight: .semibold)).foregroundStyle(theme.accent)
             }
             .frame(width: 72, height: 72)
+            #if os(iOS)
+            .contentShape(Circle())
+            .onLongPressGesture(minimumDuration: 2) {
+                guard model.appLockMode.requiresSecurityKey, !model.securityKeyStepPassed,
+                      !model.securityKeyBusy else { return }
+                Task { await model.unlockWithSecurityKey(pin: "", transport: .usb) }
+            }
+            #endif
             .accessibilityHidden(true)
             Text("Noctweave is locked").font(.title2.weight(.bold))
             Text(model.appLockMessage)
@@ -250,11 +259,12 @@ private struct ClientLockView: View {
                     SecurityKeyPrompt(busy: model.securityKeyBusy, title: "Verify Security Key",
                         requiresUSB: model.appLockSettings.requireSecurityKeyPresence,
                         showCancelWhileIdle: model.automaticKeyPrompt,
+                        credentials: model.appLockSettings.securityKeys,
                         cancel: {
                             // Removing a completed key form must not cancel the following biometric check.
                             if !model.securityKeyStepPassed { model.stopAutomaticUnlock() }
-                        }) { value, transport in
-                        await model.unlockWithSecurityKey(pin: value, transport: transport)
+                        }) { value, transport, legacy in
+                        await model.unlockWithSecurityKey(pin: value, transport: transport, legacy: legacy)
                     }
                 }
                 if model.appLockMode.requiresBiometrics && !model.biometricStepPassed &&

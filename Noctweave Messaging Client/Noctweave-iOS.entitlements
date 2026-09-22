@@ -10,8 +10,6 @@
 	<array>
 		<string>$(AppIdentifierPrefix)com.noctweave.prefetch</string>
 	</array>
-	<key>com.apple.security.smartcard</key>
-	<true/>
 	<key>com.apple.developer.nfc.readersession.formats</key>
 	<array>
 		<string>TAG</string>
