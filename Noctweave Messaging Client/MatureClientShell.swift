@@ -1125,7 +1125,7 @@ private struct MatureConversationView: View {
 
     private func openAttachment(_ descriptor: AttachmentDescriptor) {
         do {
-            attachmentPreview = MatureAttachmentPreview(
+            attachmentPreview = try MatureAttachmentPreview(
                 descriptor: descriptor,
                 data: try model.decryptedAttachmentData(descriptor.id)
             )
@@ -1246,6 +1246,14 @@ private struct MatureMessageBubble: View {
 private struct MatureAttachmentPreview: Identifiable {
     let descriptor: AttachmentDescriptor
     let data: Data
+    let mimeType: String
+
+    init(descriptor: AttachmentDescriptor, data: Data) throws {
+        let sanitized = try AttachmentSanitizer.sanitizePreview(data: data, mimeType: descriptor.mimeType)
+        self.descriptor = descriptor
+        self.data = sanitized.data
+        self.mimeType = sanitized.mimeType
+    }
 
     var id: UUID { descriptor.id }
 }
@@ -1257,11 +1265,11 @@ private struct MatureAttachmentViewer: View {
     var body: some View {
         NavigationStack {
             Group {
-                if preview.descriptor.mimeType.hasPrefix("image/") {
+                if preview.mimeType.hasPrefix("image/") {
                     imageView
-                } else if preview.descriptor.mimeType == "application/pdf" {
+                } else if preview.mimeType == "application/pdf" {
                     InMemoryPDFView(data: preview.data)
-                } else if preview.descriptor.mimeType.hasPrefix("text/"),
+                } else if preview.mimeType.hasPrefix("text/"),
                           let text = String(data: preview.data, encoding: .utf8) {
                     ScrollView {
                         Text(text)
@@ -1327,10 +1335,10 @@ private struct MatureAttachmentViewer: View {
     }
 
     private var attachmentTitle: String {
-        if preview.descriptor.mimeType.hasPrefix("image/") { return "Image" }
-        if preview.descriptor.mimeType == "application/pdf" { return "PDF" }
-        if preview.descriptor.mimeType.hasPrefix("text/") { return "Text Document" }
-        if preview.descriptor.mimeType.hasPrefix("audio/") { return "Audio" }
+        if preview.mimeType.hasPrefix("image/") { return "Image" }
+        if preview.mimeType == "application/pdf" { return "PDF" }
+        if preview.mimeType.hasPrefix("text/") { return "Text Document" }
+        if preview.mimeType.hasPrefix("audio/") { return "Audio" }
         return "Protected File"
     }
 }
@@ -1993,7 +2001,7 @@ private struct MatureFilesView: View {
     private func openOrDownload(_ file: FileRecord) {
         if model.isAttachmentAvailable(file.id) {
             do {
-                attachmentPreview = MatureAttachmentPreview(
+                attachmentPreview = try MatureAttachmentPreview(
                     descriptor: file.descriptor,
                     data: try model.decryptedAttachmentData(file.id)
                 )

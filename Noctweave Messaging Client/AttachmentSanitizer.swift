@@ -1,6 +1,7 @@
 import Foundation
 import PDFKit
 import Compression
+import ImageIO
 import UniformTypeIdentifiers
 
 struct SanitizedAttachmentPayload {
@@ -30,9 +31,64 @@ enum AttachmentSanitizer {
     private static let maxOfficeUncompressedBytes = 64 * 1024 * 1024
     private static let maxOfficeInspectableXMLBytes = 8 * 1024 * 1024
     private static let maxPDFPages = 200
+    private static let maxImageDimension = 12_000
+    private static let maxImagePixels = 40_000_000
+    private static let maxAttachmentBytes = 8 * 1024 * 1024
     // Stay below Core Graphics' implementation-level page-size clamp so the
     // check is observable before PDFKit renders attacker-controlled content.
     private static let maxPDFDimension: CGFloat = 12_000
+
+    /// Treat received and previously cached plaintext as untrusted. Only these
+    /// canonicalized bytes may reach an in-app media/document previewer.
+    static func sanitizePreview(data: Data, mimeType: String) throws -> SanitizedAttachmentPayload {
+        let normalized = normalizeMimeType(mimeType)
+        guard !data.isEmpty, data.count <= maxAttachmentBytes else {
+            throw AttachmentSanitizerError.invalidDocument
+        }
+        if normalized.hasPrefix("image/") {
+            return try sanitizeImage(data: data, mimeType: normalized)
+        }
+        if normalized == "application/pdf" || normalized.hasPrefix("text/") {
+            return try sanitizeDocument(data: data, fileName: nil, mimeType: normalized)
+        }
+        // Unknown and non-previewable formats stay encrypted in storage. Do not
+        // retain their bytes in the presentation model or infer a type from a name.
+        return SanitizedAttachmentPayload(data: Data(), mimeType: normalized)
+    }
+
+    static func sanitizeImage(data: Data, mimeType: String) throws -> SanitizedAttachmentPayload {
+        guard !data.isEmpty, data.count <= maxAttachmentBytes,
+              let source = CGImageSourceCreateWithData(data as CFData,
+                [kCGImageSourceShouldCache: false] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+            throw AttachmentSanitizerError.invalidDocument
+        }
+        let w = width.doubleValue
+        let h = height.doubleValue
+        guard w.isFinite, h.isFinite, w > 0, h > 0,
+              w <= Double(maxImageDimension), h <= Double(maxImageDimension),
+              w * h <= Double(maxImagePixels) else {
+            throw AttachmentSanitizerError.unsafeDocument("Image dimensions exceed the rendering limit.")
+        }
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+              image.width <= maxImageDimension, image.height <= maxImageDimension,
+              image.width * image.height <= maxImagePixels else {
+            throw AttachmentSanitizerError.invalidDocument
+        }
+        let jpeg = normalizeMimeType(mimeType) == "image/jpeg"
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output,
+                (jpeg ? UTType.jpeg.identifier : UTType.png.identifier) as CFString, 1, nil) else {
+            throw AttachmentSanitizerError.invalidDocument
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination), output.length <= maxAttachmentBytes else {
+            throw AttachmentSanitizerError.invalidDocument
+        }
+        return SanitizedAttachmentPayload(data: output as Data, mimeType: jpeg ? "image/jpeg" : "image/png")
+    }
 
     static func sanitizeDocument(data: Data, fileName: String?, mimeType: String) throws -> SanitizedAttachmentPayload {
         let normalizedMime = normalizeMimeType(mimeType)

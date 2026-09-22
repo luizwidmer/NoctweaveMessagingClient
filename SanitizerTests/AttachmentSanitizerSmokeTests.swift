@@ -2,6 +2,8 @@ import CoreGraphics
 import Foundation
 import PDFKit
 import Compression
+import ImageIO
+import UniformTypeIdentifiers
 
 @main
 struct AttachmentSanitizerSmokeTests {
@@ -9,6 +11,13 @@ struct AttachmentSanitizerSmokeTests {
         try testTextAttachmentIsNormalized()
         try testPDFIsRewritten()
         try testPDFWithUnsafeDimensionsIsRejected()
+        try testIncomingPDFPreviewRemovesExternalActions()
+        try testIncomingPDFPreviewRejectsOversizedPages()
+        try testIncomingImagePreviewIsReencoded()
+        try testImageDimensionsAreRejectedBeforeDecode()
+        try testImagePixelBudgetIsRejectedBeforeDecode()
+        try testUnknownPreviewDoesNotExposeBytes()
+        try testIncomingTextPreviewIsNormalized()
         try testDocxMetadataIsDropped()
         try testXlsxIsAccepted()
         try testPptxIsAccepted()
@@ -57,6 +66,126 @@ struct AttachmentSanitizerSmokeTests {
                 mimeType: "application/pdf"
             )
         }
+    }
+
+    private static func testIncomingPDFPreviewRemovesExternalActions() throws {
+        guard let document = PDFDocument(data: try makeSinglePagePDF()), let page = document.page(at: 0) else {
+            throw TestFailure("failed to create malicious-peer PDF fixture")
+        }
+        let link = PDFAnnotation(bounds: CGRect(x: 10, y: 10, width: 150, height: 100), forType: .link, withProperties: nil)
+        link.action = PDFActionURL(url: URL(string: "https://example.invalid/receiver-tracking")!)
+        page.addAnnotation(link)
+        guard let raw = document.dataRepresentation(), let baseline = PDFDocument(data: raw) else {
+            throw TestFailure("failed to encode malicious-peer PDF fixture")
+        }
+        // This is what the former raw-data preview sink accepted. Never activate the URL.
+        try assert(baseline.page(at: 0)?.annotations.contains { $0.action is PDFActionURL } == true,
+                   "the attacker fixture must retain its external action before receiver sanitization")
+        let payload = try AttachmentSanitizer.sanitizePreview(data: raw, mimeType: "application/pdf")
+        guard let sanitized = PDFDocument(data: payload.data) else { throw TestFailure("preview PDF should parse") }
+        try assert(sanitized.pageCount == 1, "safe preview should preserve visible pages")
+        try assert(sanitized.page(at: 0)?.annotations.isEmpty == true, "receiver preview must remove PDF actions")
+    }
+
+    private static func testIncomingPDFPreviewRejectsOversizedPages() throws {
+        let raw = try makeSinglePagePDF(width: 12_001)
+        try assert(PDFDocument(data: raw)?.pageCount == 1, "raw oversized PDF fixture should parse")
+        try expectThrows("cached or received oversized pages must not reach PDFView") {
+            _ = try AttachmentSanitizer.sanitizePreview(data: raw, mimeType: "application/pdf")
+        }
+    }
+
+    private static func makeImageFixture(width: UInt32 = 1, height: UInt32 = 1) throws -> Data {
+        guard let context = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let image = context.makeImage() else { throw TestFailure("image fixture context unavailable") }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else {
+            throw TestFailure("image fixture encoder unavailable")
+        }
+        CGImageDestinationAddImage(destination, image, [kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGComment: "private metadata"]] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { throw TestFailure("image fixture encode failed") }
+        var data = output as Data
+        // Modify only the tiny fixture header; rejection must precede pixel decoding.
+        for (offset, value) in [(16, width), (20, height)] {
+            data.replaceSubrange(offset..<(offset + 4), with: [UInt8((value >> 24) & 255), UInt8((value >> 16) & 255), UInt8((value >> 8) & 255), UInt8(value & 255)])
+        }
+        let checksum = crc32(data.subdata(in: 12..<29))
+        data.replaceSubrange(29..<33, with: [UInt8((checksum >> 24) & 255), UInt8((checksum >> 16) & 255), UInt8((checksum >> 8) & 255), UInt8(checksum & 255)])
+        return data
+    }
+
+    private static func testIncomingImagePreviewIsReencoded() throws {
+        let raw = try makeImageFixture()
+        let payload = try AttachmentSanitizer.sanitizePreview(data: raw, mimeType: "image/png")
+        try assert(payload.mimeType == "image/png", "image preview must declare its reencoded format")
+        try assert(payload.data.range(of: Data("private metadata".utf8)) == nil,
+                   "image preview must strip supplied metadata")
+        guard let source = CGImageSourceCreateWithData(payload.data as CFData, nil) else { throw TestFailure("sanitized image must parse") }
+        try assert(CGImageSourceCreateImageAtIndex(source, 0, nil) != nil, "sanitized image must render")
+    }
+
+    private static func testImageDimensionsAreRejectedBeforeDecode() throws {
+        let raw = try makeImageFixture(width: 12_001)
+        guard let source = CGImageSourceCreateWithData(raw as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            throw TestFailure("dimension bomb fixture should expose metadata")
+        }
+        try assert((props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue == 12_001, "image header must declare oversized width")
+        try expectUnsafe("image dimensions must be bounded before decoding") {
+            _ = try AttachmentSanitizer.sanitizePreview(data: raw, mimeType: "image/png")
+        }
+    }
+
+    private static func testImagePixelBudgetIsRejectedBeforeDecode() throws {
+        let raw = try makePixelBudgetFixture()
+        guard let source = CGImageSourceCreateWithData(raw as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            throw TestFailure("pixel budget fixture should expose metadata")
+        }
+        try assert((props[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue == 7_000,
+                   "pixel budget fixture must declare its real width")
+        try expectUnsafe("individually valid dimensions must also respect total pixel budget") {
+            _ = try AttachmentSanitizer.sanitizeImage(data: raw, mimeType: "image/png")
+        }
+    }
+
+    private static func makePixelBudgetFixture() throws -> Data {
+        // A valid highly compressed 1-bit grayscale PNG: 42 million pixels,
+        // without allocating or decoding a 168 MB RGBA image in the test.
+        let width = 7_000, height = 6_000
+        let rows = Data(repeating: 0, count: height * (1 + (width + 7) / 8))
+        var compressed = Data([0x78, 0x9c])
+        compressed.append(try deflate(rows))
+        // Adler-32 for an all-zero byte stream: A=1, B=count mod 65521.
+        appendBigEndian(UInt32(rows.count % 65_521) << 16 | 1, to: &compressed)
+        var header = Data()
+        appendBigEndian(UInt32(width), to: &header)
+        appendBigEndian(UInt32(height), to: &header)
+        header.append(contentsOf: [1, 0, 0, 0, 0])
+        var png = Data([137, 80, 78, 71, 13, 10, 26, 10])
+        for (name, payload) in [("IHDR", header), ("IDAT", compressed), ("IEND", Data())] {
+            appendBigEndian(UInt32(payload.count), to: &png)
+            let content = Data(name.utf8) + payload
+            png.append(content)
+            appendBigEndian(crc32(content), to: &png)
+        }
+        return png
+    }
+
+    private static func appendBigEndian(_ value: UInt32, to data: inout Data) {
+        data.append(contentsOf: [UInt8((value >> 24) & 255), UInt8((value >> 16) & 255),
+                                UInt8((value >> 8) & 255), UInt8(value & 255)])
+    }
+
+    private static func testUnknownPreviewDoesNotExposeBytes() throws {
+        let payload = try AttachmentSanitizer.sanitizePreview(data: Data("<script>untrusted</script>".utf8), mimeType: "application/octet-stream")
+        try assert(payload.data.isEmpty, "unknown content must not reach a platform previewer")
+    }
+
+    private static func testIncomingTextPreviewIsNormalized() throws {
+        let payload = try AttachmentSanitizer.sanitizePreview(data: Data("test\r\n\u{0000}".utf8), mimeType: "text/html")
+        try assert(payload.mimeType == "text/plain" && payload.data == Data("test\n".utf8), "text preview must use canonical safe text")
     }
 
     private static func testDocxMetadataIsDropped() throws {
@@ -352,6 +481,17 @@ struct AttachmentSanitizerSmokeTests {
         if !condition() {
             throw TestFailure(message)
         }
+    }
+
+    private static func expectUnsafe(_ message: String, _ work: () throws -> Void) throws {
+        do {
+            try work()
+        } catch AttachmentSanitizerError.unsafeDocument {
+            return
+        } catch {
+            throw TestFailure("\(message): must reject header bounds before attempting pixel decoding")
+        }
+        throw TestFailure(message)
     }
 
     private static func expectThrows(_ message: String, _ work: () throws -> Void) throws {

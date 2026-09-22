@@ -242,25 +242,8 @@ enum ClientAttachmentSanitizer {
                 mimeType: sanitized.mimeType
             )
         }
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
-            throw ClientAttachmentWorkflowError.unsupportedPayload
-        }
-        let outputType: CFString = mimeType == "image/jpeg"
-            ? UTType.jpeg.identifier as CFString
-            : UTType.png.identifier as CFString
-        let output = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(output, outputType, 1, nil) else {
-            throw ClientAttachmentWorkflowError.unsupportedPayload
-        }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination) else {
-            throw ClientAttachmentWorkflowError.unsupportedPayload
-        }
-        return ClientSanitizedAttachmentPayload(
-            data: output as Data,
-            mimeType: outputType == UTType.jpeg.identifier as CFString ? "image/jpeg" : "image/png"
-        )
+        let sanitized = try AttachmentSanitizer.sanitizeImage(data: data, mimeType: mimeType)
+        return ClientSanitizedAttachmentPayload(data: sanitized.data, mimeType: sanitized.mimeType)
     }
 
     /// Re-encodes audio into a metadata-free M4A container. The descriptor
@@ -2369,6 +2352,7 @@ final class ClientViewModel: ObservableObject {
             }
 
             var plaintext = Data()
+            defer { plaintext.secureWipeClientAttachment() }
             plaintext.reserveCapacity(descriptor.byteCount)
             for chunkIndex in 0..<descriptor.chunkCount {
                 guard let chunk = chunksByIndex[chunkIndex] else {
@@ -2402,8 +2386,19 @@ final class ClientViewModel: ObservableObject {
                   AttachmentCrypto.sha256(plaintext) == descriptor.sha256 else {
                 throw NoctweaveClientError.invalidAttachment
             }
+            // A valid encrypted message authenticates its sender, not the safety
+            // of its file. Modified peers can skip their outbound sanitizer.
+            let sanitized = try await ClientAttachmentSanitizer.sanitize(
+                data: plaintext,
+                fileName: nil,
+                mimeType: descriptor.mimeType
+            )
+            guard !sanitized.data.isEmpty,
+                  sanitized.data.count <= AttachmentDescriptor.maximumTransportBytes else {
+                throw NoctweaveClientError.invalidAttachment
+            }
             let fileName = try attachmentStore.saveSanitizedAttachment(
-                plaintext,
+                sanitized.data,
                 attachmentId: descriptor.id
             )
             receivedAttachmentFileNames[descriptor.id] = fileName
