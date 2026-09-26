@@ -15,10 +15,47 @@ struct ClientDuressTransitionTests {
         // macOS has no iOS widget access-group entitlement. Its real cleanup
         // path must succeed without attempting to erase that shared Keychain.
         try OpaqueRoutePrefetchBridge.eraseAllLocalState()
+        try checkWidgetSnapshotProtection()
         for interrupted in [false, true] {
             try await checkReplacement(interrupted: interrupted)
         }
         print("Duress transition checks passed: real Keychain rotation, selective attachment retention, durable new password, old-writer fencing, and restart after interrupted cleanup.")
+    }
+
+    @MainActor
+    private static func checkWidgetSnapshotProtection() throws {
+        let suite = "Noctweave.WidgetCipherTests.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let canary = "private-widget-status-\(UUID())"
+        var snapshot = OpaqueRoutePrefetchWidgetSnapshot.empty
+        snapshot.status = canary
+        snapshot.routeCount = 7
+        let key = Data(repeating: 0x31, count: 32)
+        defaults.set(try OpaqueRoutePrefetchBridge.sealWidgetSnapshot(snapshot, keyData: key),
+                     forKey: OpaqueRoutePrefetchBridge.snapshotKey)
+        let persisted = try requireData(defaults.data(forKey: OpaqueRoutePrefetchBridge.snapshotKey))
+        try require(persisted.range(of: Data(canary.utf8)) == nil,
+                    "Widget snapshot persisted plaintext status")
+        let reopened = try OpaqueRoutePrefetchBridge.openWidgetSnapshot(persisted, keyData: key)
+        try require(reopened.status == canary && reopened.routeCount == 7,
+                    "Sealed widget snapshot did not round-trip")
+        do {
+            _ = try OpaqueRoutePrefetchBridge.openWidgetSnapshot(persisted,
+                keyData: Data(repeating: 0x32, count: 32))
+            throw Failure.assertion("Widget snapshot opened with the wrong key")
+        } catch let failure as Failure { throw failure }
+        catch { }
+        do {
+            _ = try OpaqueRoutePrefetchBridge.openWidgetSnapshot(Data(canary.utf8), keyData: key)
+            throw Failure.assertion("Legacy plaintext widget snapshot was accepted")
+        } catch let failure as Failure { throw failure }
+        catch { }
+    }
+
+    private static func requireData(_ data: Data?) throws -> Data {
+        guard let data else { throw Failure.assertion("Widget snapshot was not persisted") }
+        return data
     }
 
     @MainActor
@@ -102,20 +139,29 @@ struct ClientDuressTransitionTests {
         try require(stillPresent?.activePersonaID == reloaded.activePersonaID, "Old session destroyed fresh state")
         let orphan = root.appendingPathComponent("interrupted-write.tmp")
         try Data("orphaned fixture".utf8).write(to: orphan)
+        let groupNameCanary = "reset-group-\(UUID().uuidString)"
+        try storage.groupNameStore.save([scope: groupNameCanary])
+        try require(try storage.groupNameStore.load()[scope] == groupNameCanary,
+                    "Protected group-name fixture was not saved")
         let fullReset = ClientFullReset(storage: storage)
         try fullReset.begin()
+        let resetMarker = storage.stateURL.appendingPathExtension("purge-pending-v1")
+        try require(try Data(contentsOf: resetMarker).isEmpty, "Reset marker persisted plaintext content")
         do {
             try await fullReset.complete { throw Failure.interrupted }
             throw Failure.assertion("Full reset ignored cleanup failure")
         } catch Failure.interrupted { }
         try require(fullReset.isPending, "Full reset intent was lost on failure")
-        try await ClientFullReset(storage: storage).complete(clearSideEffects: {})
+        try await ClientFullReset(storage: storage).complete(clearSideEffects: {
+            try storage.groupNameStore.delete()
+        })
         try require(!fullReset.isPending, "Full reset did not finish")
         try require(!FileManager.default.fileExists(atPath: orphan.path), "Interrupted temporary file survived purge")
         try require(try await storage.stateStore().load() == nil, "Active state survived purge")
         try require(try await transition.pending() == nil, "Replacement state survived purge")
         try require(!FileManager.default.fileExists(atPath: storage.attachmentsURL.path), "Attachments survived purge")
         try require(try await storage.stateStore().isAwaitingFreshState(), "Reset lost rollback tombstone")
+        try require(try storage.groupNameStore.load().isEmpty, "Protected group names survived full reset")
     }
 
     private static func makeRelationship() throws -> PairwiseRelationshipV2 {

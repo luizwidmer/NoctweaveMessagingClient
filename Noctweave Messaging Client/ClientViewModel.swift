@@ -546,8 +546,7 @@ final class ClientViewModel: ObservableObject {
     private var directOffererFlow: ContactPairingOffererFlowV2?
     private var directResponderFlow: ContactPairingResponderFlowV2?
     private var directTemporaryParticipant: PreparedContactParticipantV2?
-    private var failedPINAttempts = 0
-    private var pinLockedUntil: Date?
+    private let unlockRetryLedger: ClientUnlockRetryLedger
     private var backgroundedAt: Date?
     private var settingsAuthorizedUntil: Date?
     private var settingsBiometricAuthorizedUntil: Date?
@@ -589,9 +588,12 @@ final class ClientViewModel: ObservableObject {
     private var activeOperationTask: Task<Void, Never>?
     private var attachmentDownloadsInFlight = Set<UUID>()
     private let notificationManager = ClientNotificationManager()
-    private let onboardingStorageKey = "noctweave.onboarding.storage-protection-ack.v1"
-    private let onboardingPrivacyKey = "noctweave.onboarding.privacy-ack.v1"
-    private let onboardingPersonaKey = "noctweave.onboarding.persona-ack.v1"
+    private static let obsoletePlaintextPreferenceKeys = [
+        "noctweave.appearance.palette",
+        "noctweave.onboarding.storage-protection-ack.v1",
+        "noctweave.onboarding.privacy-ack.v1",
+        "noctweave.onboarding.persona-ack.v1"
+    ]
     private let isUITest: Bool
     private let isUITestReadyState: Bool
     private let isUITestProductFixture: Bool
@@ -631,10 +633,26 @@ final class ClientViewModel: ObservableObject {
             attachmentsURL: support.appendingPathComponent("attachments", isDirectory: true),
             scope: isUITest ? ClientStorageLocationResolver.primaryScopeIdentifier : location.scopeIdentifier,
             usesFixtureKeys: isUITest, usesPlaintextFixture: plaintext, clearsSupportDirectory: !isUITest)
+        #if DEBUG
+        unlockRetryLedger = ClientUnlockRetryLedger(persistence: isUITest
+            ? FileClientUnlockRetryPersistence(url: support.appendingPathComponent("unlock-retry-v1.json"))
+            : KeychainClientUnlockRetryPersistence(scope: storageSession.scope),
+            lockURL: support.appendingPathComponent("unlock-retry-v1.lock"))
+        #else
+        unlockRetryLedger = ClientUnlockRetryLedger(
+            persistence: KeychainClientUnlockRetryPersistence(scope: storageSession.scope),
+            lockURL: support.appendingPathComponent("unlock-retry-v1.lock"))
+        #endif
         stateStore = storageSession.stateStore()
         attachmentStore = storageSession.attachments()
+        // Appearance already lives in encrypted ClientState. Incomplete
+        // onboarding acknowledgements are session-only; discard old plist
+        // duplicates without touching encrypted persona or message data.
+        for key in Self.obsoletePlaintextPreferenceKeys { UserDefaults.standard.removeObject(forKey: key) }
+        #if os(iOS)
+        OpaqueRoutePrefetchBridge.discardLegacyWidgetSnapshotOnLaunch()
+        #endif
         onboardingStorageProtectionAcknowledged = isUITest
-            || UserDefaults.standard.bool(forKey: onboardingStorageKey)
         Task {
             #if DEBUG
             if isUITest && externalUITestStateURL == nil {
@@ -653,6 +671,17 @@ final class ClientViewModel: ObservableObject {
     var activePersona: PersonaProfileV1? {
         guard let state else { return nil }
         return state.personas.first { $0.id == state.activePersonaID }
+    }
+
+    func loadGroupNames() throws -> [String: String] {
+        try storageSession.groupNameStore.load()
+    }
+
+    func saveGroupNames(_ names: [String: String]) throws {
+        guard !isLocked, !duressActivated, !isResetting else {
+            throw ClientGroupNameStoreError.sessionUnavailable
+        }
+        try storageSession.groupNameStore.save(names)
     }
 
     var relationships: [PairwiseRelationshipV2] {
@@ -761,8 +790,7 @@ final class ClientViewModel: ObservableObject {
         if !hasCompletedPersonaOnboarding { return .persona }
         if state.relayPreferences.isEmpty { return .relay }
         if !onboardingStorageProtectionAcknowledged { return .storageProtection }
-        if !onboardingPrivacyCompleted
-                && (isUITest || !UserDefaults.standard.bool(forKey: onboardingPrivacyKey)) {
+        if !onboardingPrivacyCompleted {
             return .privacy
         }
         return .privacy
@@ -770,8 +798,7 @@ final class ClientViewModel: ObservableObject {
 
     var hasCompletedPersonaOnboarding: Bool {
         state?.hasCompletedOnboarding == true
-            || (onboardingPersonaNameSaved
-                || (!isUITest && UserDefaults.standard.bool(forKey: onboardingPersonaKey)))
+            || onboardingPersonaNameSaved
                 && !(activePersona?.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
 
@@ -1024,9 +1051,6 @@ final class ClientViewModel: ObservableObject {
                 persona.displayName = name
             }
             self.onboardingPersonaNameSaved = true
-            if !self.isUITest {
-                UserDefaults.standard.set(true, forKey: self.onboardingPersonaKey)
-            }
         }
     }
 
@@ -1072,9 +1096,6 @@ final class ClientViewModel: ObservableObject {
             guard let self else { return }
             do {
                 try await stateStore.warmUpKeychain()
-                if !isUITest {
-                    UserDefaults.standard.set(true, forKey: onboardingStorageKey)
-                }
                 onboardingStorageProtectionAcknowledged = true
                 statusMessage = "Encrypted local storage is ready."
             } catch {
@@ -1086,9 +1107,6 @@ final class ClientViewModel: ObservableObject {
     func completeOnboardingPrivacy(_ settings: PrivacySettings) async -> Bool {
         guard await savePrivacy(settings) else { return false }
         onboardingPrivacyCompleted = true
-        if !isUITest {
-            UserDefaults.standard.set(true, forKey: onboardingPrivacyKey)
-        }
         return await finishOnboarding()
     }
 
@@ -1119,8 +1137,7 @@ final class ClientViewModel: ObservableObject {
               hasCompletedPersonaOnboarding,
               !(state?.relayPreferences.isEmpty ?? true),
               onboardingStorageProtectionAcknowledged,
-              onboardingPrivacyCompleted
-                || (!isUITest && UserDefaults.standard.bool(forKey: onboardingPrivacyKey)) else {
+              onboardingPrivacyCompleted else {
             settingsError = "Complete each required onboarding step first."
             return false
         }
@@ -2410,6 +2427,15 @@ final class ClientViewModel: ObservableObject {
     }
 
     func lockNow() {
+        // Drop transient plaintext that the lock screen does not need. The
+        // transport state itself remains loaded for background routing and
+        // authentication; retiring that state requires an awaited reopen path.
+        draftMessage = ""
+        groupDraftMessage = ""
+        localSessionPreview = nil
+        receivedAttachmentFileNames = [:]
+        settingsAuthorizedUntil = nil
+        settingsBiometricAuthorizedUntil = nil
         keyPresenceTask?.cancel()
         keyPresenceTask = nil
         activeKeyPresence = nil
@@ -2421,6 +2447,7 @@ final class ClientViewModel: ObservableObject {
         biometricStepPassed = false
         lockError = nil
         isLocked = true
+        SecureStorageKeyProvider.shared.clearProcessCache()
     }
 
     func lockForBackgroundIfConfigured() {
@@ -2552,7 +2579,9 @@ final class ClientViewModel: ObservableObject {
 
     func unlockWithPIN(_ value: String) {
         guard isLocked, !checkingUnlockInput, !duressActivated, value.utf8.count <= 128 else { return }
-        if let deadline = pinLockedUntil, deadline > Date() {
+        do {
+            try unlockRetryLedger.reserveAttempt()
+        } catch {
             lockError = "Unable to unlock. Try again."
             return
         }
@@ -2578,22 +2607,18 @@ final class ClientViewModel: ObservableObject {
         expireUnlockFactors()
         guard isLocked, !duressActivated,
               appLockMode.canAttempt(.pin, completedFactors: completedUnlockFactors) else {
-            recordFailedUnlockInput()
-            return
-        }
-        if let pinLockedUntil, pinLockedUntil > Date() {
-            lockError = "Unable to unlock. Try again."
+            rejectUnlockInput()
             return
         }
         guard let settings = state?.appLock,
               let salt = settings.pinSalt,
               let expected = settings.pinHash,
               matchesStructuredPIN(value, salt: salt, expected: expected) else {
-            recordFailedUnlockInput()
+            rejectUnlockInput()
             return
         }
-        failedPINAttempts = 0
-        pinLockedUntil = nil
+        do { try unlockRetryLedger.reset() }
+        catch { rejectUnlockInput(); return }
         lockError = nil
         finishUnlockIfComplete(additionalFactor: .pin)
     }
@@ -2636,8 +2661,9 @@ final class ClientViewModel: ObservableObject {
         let transition = ClientDuressTransition(storage: storageSession)
         checkingUnlockInput = true
         defer { checkingUnlockInput = false }
-        let names = (UserDefaults.standard.string(forKey: "noctweave.groupNames") ?? "{}").data(using: .utf8)
-            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+        // Name labels are local presentation metadata. A damaged legacy label
+        // store must not prevent a committed duress wipe from starting.
+        let names = (try? storageSession.groupNameStore.load()) ?? [:]
         duressPresentationMode = appLockMode
         duressAppearance = appearanceSettings
         duressPrivacy = privacySettings
@@ -2667,8 +2693,6 @@ final class ClientViewModel: ObservableObject {
                         LocalChatPreview.Message(text: displayText(for: $0), outgoing: $0.authorEndpointHandle == relationship.localEndpointHandle)
                     })
             }
-            let names = (UserDefaults.standard.string(forKey: "noctweave.groupNames") ?? "{}").data(using: .utf8)
-                .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
             let groupChats = groups.map { group in
                 LocalChatPreview(title: names[group.groupId.uuidString.lowercased()] ?? "Private Group",
                     messages: group.events.filter { $0.content.type == .text }.map {
@@ -2707,8 +2731,10 @@ final class ClientViewModel: ObservableObject {
     }
 
     private func clearLocalDuressSideEffects() throws {
+        unlockRetryLedger.discardAfterLocalTransition()
         notificationManager.stop()
         try OpaqueRoutePrefetchBridge.eraseAllLocalState()
+        try storageSession.groupNameStore.delete()
         if !isUITest, let identifier = Bundle.main.bundleIdentifier {
             let temporary = FileManager.default.temporaryDirectory
             for name in ["NoctweavePairingShares", "NoctweaveAttachmentSanitize"] {
@@ -2722,7 +2748,7 @@ final class ClientViewModel: ObservableObject {
             UserDefaults.standard.removePersistentDomain(forName: identifier)
         } else {
             // Test profiles never clear the manual review or production domains.
-            for key in [onboardingStorageKey, onboardingPrivacyKey, onboardingPersonaKey, "noctweave.groupNames"] {
+            for key in Self.obsoletePlaintextPreferenceKeys + ["noctweave.groupNames"] {
                 UserDefaults.standard.removeObject(forKey: key)
             }
         }
@@ -2731,8 +2757,7 @@ final class ClientViewModel: ObservableObject {
 
     var decoyChatChoices: [(selection: AppLockDecoyChat, title: String, persona: String)] {
         guard let state else { return [] }
-        let names = (UserDefaults.standard.string(forKey: "noctweave.groupNames") ?? "{}").data(using: .utf8)
-            .flatMap { try? JSONDecoder().decode([String: String].self, from: $0) } ?? [:]
+        let names = (try? storageSession.groupNameStore.load()) ?? [:]
         return state.personas.flatMap { persona in
             persona.relationships.map {
                 (AppLockDecoyChat(personaID: persona.id, kind: .relationship, chatID: $0.id), $0.peerIdentity.relationshipPseudonym, persona.displayName)
@@ -2751,12 +2776,7 @@ final class ClientViewModel: ObservableObject {
 
     var usesUnlockPassword: Bool { ClientUnlockCredentialPolicy.usesPassword || appLockSettings.pinHash.map(AppLockPasswordV1.isRecord) == true }
 
-    private func recordFailedUnlockInput() {
-        failedPINAttempts += 1
-        if failedPINAttempts >= 5 {
-            pinLockedUntil = Date().addingTimeInterval(30)
-            failedPINAttempts = 0
-        }
+    private func rejectUnlockInput() {
         lockError = "Unable to unlock. Try again."
     }
 

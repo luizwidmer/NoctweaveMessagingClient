@@ -104,9 +104,10 @@ enum SecureRegularFileIO {
         _ data: Data,
         to fileURL: URL,
         maximumBytes: Int,
-        excludedFromBackup: Bool = true
+        excludedFromBackup: Bool = true,
+        allowEmpty: Bool = false
     ) throws {
-        guard maximumBytes >= 0, !data.isEmpty, data.count <= maximumBytes else {
+        guard maximumBytes >= 0, (allowEmpty || !data.isEmpty), data.count <= maximumBytes else {
             throw SecureRegularFileIOError.tooLarge
         }
         let directoryURL = fileURL.deletingLastPathComponent()

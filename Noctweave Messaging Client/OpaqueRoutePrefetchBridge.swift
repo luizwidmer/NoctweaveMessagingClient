@@ -24,7 +24,7 @@ private struct OpaqueRoutePrefetchSealedFileV1: Codable {
     let ciphertext: Data
 }
 
-private struct OpaqueRoutePrefetchWidgetSnapshot: Codable {
+struct OpaqueRoutePrefetchWidgetSnapshot: Codable {
     var updatedAt: Date
     var isFetching: Bool
     var lastAttemptAt: Date?
@@ -54,6 +54,7 @@ enum OpaqueRoutePrefetchBridge {
     static let maximumRoutes = 256
     static let maximumConfigBytes = 2 * 1_024 * 1_024
     static let authenticatedData = Data("NOCTWEAVE/OPAQUE-ROUTE-PREFETCH-CONFIG/V1".utf8)
+    private static let snapshotAAD = Data("NOCTWEAVE/SYNC-WIDGET-SNAPSHOT/V1".utf8)
 
     private static let keychainService = "com.noctweave.opaque-route-prefetch"
     private static let keychainAccount = "route-prefetch-key-v1"
@@ -128,7 +129,7 @@ enum OpaqueRoutePrefetchBridge {
         if FileManager.default.fileExists(atPath: batches.path) {
             try? FileManager.default.removeItem(at: batches)
         }
-        updateWidgetAppearance(state.appearance.theme)
+        try updateWidgetAppearance(state.appearance.theme, keyData: keyData)
     }
 
     static func eraseAllLocalState() throws {
@@ -159,21 +160,49 @@ enum OpaqueRoutePrefetchBridge {
         #endif
     }
 
-    private static func updateWidgetAppearance(_ palette: ThemePalette) {
+    static func discardLegacyWidgetSnapshotOnLaunch() {
+        guard !isUITesting else { return }
         let defaults = UserDefaults(suiteName: appGroupIdentifier)
-        let snapshot = defaults?
+        guard let stored = defaults?.data(forKey: snapshotKey) else { return }
+        let opened = (try? loadKeyData()).flatMap { keyData in
+            try? openWidgetSnapshot(stored, keyData: keyData)
+        }
+        if opened == nil { defaults?.removeObject(forKey: snapshotKey) }
+    }
+
+    private static func updateWidgetAppearance(_ palette: ThemePalette, keyData: Data) throws {
+        let defaults = UserDefaults(suiteName: appGroupIdentifier)
+        let opened = defaults?
             .data(forKey: snapshotKey)
-            .flatMap { try? JSONDecoder().decode(OpaqueRoutePrefetchWidgetSnapshot.self, from: $0) }
-            ?? .empty
-        guard snapshot.paletteRawValue != palette.rawValue else { return }
+            .flatMap { try? openWidgetSnapshot($0, keyData: keyData) }
+        let snapshot = opened ?? .empty
+        guard opened == nil || snapshot.paletteRawValue != palette.rawValue else { return }
         var updated = snapshot
         updated.paletteRawValue = palette.rawValue
         updated.updatedAt = Date()
-        guard let data = try? JSONEncoder().encode(updated) else { return }
-        defaults?.set(data, forKey: snapshotKey)
+        let sealed = try sealWidgetSnapshot(updated, keyData: keyData)
+        defaults?.set(sealed, forKey: snapshotKey)
         #if os(iOS)
         WidgetCenter.shared.reloadTimelines(ofKind: "NoctweaveSyncDashboardWidget")
         #endif
+    }
+
+    static func sealWidgetSnapshot(_ snapshot: OpaqueRoutePrefetchWidgetSnapshot,
+                                   keyData: Data) throws -> Data {
+        var data = try JSONEncoder().encode(snapshot)
+        defer { data.wipePrefetchBytes() }
+        guard data.count <= 16 * 1_024,
+              let sealed = try AES.GCM.seal(data, using: SymmetricKey(data: keyData),
+                  authenticating: snapshotAAD).combined else { throw PrefetchBridgeError.encryptionFailed }
+        return sealed
+    }
+
+    static func openWidgetSnapshot(_ stored: Data, keyData: Data) throws -> OpaqueRoutePrefetchWidgetSnapshot {
+        guard stored.count <= 16 * 1_024 + 28 else { throw PrefetchBridgeError.configTooLarge }
+        var plaintext = try AES.GCM.open(AES.GCM.SealedBox(combined: stored),
+            using: SymmetricKey(data: keyData), authenticating: snapshotAAD)
+        defer { plaintext.wipePrefetchBytes() }
+        return try JSONDecoder().decode(OpaqueRoutePrefetchWidgetSnapshot.self, from: plaintext)
     }
 
     private static func sharedDirectory() throws -> URL {

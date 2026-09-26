@@ -31,9 +31,34 @@ final class NoctweaveUITests: XCTestCase {
             app.launchArguments += ["UI_TESTING_LOCK_FIXTURE", "pinOnly"]
             if name.contains("SelectedChats") { app.launchArguments += ["UI_TESTING_PRODUCT_FIXTURE"] }
         }
+        if name.contains("testPINCooldown") {
+            app.launchArguments += ["UI_TESTING_LOCK_FIXTURE", "pinOnly"]
+        }
         app.launch()
         app.activate()
         ensurePrimaryWindow()
+    }
+
+    func testPINCooldownSurvivesRelaunch() {
+        let pin = app.secureTextFields["unlock.pin"]
+        XCTAssertTrue(pin.waitForExistence(timeout: 10))
+        for _ in 0..<5 {
+            pin.tap(); pin.typeText("000000")
+            app.buttons["unlock.submitPIN"].tap()
+            XCTAssertTrue(app.staticTexts["Noctweave is locked"].exists)
+        }
+        app.terminate()
+        app.launchArguments.removeAll { $0 == "UI_TESTING_RESET_STATE" }
+        app.launch()
+        app.activate()
+        ensurePrimaryWindow()
+        let relaunchPIN = app.secureTextFields["unlock.pin"]
+        XCTAssertTrue(relaunchPIN.waitForExistence(timeout: 10))
+        relaunchPIN.tap(); relaunchPIN.typeText("123456")
+        app.buttons["unlock.submitPIN"].tap()
+        XCTAssertTrue(app.staticTexts["Noctweave is locked"].exists,
+            "Restarting Noctweave must not clear the retry delay.")
+        XCTAssertFalse(app.buttons["You"].exists)
     }
 
     func testHiddenKeyKeepsPINVisibleWithoutAllowingPINBypass() {

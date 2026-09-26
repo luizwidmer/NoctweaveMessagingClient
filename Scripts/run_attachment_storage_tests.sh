@@ -28,6 +28,7 @@ xcrun swiftc -D DEBUG -parse-as-library \
   -I "$CORE_BIN/Modules" -I "$OQS_ROOT/Headers" \
   "$CLIENT_ROOT/Noctweave Messaging Client/SecureRegularFileIO.swift" \
   "$CLIENT_ROOT/Noctweave Messaging Client/ClientAttachmentStore.swift" \
+  "$CLIENT_ROOT/Noctweave Messaging Client/ClientGroupNameStore.swift" \
   "$CLIENT_ROOT/Noctweave Messaging Client/ClientDuressTransition.swift" \
   "$CLIENT_ROOT/Noctweave Messaging Client/NoctweaveUITestRuntime.swift" \
   "$CLIENT_ROOT/Noctweave Messaging Client/OpaqueRoutePrefetchBridge.swift" \

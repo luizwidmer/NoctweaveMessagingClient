@@ -34,9 +34,6 @@ private struct NoctweaveSyncTimelineEntry: TimelineEntry {
 }
 
 private struct NoctweaveSyncTimelineProvider: TimelineProvider {
-    private let appGroupIdentifier = "group.com.noctweave.client"
-    private let snapshotKey = "NoctweaveSyncDashboardSnapshot"
-
     func placeholder(in context: Context) -> NoctweaveSyncTimelineEntry {
         NoctweaveSyncTimelineEntry(date: Date(), snapshot: .empty)
     }
@@ -51,13 +48,7 @@ private struct NoctweaveSyncTimelineProvider: TimelineProvider {
     }
 
     private func loadSnapshot() -> NoctweaveSyncWidgetSnapshot {
-        guard
-            let payload = UserDefaults(suiteName: appGroupIdentifier)?.data(forKey: snapshotKey),
-            let snapshot = try? JSONDecoder().decode(NoctweaveSyncWidgetSnapshot.self, from: payload)
-        else {
-            return .empty
-        }
-        return snapshot
+        OpaqueRouteWidgetStore.readSnapshot()
     }
 }
 

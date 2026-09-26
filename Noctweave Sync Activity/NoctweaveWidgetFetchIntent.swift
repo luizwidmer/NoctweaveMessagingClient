@@ -57,12 +57,13 @@ private enum OpaqueRouteWidgetError: Error {
     case relayRejected
 }
 
-private struct OpaqueRouteWidgetStore {
+struct OpaqueRouteWidgetStore {
     static let appGroupIdentifier = "group.com.noctweave.client"
     static let snapshotKey = "NoctweaveSyncDashboardSnapshot"
     static let maximumRoutes = 256
     static let maximumConfigBytes = 2 * 1_024 * 1_024
     static let authenticatedData = Data("NOCTWEAVE/OPAQUE-ROUTE-PREFETCH-CONFIG/V1".utf8)
+    private static let snapshotAAD = Data("NOCTWEAVE/SYNC-WIDGET-SNAPSHOT/V1".utf8)
 
     private static let keychainService = "com.noctweave.opaque-route-prefetch"
     private static let keychainAccount = "route-prefetch-key-v1"
@@ -83,7 +84,7 @@ private struct OpaqueRouteWidgetStore {
         batchesDirectory = directory.appendingPathComponent("batches", isDirectory: true)
     }
 
-    func loadConfig() throws -> OpaqueRoutePrefetchConfigV1? {
+    fileprivate func loadConfig() throws -> OpaqueRoutePrefetchConfigV1? {
         guard var stored = try readBoundedPrivateConfig(
             from: configURL,
             maximumBytes: Self.maximumConfigBytes
@@ -183,16 +184,25 @@ private struct OpaqueRouteWidgetStore {
     }
 
     static func readSnapshot() -> NoctweaveSyncWidgetSnapshot {
-        guard let data = UserDefaults(suiteName: appGroupIdentifier)?.data(forKey: snapshotKey),
-              let snapshot = try? JSONDecoder().decode(NoctweaveSyncWidgetSnapshot.self, from: data) else {
+        guard let stored = UserDefaults(suiteName: appGroupIdentifier)?.data(forKey: snapshotKey),
+              stored.count <= 16 * 1_024 + 28,
+              let keyData = try? OpaqueRouteWidgetStore().loadKeyData(),
+              var plaintext = try? AES.GCM.open(AES.GCM.SealedBox(combined: stored),
+                  using: SymmetricKey(data: keyData), authenticating: snapshotAAD),
+              let snapshot = try? JSONDecoder().decode(NoctweaveSyncWidgetSnapshot.self, from: plaintext) else {
             return .empty
         }
+        defer { plaintext.wipeWidgetBytes() }
         return snapshot
     }
 
     static func writeSnapshot(_ snapshot: NoctweaveSyncWidgetSnapshot) {
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
-        UserDefaults(suiteName: appGroupIdentifier)?.set(data, forKey: snapshotKey)
+        guard var data = try? JSONEncoder().encode(snapshot), data.count <= 16 * 1_024,
+              let keyData = try? OpaqueRouteWidgetStore().loadKeyData(),
+              let sealed = try? AES.GCM.seal(data, using: SymmetricKey(data: keyData),
+                  authenticating: snapshotAAD).combined else { return }
+        defer { data.wipeWidgetBytes() }
+        UserDefaults(suiteName: appGroupIdentifier)?.set(sealed, forKey: snapshotKey)
         WidgetCenter.shared.reloadTimelines(ofKind: "NoctweaveSyncDashboardWidget")
     }
 

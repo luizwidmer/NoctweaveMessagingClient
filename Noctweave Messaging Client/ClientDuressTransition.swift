@@ -14,6 +14,10 @@ struct ClientStorageSession {
     let usesPlaintextFixture: Bool
     var clearsSupportDirectory = false
 
+    var groupNameStore: ClientGroupNameStore {
+        ClientGroupNameStore(stateURL: stateURL, scope: scope)
+    }
+
     func stateStore(action: AppLockDuressAction? = nil) -> ClientStateStore {
         let url = action.map { stateURL.deletingLastPathComponent().appendingPathComponent("replacement-\($0.rawValue).nwstate") } ?? stateURL
         let identifier = scope + (action.map { ".replacement.\($0.rawValue)" } ?? "")
@@ -47,7 +51,7 @@ struct ClientFullReset {
 
     func begin() throws {
         try FileManager.default.createDirectory(at: markerURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try SecureRegularFileIO.writePrivate(Data("purge-v1".utf8), to: markerURL, maximumBytes: 64)
+        try SecureRegularFileIO.writePrivate(Data(), to: markerURL, maximumBytes: 0, allowEmpty: true)
     }
 
     func complete(clearSideEffects: () throws -> Void) async throws {
@@ -185,10 +189,7 @@ final class ClientDuressTransition {
         }
         let freshState = storage.stateStore()
         try await freshState.save(replacement, replacing: nil)
-        if !manifest.groupNames.isEmpty {
-            let names = try JSONEncoder().encode(manifest.groupNames)
-            UserDefaults.standard.set(String(decoding: names, as: UTF8.self), forKey: "noctweave.groupNames")
-        }
+        if !manifest.groupNames.isEmpty { try storage.groupNameStore.save(manifest.groupNames) }
         // Until this tombstone commits, restart repeats cleanup and installation
         // from the immutable staging state. No messaging session is opened yet.
         let journal = storage.stateStore(action: action)

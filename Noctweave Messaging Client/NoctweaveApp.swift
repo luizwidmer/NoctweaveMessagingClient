@@ -7,19 +7,11 @@ struct NoctweaveApp: App {
     @StateObject private var support = AppSupportStore.shared
 
     @StateObject private var session = ClientApplicationSession()
-    @AppStorage("noctweave.appearance.palette") private var paletteRaw = ThemePalette.noir.rawValue
-
-    private var theme: ThemeStyle {
-        ThemeStyle(palette: ThemePalette(rawValue: paletteRaw) ?? .noir)
-    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView(model: session.model)
+            NoctweaveThemedRoot(model: session.model)
                 .id(ObjectIdentifier(session.model))
-                .environment(\.appTheme, theme)
-                .preferredColorScheme(theme.preferredColorScheme)
-                .tint(theme.accent)
                 .onOpenURL { PairingInvitationInbox.shared.receive(url: $0) }
                 #if os(macOS)
                 .frame(minWidth: 860, minHeight: 560)
@@ -30,6 +22,19 @@ struct NoctweaveApp: App {
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .defaultSize(width: 1_120, height: 720)
         #endif
+    }
+}
+
+private struct NoctweaveThemedRoot: View {
+    @ObservedObject var model: ClientViewModel
+
+    private var theme: ThemeStyle { ThemeStyle(palette: model.appearanceSettings.theme) }
+
+    var body: some View {
+        ContentView(model: model)
+            .environment(\.appTheme, theme)
+            .preferredColorScheme(theme.preferredColorScheme)
+            .tint(theme.accent)
     }
 }
 

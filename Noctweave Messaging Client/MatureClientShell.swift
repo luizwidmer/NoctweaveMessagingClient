@@ -83,9 +83,11 @@ struct MatureClientShell: View {
     @EnvironmentObject private var windowController: AppWindowController
     #endif
 
-    @AppStorage("noctweave.appearance.palette") private var paletteRaw = ThemePalette.noir.rawValue
+    @State private var paletteRaw = ThemePalette.noir.rawValue
     @State private var preferredRelay = ""
-    @AppStorage("noctweave.groupNames") private var groupNamesJSON = "{}"
+    @State private var groupNames: [String: String] = [:]
+    @State private var groupNamesLoaded = false
+    @State private var groupNameStorageError: String?
     @State private var destination: ClientDestination = .chats
     @State private var compactRoute: CompactConversationRoute?
     @State private var showingPairing = false
@@ -161,10 +163,27 @@ struct MatureClientShell: View {
         }
         .onAppear {
             syncPreferredRelayFromModel()
+            paletteRaw = model.appearanceSettings.theme.rawValue
+            do {
+                groupNames = try model.loadGroupNames()
+                groupNamesLoaded = true
+                groupNameStorageError = nil
+            } catch {
+                groupNamesLoaded = false
+                groupNameStorageError = error.localizedDescription
+            }
             if pairingInbox.hasPendingItem { showingPairing = true }
             #if os(macOS)
             windowController.setBlockWindowCapture(model.privacySettings.macBlockWindowCapture)
             #endif
+        }
+        .alert("Group names unavailable", isPresented: Binding(
+            get: { groupNameStorageError != nil },
+            set: { if !$0 { groupNameStorageError = nil } }
+        )) {
+            Button("OK") { groupNameStorageError = nil }
+        } message: {
+            Text(groupNameStorageError ?? "Unlock Keychain access and retry.")
         }
         .onChange(of: pairingInbox.revision) { _, _ in
             showingPairing = true
@@ -174,6 +193,9 @@ struct MatureClientShell: View {
         }
         .onChange(of: model.state?.relayPreferences) { _, _ in
             syncPreferredRelayFromModel()
+        }
+        .onChange(of: model.appearanceSettings.theme) { _, palette in
+            paletteRaw = palette.rawValue
         }
         #if os(macOS)
         .onChange(of: model.privacySettings.macBlockWindowCapture) { _, blocked in
@@ -574,17 +596,18 @@ struct MatureClientShell: View {
     }
 
     private func groupName(for group: GroupRuntimeRecord) -> String {
-        let names = (try? JSONDecoder().decode([String: String].self, from: Data(groupNamesJSON.utf8))) ?? [:]
-        return names[group.groupId.uuidString.lowercased()] ?? "Private Group"
+        groupNames[group.groupId.uuidString.lowercased()] ?? "Private Group"
     }
 
     private func saveGroupName(_ name: String, _ id: UUID) {
-        var names = (try? JSONDecoder().decode([String: String].self, from: Data(groupNamesJSON.utf8))) ?? [:]
-        names[id.uuidString.lowercased()] = name
-        if let data = try? JSONEncoder().encode(names),
-           let value = String(data: data, encoding: .utf8) {
-            groupNamesJSON = value
+        guard groupNamesLoaded else {
+            groupNameStorageError = "Protected group names are unavailable. Restart after unlocking Keychain access."
+            return
         }
+        var names = groupNames
+        names[id.uuidString.lowercased()] = name
+        do { try model.saveGroupNames(names); groupNames = names }
+        catch { groupNameStorageError = error.localizedDescription }
     }
 }
 

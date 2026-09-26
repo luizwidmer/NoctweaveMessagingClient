@@ -135,7 +135,7 @@ After authorizing App Security settings, configure up to four distinct passwords
 - **Show chats and destroy local keys:** retain a temporary, read-only text view of the active persona's direct and group chats, destroy local decryption keys, and stop real messaging. The view disappears when the process closes.
 - **Open a decoy:** show an empty, separate local view while the real session stays locked. Restart the app to authenticate normally.
 
-Duress passwords are accepted through the ordinary PIN field before security-key or biometric checks. They never satisfy normal authentication or grant access to the real client. Five rejected inputs cause a 30-second lockout. Destructive actions require an explicit acknowledgement during configuration; existing legacy action plans remain inactive until recreated. Passwords use salted, domain-separated PBKDF2 verifiers and are stored inside the encrypted app settings.
+Duress passwords are accepted through the ordinary PIN field before security-key or biometric checks. They never satisfy normal authentication or grant access to the real client. Five rejected inputs cause a 30-second lockout that survives app restarts. Destructive actions require an explicit acknowledgement during configuration; existing legacy action plans remain inactive until recreated. Passwords use salted, domain-separated PBKDF2 verifiers and are stored inside the encrypted app settings.
 
 Attachment files are migrated to an installation-scoped key before a destructive plan can be saved. Erasure retires the state and attachment stores so queued writes cannot recreate their keys.
 
