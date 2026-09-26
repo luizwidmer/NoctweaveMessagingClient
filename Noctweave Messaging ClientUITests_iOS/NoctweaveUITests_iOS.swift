@@ -431,6 +431,9 @@ final class NoctweaveUITests_iOS: XCTestCase {
         XCTAssertFalse(next.isEnabled)
         XCTAssertTrue(app.staticTexts["Use exactly six digits."].exists)
         pin.typeText("5")
+        // On iPad the software keyboard can cover the confirmation field until
+        // the onboarding scroll view moves it above the keyboard.
+        app.scrollViews.firstMatch.swipeUp()
         confirmation.tap(); confirmation.typeText("01234")
         XCTAssertFalse(next.isEnabled)
         confirmation.typeText("5")
