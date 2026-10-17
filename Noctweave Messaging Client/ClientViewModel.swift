@@ -468,8 +468,18 @@ final class ClientViewModel: ObservableObject {
     #endif
     @Published private(set) var bootState: ClientBootState = .loading
     @Published private(set) var state: ClientState?
-    @Published var selectedRelationshipID: UUID?
-    @Published var selectedGroupID: UUID?
+    // Drafts are ephemeral, as on persona changes and locking. A different
+    // conversation must not inherit the previous recipient's unsent plaintext.
+    @Published var selectedRelationshipID: UUID? {
+        didSet {
+            if selectedRelationshipID != oldValue { draftMessage = "" }
+        }
+    }
+    @Published var selectedGroupID: UUID? {
+        didSet {
+            if selectedGroupID != oldValue { groupDraftMessage = "" }
+        }
+    }
     @Published var draftMessage = ""
     @Published var groupDraftMessage = ""
     @Published private(set) var isWorking = false
@@ -1211,7 +1221,7 @@ final class ClientViewModel: ObservableObject {
             return
         }
         runStateMutation(label: "Deleting inactive persona…") { state in
-            state = try Self.stateByRemovingPersona(personaID, from: state)
+            try state.removePersona(personaID)
         }
     }
 
@@ -1328,7 +1338,8 @@ final class ClientViewModel: ObservableObject {
         guard !text.isEmpty, let relationshipID = selectedRelationshipID else { return }
         runOperation(label: "Sending…") { client in
             _ = try await client.sendText(text, relationshipID: relationshipID)
-            if self.draftMessage.trimmingCharacters(in: .whitespacesAndNewlines) == text {
+            if self.selectedRelationshipID == relationshipID,
+               self.draftMessage.trimmingCharacters(in: .whitespacesAndNewlines) == text {
                 self.draftMessage = ""
             }
             self.statusMessage = "Message persisted and submitted through opaque routes."
@@ -1340,7 +1351,8 @@ final class ClientViewModel: ObservableObject {
         guard !text.isEmpty, let groupID = selectedGroupID else { return }
         runOperation(label: "Sending group event…") { client in
             let result = try await client.sendGroupText(groupID: groupID, text: text)
-            if self.groupDraftMessage.trimmingCharacters(in: .whitespacesAndNewlines) == text {
+            if self.selectedGroupID == groupID,
+               self.groupDraftMessage.trimmingCharacters(in: .whitespacesAndNewlines) == text {
                 self.groupDraftMessage = ""
             }
             self.statusMessage = result.complete
@@ -1559,13 +1571,31 @@ final class ClientViewModel: ObservableObject {
 
     func maintainSelectedGroup() {
         guard let groupID = selectedGroupID else { return }
-        runOperation(label: "Maintaining group routes…") { client in
-            let report = try await client.maintainGroup(groupID: groupID)
-            let value = report.requiresFollowUp
-                ? "Durable group transport still has queued retries."
-                : "Group routes and pending transport are healthy."
+        runOperation(label: "Refreshing group messages and routes…") { client in
+            let result = await ClientGroupRefresh.run {
+                try await client.maintainGroup(groupID: groupID).requiresFollowUp
+            } sync: {
+                let batches = try await client.syncGroup(groupID: groupID)
+                return (
+                    batches.reduce(0) { $0 + $1.receivedEvents.count },
+                    batches.contains(where: \.hasMore)
+                )
+            }
+            let value: String
+            if let error = result.maintenanceError {
+                value = "Maintenance unavailable: \(self.describe(error))"
+            } else {
+                value = result.requiresFollowUp
+                    ? "Durable group transport still has queued retries."
+                    : "Group routes and pending transport are healthy."
+            }
             self.groupMaintenanceStatus[groupID] = value
-            self.statusMessage = value
+            if let error = result.syncError ?? result.maintenanceError {
+                self.statusMessage = "Group refresh completed with partial relay availability: \(self.describe(error))"
+            } else {
+                self.statusMessage = "Group refresh complete. \(result.receivedEventCount) new event\(result.receivedEventCount == 1 ? "" : "s"). "
+                    + (result.hasMore ? "Refresh again for additional events." : value)
+            }
         }
     }
 
@@ -3467,73 +3497,6 @@ final class ClientViewModel: ObservableObject {
             receivedAt: createdAt
         )
         return try pending.activate(createdRoute: route)
-    }
-
-    private static func stateByRemovingPersona(
-        _ personaID: UUID,
-        from original: ClientState
-    ) throws -> ClientState {
-        let retained = original.personas.filter { $0.id != personaID }
-        guard !retained.isEmpty,
-              let originalActive = original.personas.first(where: { $0.id == original.activePersonaID }),
-              retained.contains(where: { $0.id == original.activePersonaID }) else {
-            throw ClientStateError.invalidState
-        }
-        var rebuilt = try ClientState(
-            displayName: retained[0].displayName,
-            relayPreferences: original.relayPreferences,
-            relaySourcePreferences: original.relaySourcePreferences,
-            appearance: original.appearance,
-            privacy: original.privacy,
-            appLock: original.appLock,
-            chatList: original.chatList,
-            relayCertificatePins: original.relayCertificatePins,
-            hasCompletedOnboarding: original.hasCompletedOnboarding,
-            hasAcceptedPrivacyPolicy: original.hasAcceptedPrivacyPolicy,
-            hasAcceptedTermsOfUse: original.hasAcceptedTermsOfUse,
-            createdAt: retained[0].createdAt
-        )
-        var replacementIDs: [UUID: UUID] = [retained[0].id: rebuilt.activePersonaID]
-        for persona in retained.dropFirst() {
-            let replacement = try rebuilt.addPersona(
-                displayName: persona.displayName,
-                createdAt: persona.createdAt
-            )
-            replacementIDs[persona.id] = replacement.id
-        }
-        for (sourcePersonaID, relayPreferenceID) in original.preferredRelayPreferenceIDsByPersonaID {
-            guard let replacementID = replacementIDs[sourcePersonaID] else { continue }
-            try rebuilt.setPreferredRelayPreference(
-                relayPreferenceID,
-                forPersonaID: replacementID
-            )
-        }
-        for sourcePersonaID in original.archivedPersonaIDs {
-            guard let replacementID = replacementIDs[sourcePersonaID] else { continue }
-            try rebuilt.archivePersona(replacementID)
-        }
-        for persona in retained {
-            guard let replacementID = replacementIDs[persona.id] else {
-                throw ClientStateError.invalidState
-            }
-            try rebuilt.selectPersona(replacementID)
-            try rebuilt.updateActivePersona { destination in
-                for relationship in persona.relationships {
-                    try destination.upsert(relationship: relationship)
-                }
-                for group in persona.groupRuntimes {
-                    try destination.upsert(groupRuntime: group)
-                }
-                for admission in persona.pendingGroupAdmissions {
-                    try destination.insert(pendingGroupAdmission: admission)
-                }
-            }
-        }
-        guard let replacementActiveID = replacementIDs[originalActive.id] else {
-            throw ClientStateError.invalidState
-        }
-        try rebuilt.selectPersona(replacementActiveID)
-        return rebuilt
     }
 
     private func beginPairingRelayCheck(
