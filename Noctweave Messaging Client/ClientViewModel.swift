@@ -2313,6 +2313,11 @@ final class ClientViewModel: ObservableObject {
     }
 
     func decryptedAttachmentData(_ attachmentID: UUID) throws -> Data {
+        // Downloads may finish after the lock screen replaces their view.
+        // Keep that late callback from opening a local encrypted copy.
+        guard !isLocked, !duressActivated, !isResetting else {
+            throw NoctweaveClientError.unavailable
+        }
         guard let fileName = receivedAttachmentFileNames[attachmentID]
                 ?? attachmentStore.existingFileName(attachmentId: attachmentID) else {
             throw NoctweaveClientError.invalidAttachment
